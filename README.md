@@ -6,7 +6,32 @@
 
 </div>
 
+```mermaid
+flowchart TD
+    A[User opens UAC Spoofer Android] --> B[Import / select VLESS or Trojan config]
+    A --> C[Run SNI Scanner]
 
+    C --> D[Test SNI domains]
+    D --> E[Measure ping / connection result]
+    E --> F[Select best low-ping config]
+
+    B --> G[Generate internal Xray config]
+    F --> G
+
+    G --> H[Start Xray Core]
+    H --> I[Start local proxy]
+
+    I --> J[Start Android VPN Service]
+    J --> K[tun2socks routes device traffic]
+
+    K --> L[Traffic goes through Xray tunnel]
+    L --> M[Remote server / internet]
+
+    H --> N[Live logs]
+    J --> N
+    D --> N
+    N --> O[User sees status, errors, start/stop logs]
+```
 
 
 این پوشه شامل پروژه اصلی Android برنامه UAC Spoofer است. برنامه با Java و Android Gradle Plugin ساخته شده و برای اجرای کانفیگ‌های VLESS و Trojan، راه‌اندازی Xray، ایجاد VPN tunnel محلی و مدیریت SNI Spoofing استفاده می‌شود.
