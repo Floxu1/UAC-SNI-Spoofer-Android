@@ -1,0 +1,65 @@
+plugins {
+    id "com.android.application"
+}
+
+def signingPropsFile = rootProject.file("signing.properties")
+def signingProps = new Properties()
+if (signingPropsFile.exists()) {
+    signingProps.load(new FileInputStream(signingPropsFile))
+}
+
+android {
+    namespace "com.uac.spoofer"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.uac.spoofer"
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        release {
+            if (signingPropsFile.exists()) {
+                storeFile rootProject.file(signingProps["storeFile"])
+                storePassword signingProps["storePassword"]
+                keyAlias signingProps["keyAlias"]
+                keyPassword signingProps["keyPassword"]
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing false
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            debuggable false
+            if (signingPropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+        resources {
+            excludes += [
+                    "META-INF/com/android/build/gradle/app-metadata.properties",
+                    "META-INF/version-control-info.textproto"
+            ]
+        }
+    }
+}
+
