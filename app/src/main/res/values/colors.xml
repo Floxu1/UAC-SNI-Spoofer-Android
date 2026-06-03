@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#1F2933</color>
+    <color name="muted">#607D8B</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="line">#D6E2EA</color>
+    <color name="accent">#1976D2</color>
+    <color name="accent_green">#00A676</color>
+    <color name="danger">#E53935</color>
+    <color name="log_bg">#10243A</color>
+    <color name="page_bg">#F4F7FA</color>
+    <color name="chip_bg">#F4F7FA</color>
+    <color name="chip_line">#DDE7EE</color>
+    <color name="input_bg">#FAFCFD</color>
+    <color name="input_line">#C8D7E2</color>
+    <color name="outline_bg">#FFFFFF</color>
+    <color name="outline_line">#B9CAD7</color>
+    <color name="selected_bg">#E3F2FD</color>
+    <color name="status_idle_bg">#EEF3F7</color>
+    <color name="status_idle_line">#D5E1EA</color>
+    <color name="status_running_bg">#E7F8EF</color>
+    <color name="status_running_line">#A7E5BF</color>
+    <color name="result_ok_bg">#F7FEFB</color>
+    <color name="result_ok_line">#9AD7B8</color>
+    <color name="result_fail_bg">#FFF7ED</color>
+    <color name="result_fail_line">#FDBA74</color>
+</resources>

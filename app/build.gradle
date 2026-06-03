@@ -1,0 +1,123 @@
+plugins {
+    id "com.android.application"
+}
+
+def signingPropsFile = rootProject.file("signing.properties")
+def signingProps = new Properties()
+if (signingPropsFile.exists()) {
+    signingProps.load(new FileInputStream(signingPropsFile))
+}
+
+def xrayVersion = "v26.3.27"
+def generatedXrayDir = file("$buildDir/generated/xrayJniLibs")
+
+tasks.register("downloadXrayBinaries") {
+    outputs.dir generatedXrayDir
+    doLast {
+        def assets = [
+                "arm64-v8a": "Xray-android-arm64-v8a.zip",
+                "x86_64"    : "Xray-android-amd64.zip"
+        ]
+        assets.each { abi, assetName ->
+            def abiDir = new File(generatedXrayDir, abi)
+            def output = new File(abiDir, "libxray.so")
+            if (output.exists() && output.length() > 0) {
+                return
+            }
+
+            abiDir.mkdirs()
+            def zipFile = new File(temporaryDir, assetName)
+            if (!zipFile.exists() || zipFile.length() == 0) {
+                def url = "https://github.com/XTLS/Xray-core/releases/download/${xrayVersion}/${assetName}".toURL()
+                zipFile.withOutputStream { out ->
+                    url.withInputStream { input ->
+                        out << input
+                    }
+                }
+            }
+
+            boolean found = false
+            new java.util.zip.ZipInputStream(new FileInputStream(zipFile)).withCloseable { zip ->
+                java.util.zip.ZipEntry entry
+                while ((entry = zip.nextEntry) != null) {
+                    if (!entry.directory && (entry.name == "xray" || entry.name.endsWith("/xray"))) {
+                        output.withOutputStream { out ->
+                            out << zip
+                        }
+                        found = true
+                        break
+                    }
+                }
+            }
+            if (!found || output.length() == 0) {
+                throw new GradleException("Cannot extract xray from ${assetName}")
+            }
+        }
+    }
+}
+
+android {
+    namespace "com.uac.spoofer"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.uac.spoofer"
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        release {
+            if (signingPropsFile.exists()) {
+                storeFile rootProject.file(signingProps["storeFile"])
+                storePassword signingProps["storePassword"]
+                keyAlias signingProps["keyAlias"]
+                keyPassword signingProps["keyPassword"]
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing false
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            debuggable false
+            if (signingPropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+        resources {
+            excludes += [
+                    "META-INF/com/android/build/gradle/app-metadata.properties",
+                    "META-INF/version-control-info.textproto"
+            ]
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs += generatedXrayDir
+        }
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn tasks.named("downloadXrayBinaries")
+}
+
