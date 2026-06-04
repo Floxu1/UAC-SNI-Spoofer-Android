@@ -7,7 +7,7 @@
 </div>
 
 ```mermaid
-flowchart TD
+flowchart LR
     A[User opens UAC Spoofer Android] --> B[Import / select VLESS or Trojan config]
     A --> C[Run SNI Scanner]
 
