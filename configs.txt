@@ -1,0 +1,13 @@
+vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&security=tls&sni=37cdnws.iamali.info&fp=firefox&alpn=http%2F1.1&insecure=0&allowInsecure=0&type=ws&host=37cdnws.iamali.info&path=%2F37cdnws#🦊%20UACSpoofer%20•%20FrostFox%2037%20•%20Edge%20Mirage
+
+vless://%40a_amr79@127.0.0.1:40443?encryption=none&security=tls&sni=unnes.ac.id.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=unnes.ac.id.cyylr.eu.cc&path=%2Fmy-wbv#🌍%20UACSpoofer%20•%20Anycast%20Aurora%20•%20Global%20Mesh
+
+vless://%40a_amr79@127.0.0.1:40443?encryption=none&security=tls&sni=unnes.ac.id.cyylr.eu.cc&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=unnes.ac.id.cyylr.eu.cc&path=%2Fmy-wbv#⚡%20UACSpoofer%20•%20Anycast%20Chrome%20•%20Hyper%20Route
+
+vless://1ce9392f-caf4-48f7-bbb9-475b101fbde0@127.0.0.1:40443?encryption=none&security=tls&sni=graph.instagram.com.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=graph.instagram.com.cyylr.eu.cc&path=%2Fid-tksi#📸%20UACSpoofer%20•%20InstaGraph%20ID%20•%20Phantom%20Edge
+
+vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&security=tls&sni=37cdnws.iamali.info&fp=chrome&alpn=http%2F1.1&insecure=0&allowInsecure=0&type=ws&host=37cdnws.iamali.info&path=%2F37cdnws#🔥%20UACSpoofer%20•%20Blaze%2037%20•%20Chrome%20Warp
+
+vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&security=tls&sni=37cdnws.iamali.info&fp=firefox&alpn=http%2F1.1&insecure=0&allowInsecure=0&type=ws&host=37cdnws.iamali.info&path=%2F37cdnws#🧊%20UACSpoofer%20•%20Frost%2037%20•%20Firefox%20Cloak
+
+vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&security=tls&sni=35cdnws.frnstatic.info&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=35cdnws.frnstatic.info&path=%2F35cdnws#🌌%20UACSpoofer%20•%20FRN35%20•%20Dark%20Transit
