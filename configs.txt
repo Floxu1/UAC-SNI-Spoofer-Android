@@ -11,3 +11,19 @@ vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&sec
 vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&security=tls&sni=37cdnws.iamali.info&fp=firefox&alpn=http%2F1.1&insecure=0&allowInsecure=0&type=ws&host=37cdnws.iamali.info&path=%2F37cdnws#🧊%20UACSpoofer%20•%20Frost%2037%20•%20Firefox%20Cloak
 
 vless://e277ac9b-3225-4381-a9fb-3585419f7142@127.0.0.1:40443?encryption=none&security=tls&sni=35cdnws.frnstatic.info&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=35cdnws.frnstatic.info&path=%2F35cdnws#🌌%20UACSpoofer%20•%20FRN35%20•%20Dark%20Transit
+
+vless://5f225374-54c9-4945-91ea-a911b9384239@127.0.0.1:40443?encryption=none&security=tls&sni=graph.instagram.com.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=graph.instagram.com.cyylr.eu.cc&path=%2Fmy-wbv#📍%20UACSpoofer%20Instagram%20Edge%20CA-18142
+
+vless://5f225374-54c9-4945-91ea-a911b9384239@127.0.0.1:40443?encryption=none&security=tls&sni=graph.instagram.com.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=graph.instagram.com.cyylr.eu.cc&path=%2Fmy-wbv#UACSpoofer%20Instagram%20Edge
+
+vless://cc752a3e-1537-4e86-bb50-1b897bf7b33c@127.0.0.1:40443?encryption=none&security=tls&sni=cyylr.eu.cc&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=cyylr.eu.cc&path=%2Fsg-melbi#UACSpoofer%20Core%20Chrome
+
+vless://429f43ca-087a-4fbc-9d88-9d9007bf30bc@127.0.0.1:40443?encryption=none&security=tls&sni=unnes.ac.id.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=unnes.ac.id.cyylr.eu.cc&path=%2Fmy-wbv#UACSpoofer%20Anycast
+
+vless://aa0e6991-6eaa-4bbb-9497-abc04d54de2f@127.0.0.1:40443?encryption=none&security=tls&sni=cdn.opensignal.com.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=cdn.opensignal.com.cyylr.eu.cc&path=%2Fsg-melbi#UACSpoofer%20OpenSignal
+
+vless://6a8f6dc6-2a42-4a03-8047-e39ce6df3ec9@127.0.0.1:40443?encryption=none&security=tls&sni=www.genflix.co.id.cyylr.eu.cc&fp=chrome&insecure=0&allowInsecure=0&type=ws&host=www.genflix.co.id.cyylr.eu.cc&path=%2Fmy-wbv#UACSpoofer%20Genflix%20Chrome
+
+vless://adffad16-ed8f-4020-97b5-64d1c4548222@127.0.0.1:40443?encryption=none&security=tls&sni=www.genflix.co.id.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=www.genflix.co.id.cyylr.eu.cc&path=%2Fmy-wbv#UACSpoofer%20Genflix
+
+vless://429f43ca-087a-4fbc-9d88-9d9007bf30bc@127.0.0.1:40443?encryption=none&security=tls&sni=unnes.ac.id.cyylr.eu.cc&insecure=0&allowInsecure=0&type=ws&host=unnes.ac.id.cyylr.eu.cc&path=%2Fmy-wbv#UACSpoofer%20Anycast%20Plus
