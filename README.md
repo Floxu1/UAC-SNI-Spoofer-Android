@@ -1,10 +1,9 @@
 # UAC Spoofer Android
 
-<div align="center">
 
-[![Watch Video](./preview.png)](https://github.com/user-attachments/assets/08c9b44d-204f-405f-965f-2f973a9addfa)
+<div align="center"> <a href="https://github.com/user-attachments/assets/947ed2dd-28a2-469d-a78e-4db148002128"> <img src="https://github.com/user-attachments/assets/947ed2dd-28a2-469d-a78e-4db148002128" width="18%"> </a> <a href="https://github.com/user-attachments/assets/6029401d-e02b-449e-a70b-a13575628db4"> <img src="https://github.com/user-attachments/assets/6029401d-e02b-449e-a70b-a13575628db4" width="18%"> </a> <a href="https://github.com/user-attachments/assets/c4251fc7-796f-447e-b7df-9cf4ac2d46d0"> <img src="https://github.com/user-attachments/assets/c4251fc7-796f-447e-b7df-9cf4ac2d46d0" width="18%"> </a> <a href="https://github.com/user-attachments/assets/68206bcd-d913-4cda-87a8-cc935c2b141c"> <img src="https://github.com/user-attachments/assets/68206bcd-d913-4cda-87a8-cc935c2b141c" width="18%"> </a> <a href="https://github.com/user-attachments/assets/9d244d7e-4bb7-4ec5-807e-f4738a372ba2"> <img src="https://github.com/user-attachments/assets/9d244d7e-4bb7-4ec5-807e-f4738a372ba2" width="18%"> </a> </div>
 
-</div>
+<br> <br>
 
 ```mermaid
 flowchart LR
@@ -82,21 +81,9 @@ signing.properties
 
 ## نکته نصب
 
-⚠️ این APK دارای سرتیفیکت (امضای انتشار) نیست.
-
-ممکنه موقع نصب فایل **Release** در بعضی دستگاه‌ها هشدار:
-
-**«Harmful app blocked»**
-
-نمایش داده بشه.
-
-در این حالت:
-
-← روی **More details** بزنید
-← سپس **Install anyway** رو انتخاب کنید
-
-این هشدار به‌خاطر منتشر نشدن برنامه از طریق پلی‌استور یا نداشتن امضای انتشار نمایش داده می‌شود.
+  اگر هنگام نصب APK با هشدار: ****«Unknown app»** مواجه شدید: 1. روی **More details** بزنید. 2. گزینه **Install anyway** را انتخاب کنید. 3. نصب برنامه را ادامه دهید. > در برخی دستگاه‌های اندرویدی هنگام نصب مستقیم فایل APK (خارج از Google Play) این هشدار نمایش داده می‌شود.
 
 ## License
+این پروژه فقط با ذکر منبع قابل ادامه دادن، Fork کردن یا انتشار نسخه تغییر یافته است. استفاده از پروژه با نام خودتان، حذف Credit، Rebrand کردن و بازنشر تجاری بدون اجازه ممنوع است. متن کامل در فایل `LICENSE` قرار دارد.
 
 این پروژه فقط با ذکر منبع قابل ادامه دادن، fork کردن یا انتشار نسخه تغییر یافته است. استفاده از پروژه با نام خودتان، حذف credit، rebrand کردن و بازنشر تجاری بدون اجازه ممنوع است. متن کامل در فایل `../LICENSE` قرار دارد.
