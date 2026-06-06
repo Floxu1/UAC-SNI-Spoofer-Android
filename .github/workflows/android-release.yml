@@ -1,0 +1,127 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v1.0.5"
+        required: true
+        default: "v1.0.5"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build and publish APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "RELEASE_TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Prepare optional signing config
+        shell: bash
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          if [[ -n "${RELEASE_KEYSTORE_BASE64}" && -n "${RELEASE_KEYSTORE_PASSWORD}" && -n "${RELEASE_KEY_ALIAS}" && -n "${RELEASE_KEY_PASSWORD}" ]]; then
+            echo "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > release-keystore.jks
+            {
+              echo "storeFile=release-keystore.jks"
+              echo "storePassword=${RELEASE_KEYSTORE_PASSWORD}"
+              echo "keyAlias=${RELEASE_KEY_ALIAS}"
+              echo "keyPassword=${RELEASE_KEY_PASSWORD}"
+            } > signing.properties
+            echo "SIGNED_RELEASE=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Release signing secrets are missing. The workflow will publish an unsigned APK for transparency. Set RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS, and RELEASE_KEY_PASSWORD to publish installable update APKs."
+            echo "SIGNED_RELEASE=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease
+
+      - name: Collect APK and checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | sort | head -n 1)"
+          if [[ -z "${APK}" ]]; then
+            echo "No release APK was produced." >&2
+            exit 1
+          fi
+          if [[ "${SIGNED_RELEASE}" == "true" ]]; then
+            OUT="dist/uac-Spoofer.apk"
+          else
+            OUT="dist/uac-Spoofer-unsigned.apk"
+          fi
+          cp "${APK}" "${OUT}"
+          sha256sum "${OUT}" > "${OUT}.sha256"
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          NOTES=".github/release-notes/${RELEASE_VERSION}.md"
+          if [[ -f "${NOTES}" ]]; then
+            cp "${NOTES}" release-notes.md
+          else
+            {
+              echo "UAC Spoofer ${RELEASE_VERSION}"
+              echo
+              echo "This release was built and published by GitHub Actions."
+            } > release-notes.md
+          fi
+
+      - name: Ensure tag exists for manual run
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${RELEASE_TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${RELEASE_TAG}" --force
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" --title "UAC Spoofer ${RELEASE_VERSION}" --notes-file release-notes.md
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" dist/* --title "UAC Spoofer ${RELEASE_VERSION}" --notes-file release-notes.md
+          fi

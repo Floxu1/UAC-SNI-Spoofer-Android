@@ -21,9 +21,9 @@ public final class GitHubSync {
     public static final String PROJECT_URL = "https://github.com/Floxu1/UAC-SNI-Spoofer-Android";
     public static final String RELEASES_API = "https://api.github.com/repos/Floxu1/UAC-SNI-Spoofer-Android/releases/latest";
     public static final String REMOTE_CONFIGS_URL = "https://raw.githubusercontent.com/Floxu1/UAC-SNI-Spoofer-Android/main/configs.txt";
-    public static final String CURRENT_VERSION = "1.0.4";
-    public static final String CURRENT_RELEASE_TAG = "1.0.4";
-    public static final String FALLBACK_APK_URL = "https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/download/v1.0.4/uac-Spoofer.apk";
+    public static final String CURRENT_VERSION = "1.0.5";
+    public static final String CURRENT_RELEASE_TAG = "1.0.5";
+    public static final String FALLBACK_APK_URL = "https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/download/v1.0.5/uac-Spoofer.apk";
 
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
 
@@ -81,6 +81,7 @@ public final class GitHubSync {
         if (assets == null) {
             return "";
         }
+        String fallback = "";
         for (int i = 0; i < assets.length(); i++) {
             JSONObject asset = assets.optJSONObject(i);
             if (asset == null) {
@@ -88,11 +89,17 @@ public final class GitHubSync {
             }
             String name = asset.optString("name", "").toLowerCase(Locale.US);
             String url = asset.optString("browser_download_url", "");
-            if (name.endsWith(".apk") && !url.isEmpty()) {
+            if (!name.endsWith(".apk") || url.isEmpty() || name.contains("unsigned") || name.contains("debug")) {
+                continue;
+            }
+            if ("uac-spoofer.apk".equals(name) || "uac_spoofer.apk".equals(name)) {
                 return url;
             }
+            if (fallback.isEmpty()) {
+                fallback = url;
+            }
         }
-        return "";
+        return fallback;
     }
 
     private static String get(String url) throws Exception {

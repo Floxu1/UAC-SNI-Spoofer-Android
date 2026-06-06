@@ -229,7 +229,7 @@
                     android:paddingTop="9dp"
                     android:paddingEnd="12dp"
                     android:paddingBottom="9dp"
-                    android:text="UAC Spoofer v1.0.4"
+                    android:text="UAC Spoofer v1.0.5"
                     android:textColor="@color/accent"
                     android:textDirection="ltr"
                     android:textSize="13sp"
