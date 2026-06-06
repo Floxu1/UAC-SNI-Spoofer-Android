@@ -19,6 +19,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.security.SecureRandom;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -53,6 +54,19 @@ public class ProxyService extends Service {
     public static final String EXTRA_PROTOCOL = "protocol";
     public static final String EXTRA_CONFIG_HOST = "configHost";
     public static final String EXTRA_CONFIG_PORT = "configPort";
+    public static final String EXTRA_TUNING_MODE = "tuningMode";
+    public static final String EXTRA_FAKE_PROBE_ENABLED = "fakeProbeEnabled";
+    public static final String EXTRA_FAKE_PROBE_COUNT = "fakeProbeCount";
+    public static final String EXTRA_FAKE_PROBE_DELAY_MS = "fakeProbeDelayMs";
+    public static final String EXTRA_MULTI_FRAGMENT_SIZE = "multiFragmentSize";
+    public static final String EXTRA_SNI_SPLIT_DELAY_MS = "sniSplitDelayMs";
+    public static final String EXTRA_TLS_RECORD_DELAY_MS = "tlsRecordDelayMs";
+    public static final String EXTRA_MULTI_DELAY_MS = "multiDelayMs";
+    public static final String EXTRA_HALF_DELAY_MS = "halfDelayMs";
+    public static final String EXTRA_ROUTE_PROBE_TIMEOUT_MS = "routeProbeTimeoutMs";
+    public static final String EXTRA_STRATEGY_CACHE_ENABLED = "strategyCacheEnabled";
+    public static final String EXTRA_STRATEGY_CACHE_TTL_MS = "strategyCacheTtlMs";
+    public static final String EXTRA_LOG_LEVEL = "logLevel";
 
     private static final String CHANNEL_ID = "uac_spoofer_proxy";
     private static final String TAG = "UacSpoofer";
@@ -78,6 +92,8 @@ public class ProxyService extends Service {
     private static volatile int ACTIVE_PORT = DEFAULT_PORT;
     private static volatile String TRAFFIC_SUMMARY = "0 B / 0 B";
     private static volatile String LAST_ERROR = "";
+    private static final ConcurrentHashMap<String, String> PREFERRED_STRATEGY_BY_ROUTE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> PREFERRED_STRATEGY_TIME_BY_ROUTE = new ConcurrentHashMap<>();
 
     private final AtomicBoolean active = new AtomicBoolean(false);
     private final AtomicInteger connectionCounter = new AtomicInteger(0);
@@ -102,6 +118,7 @@ public class ProxyService extends Service {
     private String protocol = "trojan";
     private String configHost = "127.0.0.1";
     private int configPort = 40443;
+    private ProxyTuning tuning = ProxyTuning.balanced();
 
     public interface Listener {
         void onLogSnapshot(List<String> lines);
@@ -142,6 +159,12 @@ public class ProxyService extends Service {
 
     public static String getLastError() {
         return LAST_ERROR;
+    }
+
+    public static void clearStrategyCache() {
+        PREFERRED_STRATEGY_BY_ROUTE.clear();
+        PREFERRED_STRATEGY_TIME_BY_ROUTE.clear();
+        emit("TUNING strategy cache cleared.");
     }
 
     @Override
@@ -205,6 +228,7 @@ public class ProxyService extends Service {
         protocol = stringExtra(intent, EXTRA_PROTOCOL, protocol);
         configHost = stringExtra(intent, EXTRA_CONFIG_HOST, configHost);
         configPort = intent.getIntExtra(EXTRA_CONFIG_PORT, configPort);
+        tuning = ProxyTuning.fromIntent(intent);
         if (connectPort <= 0 || connectPort > 65535) {
             connectPort = 443;
         }
@@ -267,7 +291,8 @@ public class ProxyService extends Service {
         acceptThread = new Thread(this::acceptLoop, "uac-accept");
         acceptThread.start();
         emit("RUN " + LISTEN_HOST + ":" + LISTEN_PORT + " -> " + getTarget() + ":" + connectPort
-                + " sni=" + fakeSni + " method=" + method + " profile=\"" + profileName + "\"");
+                + " sni=" + fakeSni + " method=" + method + " tuning=" + tuning.summary()
+                + " profile=\"" + profileName + "\"");
     }
 
     private ServerSocket openServerSocket() throws IOException {
@@ -419,23 +444,31 @@ public class ProxyService extends Service {
                 emit(connId + " TLS real_sni=" + clientSni + " size=" + firstData.length + " B");
             }
 
-            remote = new Socket();
-            openSockets.add(remote);
-            remote.connect(new InetSocketAddress(target, connectPort), 15000);
-            remote.setTcpNoDelay(true);
-            remote.setKeepAlive(true);
-
-            emit(connId + " CONNECT " + target + ":" + connectPort);
-            if (!writeFragmented(connId, remote.getOutputStream(), firstData)) {
-                remote.getOutputStream().write(firstData);
-                remote.getOutputStream().flush();
-                emit(connId + " FALLBACK sent raw ClientHello.");
+            ConnectedAttempt connected = connectWithAdaptiveStrategies(connId, firstData, target);
+            if (connected == null && !fallbackAddress.isEmpty() && !fallbackAddress.equals(target)) {
+                emit(connId + " FAILOVER probe " + fallbackAddress + ":" + connectPort);
+                connected = connectWithAdaptiveStrategies(connId, firstData, fallbackAddress);
             }
+            if (connected == null) {
+                throw new IOException("no server response after all strategies");
+            }
+
+            remote = connected.socket;
+            target = connected.target;
+            serverResponded.set(true);
+            recordSuccess(target);
+            client.getOutputStream().write(connected.firstResponse);
+            client.getOutputStream().flush();
+            downloadBytes.addAndGet(connected.firstResponse.length);
+            updateTrafficSummary();
+            emit(connId + " SVR_RESP " + connected.firstResponse.length + " B via "
+                    + connected.strategyName + ", spoof active.");
 
             CountDownLatch firstRelayDone = new CountDownLatch(1);
             Socket finalRemote = remote;
-            Future<?> up = ioPool.submit(() -> relay(connId, client, finalRemote, false, target, serverResponded, firstRelayDone));
-            Future<?> down = ioPool.submit(() -> relay(connId, finalRemote, client, true, target, serverResponded, firstRelayDone));
+            String finalTarget = target;
+            Future<?> up = ioPool.submit(() -> relay(connId, client, finalRemote, false, finalTarget, serverResponded, firstRelayDone));
+            Future<?> down = ioPool.submit(() -> relay(connId, finalRemote, client, true, finalTarget, serverResponded, firstRelayDone));
 
             firstRelayDone.await();
             closeQuietly(client);
@@ -464,6 +497,186 @@ public class ProxyService extends Service {
         }
     }
 
+    private ConnectedAttempt connectWithAdaptiveStrategies(String connId, byte[] firstData, String target) {
+        List<StrategyAttempt> attempts = buildStrategyAttempts(firstData, target);
+        for (StrategyAttempt attempt : attempts) {
+            Socket candidate = null;
+            try {
+                candidate = openRemote(target);
+                emit(connId + " CONNECT " + target + ":" + connectPort + " strategy=" + attempt.name);
+                if (attempt.fakeProbe) {
+                    for (int i = 0; i < tuning.fakeProbeCount; i++) {
+                        sendFakeSniProbe(connId, target, i + 1, tuning.fakeProbeCount);
+                        if (tuning.fakeProbeDelayMs > 0) {
+                            sleepQuietly(tuning.fakeProbeDelayMs);
+                        }
+                    }
+                }
+                writeAttempt(connId, candidate.getOutputStream(), firstData, attempt);
+                candidate.setSoTimeout(tuning.routeProbeTimeoutMs);
+                byte[] response = readFirstResponse(candidate.getInputStream());
+                if (response.length > 0) {
+                    candidate.setSoTimeout(0);
+                    rememberPreferredStrategy(target, attempt.name);
+                    return new ConnectedAttempt(candidate, target, response, attempt.name);
+                }
+                emit(connId + " BLOCKED no response strategy=" + attempt.name);
+            } catch (IOException e) {
+                emit(connId + " TRY_FAIL " + attempt.name + " " + e.getMessage());
+            }
+            if (candidate != null) {
+                closeQuietly(candidate);
+                openSockets.remove(candidate);
+            }
+        }
+        recordFailure(target, "all strategies failed");
+        return null;
+    }
+
+    private Socket openRemote(String target) throws IOException {
+        Socket socket = new Socket();
+        openSockets.add(socket);
+        socket.connect(new InetSocketAddress(target, connectPort), 15000);
+        socket.setTcpNoDelay(true);
+        socket.setKeepAlive(true);
+        return socket;
+    }
+
+    private List<StrategyAttempt> buildStrategyAttempts(byte[] firstData, String target) {
+        List<StrategyAttempt> attempts = new ArrayList<>();
+        boolean tls = firstData.length > 5 && (firstData[0] & 0xff) == 0x16;
+        String normalized = method == null ? "" : method.toLowerCase(Locale.US);
+        boolean combined = normalized.contains("combined") || normalized.contains("fake");
+        boolean fakeProbe = tuning.fakeProbeEnabled && tuning.fakeProbeCount > 0 && combined;
+        if (tls) {
+            if (ProxyTuning.MODE_FAST.equals(tuning.mode)) {
+                attempts.add(new StrategyAttempt("raw", "raw", 0, false));
+                attempts.add(new StrategyAttempt("fragment/half", "half", tuning.halfDelayMs, false));
+                attempts.add(new StrategyAttempt("combined/tls_record_frag", "tls_record_frag", tuning.tlsRecordDelayMs, fakeProbe));
+                attempts.add(new StrategyAttempt("combined/sni_split", "sni_split", tuning.sniSplitDelayMs, fakeProbe));
+                attempts.add(new StrategyAttempt("combined/multi" + tuning.multiFragmentSize, "multi", tuning.multiDelayMs, fakeProbe));
+            } else {
+                attempts.add(new StrategyAttempt("combined/sni_split", "sni_split", tuning.sniSplitDelayMs, fakeProbe));
+                attempts.add(new StrategyAttempt("combined/tls_record_frag", "tls_record_frag", tuning.tlsRecordDelayMs, fakeProbe));
+                attempts.add(new StrategyAttempt("combined/multi" + tuning.multiFragmentSize, "multi", tuning.multiDelayMs, fakeProbe));
+                attempts.add(new StrategyAttempt("fragment/half", "half", tuning.halfDelayMs, false));
+                attempts.add(new StrategyAttempt("raw", "raw", 0, false));
+            }
+        } else {
+            attempts.add(new StrategyAttempt("raw", "raw", 0, false));
+        }
+        String preferred = preferredStrategy(target);
+        if (preferred != null) {
+            for (int i = 0; i < attempts.size(); i++) {
+                StrategyAttempt attempt = attempts.get(i);
+                if (preferred.equals(attempt.name)) {
+                    attempts.remove(i);
+                    attempts.add(0, attempt);
+                    break;
+                }
+            }
+        }
+        return attempts;
+    }
+
+    private String preferredStrategy(String target) {
+        if (!tuning.strategyCacheEnabled) {
+            return null;
+        }
+        String key = strategyCacheKey(target);
+        String preferred = PREFERRED_STRATEGY_BY_ROUTE.get(key);
+        Long savedAt = PREFERRED_STRATEGY_TIME_BY_ROUTE.get(key);
+        if (preferred == null || savedAt == null) {
+            return null;
+        }
+        if (System.currentTimeMillis() - savedAt > tuning.strategyCacheTtlMs) {
+            PREFERRED_STRATEGY_BY_ROUTE.remove(key);
+            PREFERRED_STRATEGY_TIME_BY_ROUTE.remove(key);
+            return null;
+        }
+        return preferred;
+    }
+
+    private void rememberPreferredStrategy(String target, String strategyName) {
+        if (!tuning.strategyCacheEnabled) {
+            return;
+        }
+        String key = strategyCacheKey(target);
+        PREFERRED_STRATEGY_BY_ROUTE.put(key, strategyName);
+        PREFERRED_STRATEGY_TIME_BY_ROUTE.put(key, System.currentTimeMillis());
+    }
+
+    private String strategyCacheKey(String target) {
+        return target + ":" + connectPort + "|" + fakeSni + "|" + method;
+    }
+
+    private void sendFakeSniProbe(String connId, String target, int index, int total) {
+        Socket probe = null;
+        try {
+            probe = new Socket();
+            probe.connect(new InetSocketAddress(target, connectPort), 300);
+            probe.setTcpNoDelay(true);
+            byte[] fakeHello = TlsClientHello.buildFakeClientHello(fakeSni);
+            probe.getOutputStream().write(fakeHello);
+            probe.getOutputStream().flush();
+            emit(connId + " FAKE_SNI probe " + index + "/" + total + " " + fakeSni + " " + fakeHello.length + " B");
+        } catch (IOException e) {
+            emit(connId + " FAKE_SNI probe " + index + "/" + total + " failed: " + e.getMessage());
+        } finally {
+            closeQuietly(probe);
+        }
+    }
+
+    private void writeAttempt(String connId, OutputStream outputStream, byte[] firstData, StrategyAttempt attempt) throws IOException {
+        byte[][] fragments = TlsClientHello.fragment(firstData, attempt.fragmentStrategy, tuning.multiFragmentSize);
+        if (ProxyTuning.LOG_MINIMAL.equals(tuning.logLevel)) {
+            emit(connId + " FRAGMENT " + attempt.name + " " + fragments.length + " pieces");
+        } else {
+            emit(connId + " FRAGMENT " + attempt.name + " " + fragments.length
+                    + " pieces: " + formatPieces(fragments));
+        }
+        for (int i = 0; i < fragments.length; i++) {
+            outputStream.write(fragments[i]);
+            outputStream.flush();
+            if (shouldLogFragment(i, fragments.length)) {
+                emit(connId + " PKT " + (i + 1) + "/" + fragments.length + " sent " + fragments[i].length + " B");
+            }
+            if (i < fragments.length - 1 && attempt.delayMs > 0) {
+                sleepQuietly(attempt.delayMs);
+            }
+        }
+    }
+
+    private boolean shouldLogFragment(int index, int total) {
+        if (ProxyTuning.LOG_MINIMAL.equals(tuning.logLevel)) {
+            return false;
+        }
+        if (ProxyTuning.LOG_VERBOSE.equals(tuning.logLevel)) {
+            return true;
+        }
+        return total <= 8 || index < 3 || index == total - 1 || ((index + 1) % 8 == 0);
+    }
+
+    private byte[] readFirstResponse(InputStream inputStream) throws IOException {
+        byte[] buffer = new byte[BUFFER_SIZE];
+        int read = inputStream.read(buffer);
+        if (read <= 0) {
+            return new byte[0];
+        }
+        return Arrays.copyOf(buffer, read);
+    }
+
+    private String formatPieces(byte[][] fragments) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < fragments.length; i++) {
+            if (i > 0) {
+                out.append(" + ");
+            }
+            out.append(fragments[i].length).append(" B");
+        }
+        return out.toString();
+    }
+
     private byte[] readFirstPacket(InputStream inputStream) throws IOException {
         byte[] buffer = new byte[BUFFER_SIZE];
         int read = inputStream.read(buffer);
@@ -488,26 +701,6 @@ public class ProxyService extends Service {
         int length = ((data[3] & 0xff) << 8) | (data[4] & 0xff);
         int total = 5 + length;
         return total > 0 && total <= BUFFER_SIZE ? total : read;
-    }
-
-    private boolean writeFragmented(String connId, OutputStream outputStream, byte[] firstData) {
-        try {
-            byte[][] fragments = TlsClientHello.fragmentAtSni(firstData);
-            emit(connId + " FRAGMENT sni_split " + fragments.length + " pieces: "
-                    + fragments[0].length + " B + " + fragments[1].length + " B");
-            for (int i = 0; i < fragments.length; i++) {
-                outputStream.write(fragments[i]);
-                outputStream.flush();
-                emit(connId + " PKT " + (i + 1) + "/" + fragments.length + " sent " + fragments[i].length + " B");
-                if (i < fragments.length - 1) {
-                    sleepQuietly(100);
-                }
-            }
-            return true;
-        } catch (IOException e) {
-            emit(connId + " FRAGMENT failed: " + e.getMessage());
-            return false;
-        }
     }
 
     private void relay(
@@ -700,6 +893,8 @@ public class ProxyService extends Service {
     }
 
     private static final class TlsClientHello {
+        private static final SecureRandom RANDOM = new SecureRandom();
+
         private static String findSni(byte[] data) {
             SniLocation location = locateSni(data);
             if (location == null) {
@@ -708,9 +903,25 @@ public class ProxyService extends Service {
             return new String(data, location.offset, location.length, StandardCharsets.US_ASCII);
         }
 
+        private static byte[][] fragment(byte[] data, String strategy, int multiFragmentSize) {
+            if (data.length < 2 || "raw".equals(strategy)) {
+                return new byte[][]{data};
+            }
+            if ("half".equals(strategy)) {
+                return fragmentHalf(data);
+            }
+            if ("multi".equals(strategy)) {
+                return fragmentMulti(data, multiFragmentSize);
+            }
+            if ("tls_record_frag".equals(strategy)) {
+                return tlsRecordFragment(data);
+            }
+            return fragmentAtSni(data);
+        }
+
         private static byte[][] fragmentAtSni(byte[] data) {
             if (data.length < 2) {
-                return new byte[][]{data, new byte[0]};
+                return new byte[][]{data};
             }
             SniLocation location = locateSni(data);
             int split = data.length / 2;
@@ -722,6 +933,145 @@ public class ProxyService extends Service {
                     Arrays.copyOfRange(data, 0, split),
                     Arrays.copyOfRange(data, split, data.length)
             };
+        }
+
+        private static byte[][] fragmentHalf(byte[] data) {
+            int split = Math.max(1, Math.min(data.length / 2, data.length - 1));
+            return new byte[][]{
+                    Arrays.copyOfRange(data, 0, split),
+                    Arrays.copyOfRange(data, split, data.length)
+            };
+        }
+
+        private static byte[][] fragmentMulti(byte[] data, int chunkSize) {
+            List<byte[]> parts = new ArrayList<>();
+            for (int offset = 0; offset < data.length; offset += chunkSize) {
+                int end = Math.min(offset + chunkSize, data.length);
+                parts.add(Arrays.copyOfRange(data, offset, end));
+            }
+            return parts.toArray(new byte[parts.size()][]);
+        }
+
+        private static byte[][] tlsRecordFragment(byte[] data) {
+            if (data.length < 6 || unsigned(data[0]) != 0x16) {
+                return new byte[][]{data};
+            }
+            byte[] version = Arrays.copyOfRange(data, 1, 3);
+            byte[] handshake = Arrays.copyOfRange(data, 5, data.length);
+            int split = Math.max(1, Math.min(handshake.length / 2, handshake.length - 1));
+            return new byte[][]{
+                    tlsRecord(version, Arrays.copyOfRange(handshake, 0, split)),
+                    tlsRecord(version, Arrays.copyOfRange(handshake, split, handshake.length))
+            };
+        }
+
+        private static byte[] buildFakeClientHello(String sni) {
+            String host = sni == null || sni.trim().isEmpty() ? ProxyConfig.DEFAULT_SPOOF_SNI : sni.trim();
+            byte[] random = new byte[32];
+            byte[] sessionId = new byte[32];
+            byte[] keyShare = new byte[32];
+            RANDOM.nextBytes(random);
+            RANDOM.nextBytes(sessionId);
+            RANDOM.nextBytes(keyShare);
+
+            byte[] extensions = concat(
+                    sniExtension(host),
+                    hex("000a00080006001d00170018"),
+                    hex("000b00020100"),
+                    hex("000d00120010040305030603080708080809080a080b"),
+                    hex("002b00050403040303"),
+                    keyShareExtension(keyShare),
+                    hex("0010000e000c02683208687474702f312e31")
+            );
+            byte[] padding = paddingExtension(517, 5 + 4 + 2 + 32 + 1 + sessionId.length
+                    + cipherSuites().length + 2 + extensions.length);
+            if (padding.length > 0) {
+                extensions = concat(extensions, padding);
+            }
+
+            byte[] body = concat(
+                    new byte[]{0x03, 0x03},
+                    random,
+                    concat(new byte[]{(byte) sessionId.length}, sessionId),
+                    cipherSuites(),
+                    new byte[]{0x01, 0x00},
+                    u16Bytes(extensions.length),
+                    extensions
+            );
+            byte[] handshake = concat(new byte[]{
+                    0x01,
+                    (byte) ((body.length >> 16) & 0xff),
+                    (byte) ((body.length >> 8) & 0xff),
+                    (byte) (body.length & 0xff)
+            }, body);
+            return tlsRecord(new byte[]{0x03, 0x01}, handshake);
+        }
+
+        private static byte[] tlsRecord(byte[] version, byte[] payload) {
+            return concat(new byte[]{
+                    0x16,
+                    version[0],
+                    version[1],
+                    (byte) ((payload.length >> 8) & 0xff),
+                    (byte) (payload.length & 0xff)
+            }, payload);
+        }
+
+        private static byte[] sniExtension(String sni) {
+            byte[] sniBytes = sni.getBytes(StandardCharsets.US_ASCII);
+            byte[] entry = concat(new byte[]{
+                    0x00,
+                    (byte) ((sniBytes.length >> 8) & 0xff),
+                    (byte) (sniBytes.length & 0xff)
+            }, sniBytes);
+            byte[] list = concat(u16Bytes(entry.length), entry);
+            return concat(new byte[]{0x00, 0x00}, u16Bytes(list.length), list);
+        }
+
+        private static byte[] keyShareExtension(byte[] publicKey) {
+            byte[] entry = concat(new byte[]{0x00, 0x1d, 0x00, 0x20}, publicKey);
+            byte[] list = concat(u16Bytes(entry.length), entry);
+            return concat(new byte[]{0x00, 0x33}, u16Bytes(list.length), list);
+        }
+
+        private static byte[] paddingExtension(int targetLength, int currentLength) {
+            int needed = targetLength - currentLength - 4;
+            if (needed <= 0) {
+                return new byte[0];
+            }
+            return concat(new byte[]{0x00, 0x15}, u16Bytes(needed), new byte[needed]);
+        }
+
+        private static byte[] cipherSuites() {
+            byte[] suites = hex("130213031301c02cc030c02bc02fcca9cca8c024c028c023c027009f009e006b006700ff");
+            return concat(u16Bytes(suites.length), suites);
+        }
+
+        private static byte[] u16Bytes(int value) {
+            return new byte[]{(byte) ((value >> 8) & 0xff), (byte) (value & 0xff)};
+        }
+
+        private static byte[] concat(byte[]... arrays) {
+            int length = 0;
+            for (byte[] array : arrays) {
+                length += array.length;
+            }
+            byte[] out = new byte[length];
+            int offset = 0;
+            for (byte[] array : arrays) {
+                System.arraycopy(array, 0, out, offset, array.length);
+                offset += array.length;
+            }
+            return out;
+        }
+
+        private static byte[] hex(String value) {
+            int length = value.length();
+            byte[] out = new byte[length / 2];
+            for (int i = 0; i < length; i += 2) {
+                out[i / 2] = (byte) Integer.parseInt(value.substring(i, i + 2), 16);
+            }
+            return out;
         }
 
         private static SniLocation locateSni(byte[] data) {
@@ -813,6 +1163,34 @@ public class ProxyService extends Service {
 
         private static int unsigned(byte value) {
             return value & 0xff;
+        }
+    }
+
+    private static final class StrategyAttempt {
+        final String name;
+        final String fragmentStrategy;
+        final int delayMs;
+        final boolean fakeProbe;
+
+        StrategyAttempt(String name, String fragmentStrategy, int delayMs, boolean fakeProbe) {
+            this.name = name;
+            this.fragmentStrategy = fragmentStrategy;
+            this.delayMs = delayMs;
+            this.fakeProbe = fakeProbe;
+        }
+    }
+
+    private static final class ConnectedAttempt {
+        final Socket socket;
+        final String target;
+        final byte[] firstResponse;
+        final String strategyName;
+
+        ConnectedAttempt(Socket socket, String target, byte[] firstResponse, String strategyName) {
+            this.socket = socket;
+            this.target = target;
+            this.firstResponse = firstResponse;
+            this.strategyName = strategyName;
         }
     }
 

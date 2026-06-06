@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/page_bg" />
+    <gradient
+        android:angle="270"
+        android:endColor="@color/page_bg"
+        android:startColor="@color/page_bg_2" />
 </shape>

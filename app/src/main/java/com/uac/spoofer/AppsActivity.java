@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
@@ -14,6 +15,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -32,11 +34,13 @@ public class AppsActivity extends Activity {
     private EditText searchInput;
     private List<AppEntry> allApps = new ArrayList<>();
     private boolean changingCheckState = false;
+    private boolean persianUi = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         ThemeStore.apply(this);
         super.onCreate(savedInstanceState);
+        persianUi = LanguageStore.isPersian(this);
         buildLayout();
         allApps = loadLaunchableApps();
         renderApps();
@@ -67,22 +71,30 @@ public class AppsActivity extends Activity {
         header.addView(titleRow, matchWrap());
 
         Button back = new Button(this);
-        back.setText("Back");
-        back.setTextColor(getResources().getColor(R.color.accent));
+        back.setText(txt("Back", "بازگشت"));
+        back.setTextColor(0xffffffff);
         back.setTextSize(12);
         back.setTypeface(null, android.graphics.Typeface.BOLD);
-        back.setBackgroundResource(R.drawable.bg_outline_button);
+        back.setBackgroundResource(R.drawable.bg_header_control);
         titleRow.addView(back, new LinearLayout.LayoutParams(dp(64), dp(42)));
         back.setOnClickListener(v -> finish());
 
         TextView title = new TextView(this);
-        title.setText("Apps Bypass");
+        title.setText(txt("Apps Bypass", "برنامه‌های خارج از VPN"));
         title.setTextColor(0xffffffff);
         title.setTextSize(24);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
         titleParams.setMargins(dp(12), 0, 0, 0);
         titleRow.addView(title, titleParams);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText(txt("Choose apps that stay outside the VPN route", "برنامه‌هایی را انتخاب کنید که از مسیر VPN عبور نکنند"));
+        subtitle.setTextColor(0xffd7e8ff);
+        subtitle.setTextSize(12);
+        LinearLayout.LayoutParams subtitleParams = matchWrap();
+        subtitleParams.setMargins(0, dp(10), 0, 0);
+        header.addView(subtitle, subtitleParams);
 
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -99,7 +111,7 @@ public class AppsActivity extends Activity {
         card.addView(countText, matchWrap());
 
         TextView hint = new TextView(this);
-        hint.setText("Checked apps bypass the VPN tunnel. Stop VPN before changing this list.");
+        hint.setText(txt("Checked apps bypass the VPN tunnel. Stop VPN before changing this list.", "برنامه‌های تیک‌خورده خارج از تونل VPN می‌مانند. قبل از تغییر این لیست VPN را خاموش کنید."));
         hint.setTextColor(getResources().getColor(R.color.muted));
         hint.setTextSize(12);
         LinearLayout.LayoutParams hintParams = matchWrap();
@@ -107,7 +119,7 @@ public class AppsActivity extends Activity {
         card.addView(hint, hintParams);
 
         searchInput = new EditText(this);
-        searchInput.setHint("Search apps");
+        searchInput.setHint(txt("Search apps", "جستجوی برنامه‌ها"));
         searchInput.setSingleLine(true);
         searchInput.setInputType(InputType.TYPE_CLASS_TEXT);
         searchInput.setTextColor(getResources().getColor(R.color.ink));
@@ -149,7 +161,9 @@ public class AppsActivity extends Activity {
         updateCount();
         if (apps.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText(allApps.isEmpty() ? "No launchable apps found." : "No app matches your search.");
+            empty.setText(allApps.isEmpty()
+                    ? txt("No launchable apps found.", "برنامه قابل اجرا پیدا نشد.")
+                    : txt("No app matches your search.", "برنامه‌ای با جستجوی شما پیدا نشد."));
             empty.setTextColor(getResources().getColor(R.color.muted));
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(0, dp(18), 0, dp(18));
@@ -172,6 +186,13 @@ public class AppsActivity extends Activity {
         LinearLayout.LayoutParams params = matchWrap();
         params.setMargins(0, 0, 0, dp(8));
         row.setLayoutParams(params);
+
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(app.icon);
+        icon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(42), dp(42));
+        iconParams.setMargins(0, 0, dp(10), 0);
+        row.addView(icon, iconParams);
 
         LinearLayout textBox = new LinearLayout(this);
         textBox.setOrientation(LinearLayout.VERTICAL);
@@ -255,25 +276,31 @@ public class AppsActivity extends Activity {
                 continue;
             }
             String label = packageName;
+            Drawable icon = null;
             try {
                 ApplicationInfo appInfo = pm.getApplicationInfo(packageName, 0);
                 CharSequence appLabel = pm.getApplicationLabel(appInfo);
                 if (appLabel != null && appLabel.length() > 0) {
                     label = appLabel.toString();
                 }
+                icon = appInfo.loadIcon(pm);
             } catch (Exception ignored) {
             }
-            unique.put(packageName, new AppEntry(label, packageName));
+            unique.put(packageName, new AppEntry(label, packageName, icon));
         }
         return new ArrayList<>(unique.values());
     }
 
     private void updateCount() {
-        countText.setText("Bypassed apps: " + BypassStore.count(this));
+        countText.setText(txt("Bypassed apps: ", "برنامه‌های خارج از VPN: ") + BypassStore.count(this));
     }
 
     private void showStopVpnMessage() {
-        Toast.makeText(this, "Stop VPN first, then change bypass apps.", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, txt("Stop VPN first, then change bypass apps.", "اول VPN را خاموش کنید، بعد لیست برنامه‌ها را تغییر دهید."), Toast.LENGTH_SHORT).show();
+    }
+
+    private String txt(String english, String persian) {
+        return persianUi ? persian : english;
     }
 
     private LinearLayout.LayoutParams matchWrap() {
@@ -290,10 +317,12 @@ public class AppsActivity extends Activity {
     private static final class AppEntry {
         final String label;
         final String packageName;
+        final Drawable icon;
 
-        AppEntry(String label, String packageName) {
+        AppEntry(String label, String packageName, Drawable icon) {
             this.label = label;
             this.packageName = packageName;
+            this.icon = icon;
         }
     }
 }

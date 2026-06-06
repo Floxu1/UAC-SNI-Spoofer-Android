@@ -226,7 +226,7 @@ public class XrayRunner {
                     uri.getHost()
             );
             out.sni = firstNonEmpty(configSni, profile.sni);
-            out.hostHeader = firstNonEmpty(query.get("host"), query.get("authority"), configSni);
+            out.hostHeader = firstNonEmpty(query.get("host"), query.get("authority"), configSni, profile.sni);
             out.path = firstNonEmpty(query.get("path"), "/");
             if (!out.path.startsWith("/")) {
                 out.path = "/" + out.path;

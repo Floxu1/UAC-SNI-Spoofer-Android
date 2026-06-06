@@ -23,6 +23,7 @@ public class ProxyConfig {
     public int configPort;
     public boolean lastPingOk;
     public double lastPingMs;
+    public String origin;
 
     public ProxyConfig() {
         id = UUID.randomUUID().toString();
@@ -38,6 +39,7 @@ public class ProxyConfig {
         configPort = 40443;
         lastPingOk = false;
         lastPingMs = 0;
+        origin = "user";
     }
 
     public static ProxyConfig defaultPrimary() {
@@ -65,6 +67,7 @@ public class ProxyConfig {
         copy.configPort = configPort;
         copy.lastPingOk = lastPingOk;
         copy.lastPingMs = lastPingMs;
+        copy.origin = origin;
         return copy;
     }
 
@@ -92,6 +95,7 @@ public class ProxyConfig {
         json.put("configPort", configPort);
         json.put("lastPingOk", lastPingOk);
         json.put("lastPingMs", lastPingMs);
+        json.put("origin", origin);
         return json;
     }
 
@@ -100,9 +104,18 @@ public class ProxyConfig {
         config.id = json.optString("id", UUID.randomUUID().toString());
         config.name = json.optString("name", "Imported config");
         config.address = json.optString("address", DEFAULT_SPOOF_ADDRESS);
-        config.fallbackAddress = json.optString("fallbackAddress", "");
+        config.fallbackAddress = json.optString("fallbackAddress", DEFAULT_SPOOF_FALLBACK);
         config.port = json.optInt("port", 443);
         config.sni = json.optString("sni", DEFAULT_SPOOF_SNI);
+        if (config.address.trim().isEmpty()) {
+            config.address = DEFAULT_SPOOF_ADDRESS;
+        }
+        if (config.fallbackAddress.trim().isEmpty()) {
+            config.fallbackAddress = DEFAULT_SPOOF_FALLBACK;
+        }
+        if (config.sni.trim().isEmpty()) {
+            config.sni = DEFAULT_SPOOF_SNI;
+        }
         config.method = json.optString("method", "combined");
         config.sourceUri = json.optString("sourceUri", "");
         config.protocol = json.optString("protocol", "vless");
@@ -110,6 +123,7 @@ public class ProxyConfig {
         config.configPort = json.optInt("configPort", 40443);
         config.lastPingOk = json.optBoolean("lastPingOk", false);
         config.lastPingMs = json.optDouble("lastPingMs", 0);
+        config.origin = json.optString("origin", "user");
         return config;
     }
 }

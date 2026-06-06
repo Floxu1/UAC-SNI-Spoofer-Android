@@ -16,13 +16,17 @@ public final class VlessParser {
     }
 
     public static List<ProxyConfig> parseMany(String input) {
+        return parseMany(input, false);
+    }
+
+    public static List<ProxyConfig> parseMany(String input, boolean suggested) {
         List<ProxyConfig> out = new ArrayList<>();
         if (input == null) {
             return out;
         }
         Matcher matcher = Pattern.compile("(vless|trojan)://\\S+", Pattern.CASE_INSENSITIVE).matcher(input);
         while (matcher.find()) {
-            ProxyConfig config = parseOne(matcher.group());
+            ProxyConfig config = parseOne(matcher.group(), suggested);
             if (config != null) {
                 out.add(config);
             }
@@ -31,6 +35,10 @@ public final class VlessParser {
     }
 
     public static ProxyConfig parseOne(String raw) {
+        return parseOne(raw, false);
+    }
+
+    public static ProxyConfig parseOne(String raw, boolean suggested) {
         try {
             String value = raw.trim();
             URI uri = new URI(value);

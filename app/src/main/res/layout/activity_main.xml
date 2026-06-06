@@ -1,380 +1,767 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/pageScroll"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/bg_app"
-    android:descendantFocusability="beforeDescendants"
-    android:fillViewport="true">
+    android:orientation="vertical">
 
-    <LinearLayout
-        android:id="@+id/mainContent"
+    <ScrollView
+        android:id="@+id/pageScroll"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:focusable="true"
-        android:focusableInTouchMode="true"
-        android:orientation="vertical"
-        android:paddingStart="14dp"
-        android:paddingTop="16dp"
-        android:paddingEnd="14dp"
-        android:paddingBottom="18dp">
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:descendantFocusability="beforeDescendants"
+        android:fillViewport="true">
 
         <LinearLayout
+            android:id="@+id/mainContent"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="@drawable/bg_header"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
             android:orientation="vertical"
             android:paddingStart="14dp"
-            android:paddingTop="12dp"
+            android:paddingTop="14dp"
             android:paddingEnd="14dp"
-            android:paddingBottom="14dp">
+            android:paddingBottom="18dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
+                android:background="@drawable/bg_top_compact"
+                android:orientation="vertical"
+                android:paddingStart="2dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="2dp"
+                android:paddingBottom="4dp">
 
-                <Button
-                    android:id="@+id/menuButton"
-                    android:layout_width="58dp"
-                    android:layout_height="42dp"
-                    android:background="@drawable/bg_outline_button"
-                    android:text="Menu"
-                    android:textAllCaps="false"
-                    android:textColor="@color/accent"
-                    android:textSize="12sp"
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="sans-serif-medium"
+                    android:gravity="center"
+                    android:letterSpacing="0.02"
+                    android:maxLines="1"
+                    android:singleLine="true"
+                    android:text="UAC Spoofer"
+                    android:textColor="@color/ink"
+                    android:textSize="22sp"
                     android:textStyle="bold" />
 
                 <TextView
-                    android:layout_width="0dp"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="12dp"
-                    android:layout_weight="1"
-                    android:text="UAC Spoofer"
-                    android:textColor="#FFFFFF"
-                    android:textSize="26sp"
-                    android:textStyle="bold" />
-
-                <Button
-                    android:id="@+id/themeButton"
-                    android:layout_width="70dp"
-                    android:layout_height="42dp"
-                    android:layout_marginStart="10dp"
-                    android:background="@drawable/bg_outline_button"
-                    android:text="Light"
-                    android:textAllCaps="false"
-                    android:textColor="@color/accent"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/statusSection"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="14dp">
-
-            <TextView
-                android:id="@+id/statusText"
-                android:layout_width="match_parent"
-                android:layout_height="42dp"
-                android:background="@drawable/bg_status_idle"
-                android:gravity="center"
-                android:text="Ready"
-                android:textColor="@color/ink"
-                android:textSize="15sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/activeConfigText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="Active config"
-                android:textColor="@color/ink"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/targetText"
-                android:layout_width="match_parent"
-                android:layout_height="44dp"
-                android:layout_marginTop="8dp"
-                android:background="@drawable/bg_chip"
-                android:gravity="center_vertical"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
-                android:singleLine="true"
-                android:text="No config selected"
-                android:textColor="@color/ink"
-                android:textDirection="ltr"
-                android:textSize="13sp"
-                android:typeface="monospace" />
-
-            <TextView
-                android:id="@+id/connectedPingText"
-                android:layout_width="match_parent"
-                android:layout_height="34dp"
-                android:layout_marginTop="8dp"
-                android:background="@drawable/bg_chip"
-                android:gravity="center"
-                android:text="Connected ping: --"
-                android:textColor="@color/muted"
-                android:textDirection="ltr"
-                android:textSize="12sp"
-                android:typeface="monospace" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/runButton"
-                    android:layout_width="0dp"
-                    android:layout_height="50dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_run"
-                    android:text="@string/run"
-                    android:textAllCaps="false"
-                    android:textColor="#FFFFFF"
-                    android:textStyle="bold" />
-
-                <Button
-                    android:id="@+id/stopButton"
-                    android:layout_width="0dp"
-                    android:layout_height="50dp"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_stop"
-                    android:text="@string/stop"
-                    android:textAllCaps="false"
-                    android:textColor="#FFFFFF"
-                    android:textStyle="bold" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/trafficText"
-                android:layout_width="match_parent"
-                android:layout_height="36dp"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/bg_chip"
-                android:gravity="center"
-                android:text="0 B / 0 B"
-                android:textColor="@color/muted"
-                android:textDirection="ltr"
-                android:textSize="12sp"
-                android:typeface="monospace" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/configsSection"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="14dp">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Configs"
-                android:textColor="@color/ink"
-                android:textSize="17sp"
-                android:textStyle="bold" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/addConfigButton"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_outline_button"
-                    android:text="Add"
-                    android:textAllCaps="false"
-                    android:textColor="@color/ink" />
-
-                <Button
-                    android:id="@+id/editConfigButton"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_outline_button"
-                    android:text="Edit"
-                    android:textAllCaps="false"
-                    android:textColor="@color/ink" />
-
-                <Button
-                    android:id="@+id/importClipboardButton"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1.35"
-                    android:background="@drawable/bg_outline_button"
-                    android:text="Clipboard"
-                    android:textAllCaps="false"
-                    android:textColor="@color/ink" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/configsContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:orientation="vertical" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/scannerSection"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="14dp">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Scanner"
-                android:textColor="@color/ink"
-                android:textSize="17sp"
-                android:textStyle="bold" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:orientation="horizontal">
-
-                <Button
-                    android:id="@+id/startScanButton"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_run"
-                    android:text="Scan"
-                    android:textAllCaps="false"
-                    android:textColor="#FFFFFF" />
-
-                <Button
-                    android:id="@+id/stopScanButton"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_stop"
-                    android:text="Stop"
-                    android:textAllCaps="false"
-                    android:textColor="#FFFFFF" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/scannerStatusText"
-                android:layout_width="match_parent"
-                android:layout_height="36dp"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/bg_chip"
-                android:gravity="center_vertical"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp"
-                android:text="Scanner idle"
-                android:textColor="@color/muted"
-                android:textSize="12sp" />
-
-            <com.uac.spoofer.InnerScrollView
-                android:id="@+id/scannerResultsScroll"
-                android:layout_width="match_parent"
-                android:layout_height="260dp"
-                android:layout_marginTop="8dp"
-                android:background="@drawable/bg_input"
-                android:clickable="true"
-                android:descendantFocusability="blocksDescendants"
-                android:fillViewport="false"
-                android:focusable="false"
-                android:nestedScrollingEnabled="true"
-                android:padding="8dp">
+                    android:layout_marginTop="2dp"
+                    android:gravity="center"
+                    android:maxLines="1"
+                    android:singleLine="true"
+                    android:text="Xray tunnel control"
+                    android:textColor="@color/muted"
+                    android:textSize="12sp" />
 
                 <LinearLayout
-                    android:id="@+id/resultsContainer"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical" />
-            </com.uac.spoofer.InnerScrollView>
-        </LinearLayout>
+                    android:layout_marginTop="10dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
-        <LinearLayout
-            android:id="@+id/logsSection"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_card"
-            android:orientation="vertical"
-            android:padding="14dp">
+                    <Button
+                        android:id="@+id/menuButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Menu"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
 
-            <TextView
+                    <Button
+                        android:id="@+id/themeButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Light"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/languageButton"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1.35"
+                        android:background="@drawable/bg_run"
+                        android:text="فارسی/English"
+                        android:textAllCaps="false"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/statusSection"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Live Logs"
-                android:textColor="@color/ink"
-                android:textSize="17sp"
-                android:textStyle="bold" />
-
-            <ScrollView
-                android:id="@+id/logScroll"
-                android:layout_width="match_parent"
-                android:layout_height="280dp"
-                android:layout_marginTop="10dp"
-                android:background="@drawable/bg_log"
-                android:descendantFocusability="blocksDescendants"
-                android:fillViewport="true"
-                android:focusable="false"
-                android:padding="12dp">
+                android:layout_marginTop="24dp"
+                android:background="@drawable/bg_modern_panel"
+                android:orientation="vertical"
+                android:paddingStart="14dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="8dp">
 
                 <TextView
-                    android:id="@+id/logText"
+                    android:id="@+id/statusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="34dp"
+                    android:layout_gravity="center_horizontal"
+                    android:gravity="center"
+                    android:text="VPN is OFF"
+                    android:textColor="@color/muted"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="214dp"
+                    android:layout_marginTop="12dp">
+
+                    <com.uac.spoofer.ConnectionRingView
+                        android:id="@+id/connectionRingView"
+                        android:layout_width="204dp"
+                        android:layout_height="204dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/bg_connect_orbit" />
+
+                    <Button
+                        android:id="@+id/runButton"
+                        android:layout_width="142dp"
+                        android:layout_height="142dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/bg_connect_button"
+                        android:gravity="center"
+                        android:text="@string/run"
+                        android:textAllCaps="false"
+                        android:textColor="#FFFFFF"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+                </FrameLayout>
+
+                <TextView
+                    android:id="@+id/activeConfigText"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:lineSpacingExtra="2dp"
-                    android:textColor="#D7E3EA"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center"
+                    android:text="Active config"
+                    android:textColor="@color/ink"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/targetText"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="18dp"
+                    android:background="@drawable/bg_modern_row"
+                    android:gravity="center_vertical"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:singleLine="true"
+                    android:text="No config selected"
+                    android:textColor="@color/ink"
                     android:textDirection="ltr"
-                    android:textIsSelectable="false"
-                    android:textSize="12sp"
-                android:typeface="monospace" />
-            </ScrollView>
+                    android:textSize="13sp"
+                    android:typeface="monospace" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/connectedPingText"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_modern_row"
+                        android:gravity="center"
+                        android:text="Ping: --"
+                        android:textColor="@color/muted"
+                        android:textDirection="ltr"
+                        android:textSize="12sp"
+                        android:typeface="monospace" />
+
+                    <TextView
+                        android:id="@+id/trafficText"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_modern_row"
+                        android:gravity="center"
+                        android:text="0 B / 0 B"
+                        android:textColor="@color/muted"
+                        android:textDirection="ltr"
+                        android:textSize="12sp"
+                    android:typeface="monospace" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/homeVersionText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:background="@drawable/bg_chip"
+                    android:gravity="center"
+                    android:letterSpacing="0"
+                    android:paddingStart="12dp"
+                    android:paddingTop="9dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="9dp"
+                    android:text="UAC Spoofer v1.0.4"
+                    android:textColor="@color/accent"
+                    android:textDirection="ltr"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <Switch
+                    android:id="@+id/modeSwitch"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_modern_row"
+                    android:checked="true"
+                    android:gravity="center_vertical"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:text="Auto Mode"
+                    android:textColor="@color/ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <Switch
+                    android:id="@+id/manualBestSwitch"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_modern_row"
+                    android:checked="false"
+                    android:gravity="center_vertical"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:text="Pick Best Manual Config"
+                    android:textColor="@color/ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/advancedTuningButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_outline_button"
+                    android:text="Advanced / Tuning"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <View
+                android:id="@+id/homeSpacer"
+                android:layout_width="match_parent"
+                android:layout_height="22dp"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/configsSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Configs"
+                    android:textColor="@color/ink"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/addConfigButton"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Add"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/editConfigButton"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Edit"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/deleteConfigButton"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Delete All"
+                        android:textAllCaps="false"
+                        android:textColor="@color/danger"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/importClipboardButton"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1.35"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Clipboard"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/suggestedConfigButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_outline_button"
+                    android:text="Load Suggested"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/manualConfigsTabButton"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_run"
+                        android:text="Manual"
+                        android:textAllCaps="false"
+                        android:textColor="#FFFFFF"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/suggestedConfigsTabButton"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Suggested"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/configsContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:orientation="vertical" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/scannerSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="SNI Lab"
+                    android:textColor="@color/ink"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:orientation="horizontal">
+
+                    <Button
+                        android:id="@+id/sniScanTabButton"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_run"
+                        android:text="Scan"
+                        android:textAllCaps="false"
+                        android:textColor="#FFFFFF"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/sniSavedTabButton"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_outline_button"
+                        android:text="Saved"
+                        android:textAllCaps="false"
+                        android:textColor="@color/ink"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/scanPanel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/scannerStatusText"
+                        android:layout_width="match_parent"
+                        android:layout_height="38dp"
+                        android:layout_marginTop="10dp"
+                        android:background="@drawable/bg_chip"
+                        android:gravity="center_vertical"
+                        android:paddingStart="10dp"
+                        android:paddingEnd="10dp"
+                        android:text="Scanner idle"
+                        android:textColor="@color/muted"
+                        android:textSize="12sp" />
+
+                    <com.uac.spoofer.InnerScrollView
+                        android:id="@+id/scannerResultsScroll"
+                        android:layout_width="match_parent"
+                        android:layout_height="360dp"
+                        android:layout_marginTop="8dp"
+                        android:background="@drawable/bg_input"
+                        android:clickable="true"
+                        android:descendantFocusability="blocksDescendants"
+                        android:fillViewport="false"
+                        android:focusable="false"
+                        android:nestedScrollingEnabled="true"
+                        android:padding="8dp">
+
+                        <LinearLayout
+                            android:id="@+id/resultsContainer"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical" />
+                    </com.uac.spoofer.InnerScrollView>
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/bookmarksSection"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:id="@+id/bookmarkTitleText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="Bookmarked SNI"
+                        android:textColor="@color/ink"
+                        android:textSize="17sp"
+                        android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Saved SNI routes stay here and can be pinged again any time."
+                    android:textColor="@color/muted"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/pingBookmarksButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="12dp"
+                    android:layout_marginBottom="4dp"
+                    android:background="@drawable/bg_run"
+                    android:text="Ping Saved SNI"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:id="@+id/bookmarksContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="vertical" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/logsSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Live Logs"
+                    android:textColor="@color/ink"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
+
+                <ScrollView
+                    android:id="@+id/logScroll"
+                    android:layout_width="match_parent"
+                    android:layout_height="420dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_log"
+                    android:descendantFocusability="blocksDescendants"
+                    android:fillViewport="true"
+                    android:focusable="false"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:id="@+id/logText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:lineSpacingExtra="2dp"
+                        android:textColor="#D7E3EA"
+                        android:textDirection="ltr"
+                        android:textIsSelectable="false"
+                        android:textSize="12sp"
+                        android:typeface="monospace" />
+                </ScrollView>
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/supportSection"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:text="Support"
+                    android:textColor="@color/ink"
+                    android:textSize="22sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center"
+                    android:text="Need help with configs, SNI results, or route testing?"
+                    android:textColor="@color/muted"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/updateStatusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:background="@drawable/bg_chip"
+                    android:gravity="center"
+                    android:lineSpacingExtra="3dp"
+                    android:padding="12dp"
+                    android:text="Checking GitHub updates..."
+                    android:textColor="@color/ink"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/checkUpdateButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_run"
+                    android:text="Check for Update"
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFF"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/githubProjectButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="10dp"
+                    android:background="@drawable/bg_outline_button"
+                    android:text="GitHub Project / Star"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_chip"
+                    android:gravity="center"
+                    android:lineSpacingExtra="3dp"
+                    android:padding="12dp"
+                    android:text="Support the project by giving it a star on GitHub."
+                    android:textColor="@color/muted"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/creditText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:background="@drawable/bg_run"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center"
+                    android:lineSpacingExtra="4dp"
+                    android:minHeight="76dp"
+                    android:padding="14dp"
+                    android:text="Open Telegram Channel&#10;t.me/UacSniSpoofer"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_chip"
+                    android:gravity="center"
+                    android:lineSpacingExtra="3dp"
+                    android:padding="12dp"
+                    android:text="credits to behroozuac"
+                    android:textColor="@color/accent"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
         </LinearLayout>
+    </ScrollView>
 
-        <TextView
-            android:id="@+id/creditText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_chip"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center"
-            android:lineSpacingExtra="3dp"
-            android:minHeight="58dp"
-            android:padding="10dp"
-            android:text="credits to behroozuac&#10;Support: @Beh50roocentzuac"
-            android:textColor="@color/accent"
-            android:textSize="14sp"
-            android:textStyle="bold" />
+    <LinearLayout
+        android:id="@+id/bottomNav"
+        android:layout_width="match_parent"
+        android:layout_height="76dp"
+        android:background="@color/page_bg"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="8dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="8dp">
 
+            <Button
+                android:id="@+id/navHomeButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_nav_active"
+                android:text="Home"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/navConfigsButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_nav_idle"
+                android:text="Configs"
+                android:textAllCaps="false"
+                android:textColor="@color/ink"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/navScanButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_nav_idle"
+                android:text="SNI"
+                android:textAllCaps="false"
+                android:textColor="@color/ink"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/navLogsButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_nav_idle"
+                android:text="Logs"
+                android:textAllCaps="false"
+                android:textColor="@color/ink"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/navSupportButton"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_nav_idle"
+                android:text="Support"
+                android:textAllCaps="false"
+                android:textColor="@color/ink"
+                android:textSize="12sp"
+                android:textStyle="bold" />
     </LinearLayout>
-</ScrollView>
-
+</LinearLayout>

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">UAC Spoofer</string>
-    <string name="run">RUN</string>
+    <string name="run">CONNECT</string>
     <string name="stop">STOP</string>
 </resources>
