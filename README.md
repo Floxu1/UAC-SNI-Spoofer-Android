@@ -1,7 +1,7 @@
 # UAC Spoofer Android
 
 
-<div align="center"> <a href="https://github.com/user-attachments/assets/947ed2dd-28a2-469d-a78e-4db148002128"> <img src="https://github.com/user-attachments/assets/947ed2dd-28a2-469d-a78e-4db148002128" width="18%"> </a> <a href="https://github.com/user-attachments/assets/6029401d-e02b-449e-a70b-a13575628db4"> <img src="https://github.com/user-attachments/assets/6029401d-e02b-449e-a70b-a13575628db4" width="18%"> </a> <a href="https://github.com/user-attachments/assets/c4251fc7-796f-447e-b7df-9cf4ac2d46d0"> <img src="https://github.com/user-attachments/assets/c4251fc7-796f-447e-b7df-9cf4ac2d46d0" width="18%"> </a> <a href="https://github.com/user-attachments/assets/68206bcd-d913-4cda-87a8-cc935c2b141c"> <img src="https://github.com/user-attachments/assets/68206bcd-d913-4cda-87a8-cc935c2b141c" width="18%"> </a> <a href="https://github.com/user-attachments/assets/9d244d7e-4bb7-4ec5-807e-f4738a372ba2"> <img src="https://github.com/user-attachments/assets/9d244d7e-4bb7-4ec5-807e-f4738a372ba2" width="18%"> </a> </div>
+<div align="center"> <a href="https://github.com/user-attachments/assets/c21aa295-8786-4494-bb77-6765bff43afd"> <img src="https://github.com/user-attachments/assets/c21aa295-8786-4494-bb77-6765bff43afd" width="18%"> </a> <a href="https://github.com/user-attachments/assets/6029401d-e02b-449e-a70b-a13575628db4"> <img src="https://github.com/user-attachments/assets/6029401d-e02b-449e-a70b-a13575628db4" width="18%"> </a> <a href="https://github.com/user-attachments/assets/c4251fc7-796f-447e-b7df-9cf4ac2d46d0"> <img src="https://github.com/user-attachments/assets/c4251fc7-796f-447e-b7df-9cf4ac2d46d0" width="18%"> </a> <a href="https://github.com/user-attachments/assets/68206bcd-d913-4cda-87a8-cc935c2b141c"> <img src="https://github.com/user-attachments/assets/68206bcd-d913-4cda-87a8-cc935c2b141c" width="18%"> </a> <a href="https://github.com/user-attachments/assets/9d244d7e-4bb7-4ec5-807e-f4738a372ba2"> <img src="https://github.com/user-attachments/assets/9d244d7e-4bb7-4ec5-807e-f4738a372ba2" width="18%"> </a> </div>
 
 <br> <br>
 
@@ -35,7 +35,6 @@ flowchart LR
 
 این پوشه شامل پروژه اصلی Android برنامه UAC Spoofer است. برنامه با Java و Android Gradle Plugin ساخته شده و برای اجرای کانفیگ‌های VLESS و Trojan، راه‌اندازی Xray، ایجاد VPN tunnel محلی و مدیریت SNI Spoofing استفاده می‌شود.
 
-## اجزای اصلی
 
 ## قابلیت‌های برنامه
 
@@ -46,16 +45,9 @@ flowchart LR
 * پشتیبانی از **Dark Mode / Light Mode** برای شخصی‌سازی ظاهر برنامه.
 * نمایش لاگ زنده برای Start، Stop، Xray، VPN و خطاها.
 * مدیریت VPN محلی و هدایت ترافیک از طریق tun2socks.
-* لینک پشتیبانی تلگرام: `@Beh50roocentzuac`
-
-
-## قابلیت‌های برنامه
-
-- اسکن SNI از لیست دامنه‌های داخلی.
-- انتخاب خودکار بهترین کانفیگ بر اساس ping پایین‌تر.
-- اجرای کانفیگ‌های VLESS و Trojan با Xray داخلی.
-- نمایش لاگ زنده برای start، stop، Xray، VPN و خطاها.
-- لینک پشتیبانی تلگرام: `@Beh50roocentzuac`.
+* اضافه شدن قابلیت انتخاب تم فارسی / English برای شخصی‌سازی ظاهر برنامه.
+* لینک پشتیبانی تلگرام: https://t.me/Beh50roocentzuac
+* لینک کانال تلگرام:https://t.me/UacSniSpoofer
 
 ## Build
 
