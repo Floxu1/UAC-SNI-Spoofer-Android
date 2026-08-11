@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UAC SNI Spoofer</string>
+    <string name="vpn_channel_name">UAC SNI Spoofer VPN</string>
+    <string name="vpn_channel_description">MCI VPN connection status</string>
+    <string name="vpn_connecting_notification">Connecting to MCI…</string>
+    <string name="vpn_connected_notification">MCI VPN connected</string>
+    <string name="vpn_failed_notification">MCI connection failed</string>
+</resources>
