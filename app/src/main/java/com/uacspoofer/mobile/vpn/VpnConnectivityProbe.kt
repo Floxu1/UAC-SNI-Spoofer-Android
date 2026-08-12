@@ -1,12 +1,16 @@
 package com.uacspoofer.mobile.vpn
 
 import com.uacspoofer.mobile.mci.MciConfig
+import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
@@ -16,55 +20,111 @@ data class ProbeResult(
     val totalBytes: Int,
     val detail: String,
     val latencyMs: Long? = null,
+    val succeededTargets: Int = 0,
+    val attemptedTargets: Int = 0,
+    val durationMs: Long = 0L,
+    val txDelta: Long = 0L,
+    val rxDelta: Long = 0L,
 )
 
 class VpnConnectivityProbe(
     private val statsProvider: () -> TunStats,
 ) {
     
-    suspend fun verify(): ProbeResult = verifyTargets(requireAllTargets = true)
+    suspend fun verify(): ProbeResult = verifyTargets(
+        requireAllTargets = true,
+        attemptAllTargets = true,
+        socksAddress = MciConfig.LOCAL_SOCKS_ADDRESS,
+        socksPort = MciConfig.LOCAL_SOCKS_PORT,
+        totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
+    )
 
     
 
 
 
-    suspend fun verifyRuntime(): ProbeResult = verifyTargets(requireAllTargets = false)
+    suspend fun verifyRuntime(): ProbeResult = verifyTargets(
+        requireAllTargets = false,
+        attemptAllTargets = false,
+        socksAddress = MciConfig.LOCAL_SOCKS_ADDRESS,
+        socksPort = MciConfig.LOCAL_SOCKS_PORT,
+        totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
+    )
 
-    private suspend fun verifyTargets(requireAllTargets: Boolean): ProbeResult =
-        withTimeoutOrNull(MciConfig.PROBE_TOTAL_TIMEOUT_MS) {
+    suspend fun verifyCandidate(settings: AdvancedSettingsData): ProbeResult = verifyTargets(
+        requireAllTargets = false,
+        attemptAllTargets = true,
+        socksAddress = settings.socksAddress,
+        socksPort = settings.socksPort,
+        totalTimeoutMs = CANDIDATE_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = CANDIDATE_READ_BYTES_PER_TARGET,
+    )
+
+    suspend fun verifyConfirmation(settings: AdvancedSettingsData): ProbeResult = verifyTargets(
+        requireAllTargets = false,
+        attemptAllTargets = false,
+        socksAddress = settings.socksAddress,
+        socksPort = settings.socksPort,
+        totalTimeoutMs = CONFIRMATION_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = CONFIRMATION_READ_BYTES_PER_TARGET,
+    )
+
+    private suspend fun verifyTargets(
+        requireAllTargets: Boolean,
+        attemptAllTargets: Boolean,
+        socksAddress: String,
+        socksPort: Int,
+        totalTimeoutMs: Long,
+        readBytesPerTarget: Int,
+    ): ProbeResult =
+        withTimeoutOrNull(totalTimeoutMs) {
+            val startedNs = System.nanoTime()
             val before = statsProvider()
             val nonce = System.nanoTime().toString(16)
             val successes = mutableListOf<String>()
             val failures = mutableListOf<String>()
             val latencySamples = mutableListOf<Long>()
-            var total = 0
-
-            for (target in MciConfig.PROBE_TARGETS) {
-                val targetStartedNs = System.nanoTime()
-                val count = try {
-                    runInterruptible(Dispatchers.IO) {
-                        downloadProbeBytes("${target.url}?uac_nonce=$nonce")
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Exception) {
-                    failures += "${target.name}: ${error.javaClass.simpleName}: ${error.message.orEmpty()}"
-                    continue
+            val outcomes = if (attemptAllTargets) {
+                coroutineScope {
+                    MciConfig.PROBE_TARGETS.map { target ->
+                        async {
+                            probeTarget(target.name, target.url, nonce, socksAddress, socksPort, readBytesPerTarget)
+                        }
+                    }.awaitAll()
                 }
-
-                total += count
-                if (count >= MciConfig.PROBE_MIN_BYTES_PER_TARGET) {
-                    successes += target.name
-                    latencySamples += ((System.nanoTime() - targetStartedNs) / 1_000_000L).coerceAtLeast(1L)
-                    if (!requireAllTargets) break
+            } else {
+                val sequential = mutableListOf<TargetOutcome>()
+                for (target in MciConfig.PROBE_TARGETS) {
+                    val outcome = probeTarget(
+                        target.name,
+                        target.url,
+                        nonce,
+                        socksAddress,
+                        socksPort,
+                        readBytesPerTarget,
+                    )
+                    sequential += outcome
+                    if (outcome.bytes >= MciConfig.PROBE_MIN_BYTES_PER_TARGET) break
+                }
+                sequential
+            }
+            outcomes.forEach { outcome ->
+                if (outcome.bytes >= MciConfig.PROBE_MIN_BYTES_PER_TARGET) {
+                    successes += outcome.name
+                    latencySamples += outcome.latencyMs
                 } else {
-                    failures += "${target.name}: only $count bytes"
+                    failures += outcome.failure ?: "${outcome.name}: only ${outcome.bytes} bytes"
                 }
             }
+            val total = outcomes.sumOf(TargetOutcome::bytes)
 
             delay(200L)
             val after = statsProvider()
             val crossedTun = after.hasBidirectionalGrowthSince(before)
+            val txDelta = (after.txBytes - before.txBytes).coerceAtLeast(0L)
+            val rxDelta = (after.rxBytes - before.rxBytes).coerceAtLeast(0L)
             val success = if (requireAllTargets) {
                 successes.size == MciConfig.PROBE_TARGETS.size &&
                     total >= MciConfig.PROBE_MIN_TOTAL_BYTES
@@ -76,7 +136,7 @@ class VpnConnectivityProbe(
                 totalBytes = total,
                 detail = if (success) {
                     val traffic = if (crossedTun) {
-                        ", tx=${after.txBytes - before.txBytes}, rx=${after.rxBytes - before.rxBytes}"
+                        ", tx=$txDelta, rx=$rxDelta"
                     } else {
                         ""
                     }
@@ -89,19 +149,66 @@ class VpnConnectivityProbe(
                 latencyMs = latencySamples.sorted().let { samples ->
                     samples.takeIf { it.isNotEmpty() }?.get(samples.size / 2)
                 },
+                succeededTargets = successes.size,
+                attemptedTargets = successes.size + failures.size,
+                durationMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L),
+                txDelta = txDelta,
+                rxDelta = rxDelta,
             )
         } ?: ProbeResult(
             success = false,
             totalBytes = 0,
-            detail = "probe timed out after ${MciConfig.PROBE_TOTAL_TIMEOUT_MS} ms",
+            detail = "probe timed out after $totalTimeoutMs ms",
+            durationMs = totalTimeoutMs,
         )
 
-    private fun downloadProbeBytes(url: String): Int {
+    private suspend fun probeTarget(
+        name: String,
+        url: String,
+        nonce: String,
+        socksAddress: String,
+        socksPort: Int,
+        readBytes: Int,
+    ): TargetOutcome {
+        val startedNs = System.nanoTime()
+        return try {
+            val count = runInterruptible(Dispatchers.IO) {
+                downloadProbeBytes(
+                    url = "$url?uac_nonce=$nonce",
+                    socksAddress = socksAddress,
+                    socksPort = socksPort,
+                    readBytes = readBytes,
+                )
+            }
+            TargetOutcome(
+                name = name,
+                bytes = count,
+                latencyMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L),
+                failure = null,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            TargetOutcome(
+                name = name,
+                bytes = 0,
+                latencyMs = ((System.nanoTime() - startedNs) / 1_000_000L).coerceAtLeast(1L),
+                failure = "$name: ${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+            )
+        }
+    }
+
+    private fun downloadProbeBytes(
+        url: String,
+        socksAddress: String,
+        socksPort: Int,
+        readBytes: Int,
+    ): Int {
         val socks = Proxy(
             Proxy.Type.SOCKS,
             InetSocketAddress.createUnresolved(
-                MciConfig.LOCAL_SOCKS_ADDRESS,
-                MciConfig.LOCAL_SOCKS_PORT,
+                socksAddress,
+                socksPort,
             ),
         )
         val connection = URL(url).openConnection(socks) as HttpsURLConnection
@@ -119,11 +226,11 @@ class VpnConnectivityProbe(
             return connection.inputStream.use { input ->
                 val buffer = ByteArray(256)
                 var total = 0
-                while (total < MciConfig.PROBE_READ_BYTES_PER_TARGET) {
+                while (total < readBytes) {
                     val read = input.read(
                         buffer,
                         0,
-                        minOf(buffer.size, MciConfig.PROBE_READ_BYTES_PER_TARGET - total),
+                        minOf(buffer.size, readBytes - total),
                     )
                     if (read < 0) break
                     if (read == 0) continue
@@ -135,4 +242,18 @@ class VpnConnectivityProbe(
             connection.disconnect()
         }
     }
+
+    companion object {
+        private const val CANDIDATE_TOTAL_TIMEOUT_MS = 8_000L
+        private const val CANDIDATE_READ_BYTES_PER_TARGET = 16_384
+        private const val CONFIRMATION_TOTAL_TIMEOUT_MS = 9_000L
+        private const val CONFIRMATION_READ_BYTES_PER_TARGET = 1_024
+    }
+
+    private data class TargetOutcome(
+        val name: String,
+        val bytes: Int,
+        val latencyMs: Long,
+        val failure: String?,
+    )
 }

@@ -34,37 +34,45 @@ internal object MciXrayConfigBuilder {
         }
 
         val outbounds = buildList {
-            
             add(outbound("proxy", edge.address, edge.port, edge.finalmaskMaxSplit, s.muxEnabled))
+            add(outbound("probe-proxy", edge.address, edge.port, edge.finalmaskMaxSplit, false))
+            add("""{"tag":"dns-out","protocol":"dns","settings":{}}""")
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
         }.joinToString(",\n")
 
         val acceptedInbounds = "[\"socks-in\"]"
+        val dnsInbounds = if (nativeTun) "[\"socks-in\",\"tun-in\"]" else acceptedInbounds
         val routingRules = buildList {
+            add("""{"type":"field","inboundTag":$dnsInbounds,"network":"tcp,udp","port":"53","outboundTag":"dns-out"}""")
             if (s.ipv4Only) {
                 add("""{"type":"field","inboundTag":$acceptedInbounds,"network":"tcp","ip":["::/0"],"outboundTag":"block"}""")
             }
             if (s.blockUdp443) {
                 add("""{"type":"field","network":"udp","port":"443","outboundTag":"block"}""")
             }
+            add("""{"type":"field","inboundTag":["socks-in"],"network":"tcp,udp","outboundTag":"probe-proxy"}""")
         }.joinToString(",\n")
 
         val rootExtras = if (nativeTun) {
-            """"stats":{},"policy":{"system":{"statsOutboundUplink":true,"statsOutboundDownlink":true}},"""
+            """"stats":{},"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5,"bufferSize":64}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true,"statsOutboundUplink":true,"statsOutboundDownlink":true}},"""
         } else {
             ""
         }
+        val sniffing = """"sniffing":{"enabled":true,"destOverride":["http","tls","fakedns"],"metadataOnly":false}"""
         val inbounds = buildList {
-            add("""{"tag":"socks-in","listen":"${q(s.socksAddress)}","port":${s.socksPort},"protocol":"socks","settings":{"auth":"noauth","udp":${s.socksUdp},"ip":"${q(s.socksAddress)}","userLevel":8}}""")
+            add("""{"tag":"socks-in","listen":"${q(s.socksAddress)}","port":${s.socksPort},"protocol":"socks","settings":{"auth":"noauth","udp":${s.socksUdp},"ip":"${q(s.socksAddress)}","userLevel":8},$sniffing}""")
             if (nativeTun) {
-                add("""{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":${s.tunMtu},"userLevel":8}}""")
+                add("""{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":${s.tunMtu},"userLevel":8},$sniffing}""")
             }
         }.joinToString(",\n")
 
+        val dns = """"dns":{"servers":["fakedns"],"queryStrategy":"UseIPv4","disableCache":false,"tag":"dns-query"},"fakedns":{"ipPool":"198.19.0.0/16","poolSize":32768},"""
+
         return """
             {
-              "log":{"loglevel":"warning"},
+              "log":{"loglevel":"debug","dnsLog":true,"maskAddress":"quarter"},
               $rootExtras
+              $dns
               "inbounds":[$inbounds],
               "outbounds":[$outbounds],
               "routing":{"domainStrategy":"${q(s.routingDomainStrategy)}","rules":[$routingRules]}

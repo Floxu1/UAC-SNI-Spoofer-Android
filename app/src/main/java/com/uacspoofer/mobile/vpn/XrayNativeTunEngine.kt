@@ -19,6 +19,8 @@ class XrayNativeTunEngine(private val context: Context) {
     private var controller: CoreController? = null
     private var totalUplink = 0L
     private var totalDownlink = 0L
+    private var totalProbeUplink = 0L
+    private var totalProbeDownlink = 0L
 
     @Synchronized
     fun start(
@@ -36,7 +38,7 @@ class XrayNativeTunEngine(private val context: Context) {
             override fun shutdown(): Long = 0L
             override fun onEmitStatus(code: Long, message: String?): Long {
                 if (!message.isNullOrBlank()) {
-                    AppLogRepository.info(LogSource.XRAY, "Native: $message")
+                    AppLogRepository.debug(LogSource.XRAY, "Native status=$code: $message")
                 }
                 return 0L
             }
@@ -44,6 +46,8 @@ class XrayNativeTunEngine(private val context: Context) {
         controller = core
         totalUplink = 0L
         totalDownlink = 0L
+        totalProbeUplink = 0L
+        totalProbeDownlink = 0L
         try {
             core.startLoop(MciNativeXrayConfig.build(edge, settings, profile), tun.fd)
             check(core.isRunning) { "Native Xray core did not enter running state" }
@@ -61,13 +65,17 @@ class XrayNativeTunEngine(private val context: Context) {
     @Synchronized
     fun stats(): TunStats {
         val core = controller ?: return TunStats.ZERO
-        totalUplink += listOf("proxy").sumOf { tag ->
-            runCatching { core.queryStats(tag, "uplink") }.getOrDefault(0L).coerceAtLeast(0L)
-        }
-        totalDownlink += listOf("proxy").sumOf { tag ->
-            runCatching { core.queryStats(tag, "downlink") }.getOrDefault(0L).coerceAtLeast(0L)
-        }
+        totalUplink += query(core, "proxy", "uplink")
+        totalDownlink += query(core, "proxy", "downlink")
         return TunStats(0L, totalUplink, 0L, totalDownlink)
+    }
+
+    @Synchronized
+    fun probeStats(): TunStats {
+        val core = controller ?: return TunStats.ZERO
+        totalProbeUplink += query(core, "probe-proxy", "uplink")
+        totalProbeDownlink += query(core, "probe-proxy", "downlink")
+        return TunStats(0L, totalProbeUplink, 0L, totalProbeDownlink)
     }
 
     @Synchronized
@@ -86,8 +94,13 @@ class XrayNativeTunEngine(private val context: Context) {
         descriptor = null
         totalUplink = 0L
         totalDownlink = 0L
+        totalProbeUplink = 0L
+        totalProbeDownlink = 0L
         if (hadCore) AppLogRepository.info(LogSource.TUN, "Xray Native TUN stopped")
     }
+
+    private fun query(core: CoreController, tag: String, direction: String): Long =
+        runCatching { core.queryStats(tag, direction) }.getOrDefault(0L).coerceAtLeast(0L)
 }
 
 private object NativeXrayRuntime {

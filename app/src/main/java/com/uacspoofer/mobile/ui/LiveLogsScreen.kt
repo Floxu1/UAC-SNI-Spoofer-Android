@@ -155,7 +155,7 @@ internal fun LiveLogsScreen(onMenuClick: () -> Unit) {
             }
             Spacer(Modifier.height(7.dp))
             Text(
-                text = "Memory buffer • newest ${logs.size}/700 entries",
+                text = "Memory buffer • newest ${logs.size}/2000 entries",
                 color = UacColors.TextSecondary.copy(alpha = 0.72f),
                 fontSize = 10.sp,
                 modifier = Modifier.align(Alignment.CenterHorizontally),

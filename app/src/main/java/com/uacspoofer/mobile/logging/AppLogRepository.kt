@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 
 object AppLogRepository {
-    private const val MAX_ENTRIES = 700
+    private const val MAX_ENTRIES = 2_000
     private val sequence = AtomicLong(0L)
     private val lock = Any()
     private val mutableEntries = MutableStateFlow<List<AppLogEntry>>(emptyList())
@@ -88,6 +88,7 @@ enum class LogLevel(val label: String) {
 enum class LogSource(val label: String) {
     APP("APP"),
     SERVICE("SERVICE"),
+    ADAPTIVE("ADAPT"),
     XRAY("XRAY"),
     TUN("TUN"),
 }
