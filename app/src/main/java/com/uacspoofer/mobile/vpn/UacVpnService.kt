@@ -336,7 +336,75 @@ class UacVpnService : VpnService() {
         Log.e(TAG, "all adaptive candidates failed", lastFailure)
         AppLogRepository.error(
             LogSource.SERVICE,
-            "All adaptive candidates failed; best=${bestRep÷Om¢G§²ÚîÆ­yÐ             if (token == generation.get() && resourcesActive) {
+            "All adaptive candidates failed; best=${bestReport?.detail() ?: "none"}",
+            lastFailure,
+        )
+        if (token == generation.get()) {
+            ConnectionStateStore.markError()
+            runCatching { updateFailureNotification() }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun establishTun(settings: AdvancedSettingsData): android.os.ParcelFileDescriptor? {
+        val route = TunRouteParser.parse(settings.tunRoute)
+        AppLogRepository.debug(
+            LogSource.TUN,
+            "Establish request mtu=${settings.tunMtu} address=${settings.tunAddress} route=${settings.tunRoute} " +
+                "dns=${settings.nativeDns} ipv4Only=${settings.ipv4Only}",
+        )
+        val builder = Builder()
+            .setSession(getString(R.string.app_name))
+            .setBlocking(false)
+            .setMtu(settings.tunMtu)
+            .addAddress(settings.tunAddress, 32)
+            .addRoute(route.first, route.second)
+            .addDnsServer(settings.nativeDns)
+            .apply { if (settings.ipv4Only) allowFamily(OsConstants.AF_INET) }
+
+        AppRoutingPreferences.applyTo(builder, this)
+        return builder.establish()
+    }
+
+    private suspend fun cleanupRoute() {
+        profileStore.clearActive()
+        adaptiveLearningJob?.cancel()
+        adaptiveLearningJob = null
+        networkWatchJob?.cancel()
+        networkWatchJob = null
+        statsJob?.cancel()
+        statsJob = null
+        latencyJob?.cancel()
+        latencyJob = null
+        nativeTunEngine.stop()
+        activeEdge = null
+        activeCandidate = null
+        activeFingerprint = null
+        activeSignature = null
+        ConnectionMetricsStore.reset()
+        TrafficStatsStore.reset()
+    }
+
+    private fun startLatencySampler(token: Long) {
+        latencyJob?.cancel()
+        ConnectionMetricsStore.beginLatencyMeasurement()
+        val job = serviceScope.launch {
+            try {
+                repeat(LATENCY_SAMPLE_COUNT) { index ->
+                    if (token != generation.get() || !resourcesActive) return@launch
+                    val probe = connectivityProbe.verifyRuntime()
+                    if (probe.success) ConnectionMetricsStore.addLatencySample(probe.latencyMs)
+                    if (index + 1 < LATENCY_SAMPLE_COUNT) delay(LATENCY_SAMPLE_DELAY_MS)
+                }
+                if (token == generation.get() && resourcesActive) {
+                    ConnectionMetricsStore.finishLatencyMeasurement()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                AppLogRepository.warning(LogSource.SERVICE, "Latency sampling failed", error)
+                if (token == generation.get() && resourcesActive) {
                     ConnectionMetricsStore.finishLatencyMeasurement()
                 }
             }
