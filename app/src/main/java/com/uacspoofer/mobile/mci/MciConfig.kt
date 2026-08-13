@@ -58,7 +58,7 @@ object MciConfig {
     const val EDGE_FAILURE_COOLDOWN_MS = 12_000L
 
     
-    const val TUN_MTU = 1400
+    const val TUN_MTU = 1280
     const val TUN_ADDRESS = "198.18.0.1"
 
     const val PROBE_MIN_BYTES_PER_TARGET = 64

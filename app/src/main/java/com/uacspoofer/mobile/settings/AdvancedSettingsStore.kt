@@ -28,7 +28,7 @@ data class AdvancedSettingsData(
  val outboundProtocol:String="trojan",val transportNetwork:String="ws",val transportSecurity:String="tls",val trojanPassword:String="humanity",val tlsSni:String="www.ignitelimit.com",val tlsAlpn:String="http/1.1",val tlsFingerprint:String="chrome",val wsHost:String="www.ignitelimit.com",val wsPath:String="/assignment",
  val finalmaskPacket:String="tlshello",val finalmaskLength:Int=5,val finalmaskDelayMs:Int=0,val muxEnabled:Boolean=false,val muxConcurrency:Int=8,
  val domainStrategy:String="UseIPv4",val routingDomainStrategy:String="AsIs",val ipv4Only:Boolean=true,val keepAliveIdleSeconds:Int=11,val keepAliveIntervalSeconds:Int=1,val blockUdp443:Boolean=true,
- val socksAddress:String="127.0.0.1",val socksPort:Int=10808,val socksUdp:Boolean=true,val tunMtu:Int=1400,val tunAddress:String="198.18.0.1",val nativeDns:String="1.1.1.1",val dnsResolverUrl:String="https://cloudflare-dns.com/dns-query",val tunRoute:String="0.0.0.0/0"
+ val socksAddress:String="127.0.0.1",val socksPort:Int=10808,val socksUdp:Boolean=true,val tunMtu:Int=1280,val tunAddress:String="198.18.0.1",val nativeDns:String="1.1.1.1",val dnsResolverUrl:String="https://cloudflare-dns.com/dns-query",val tunRoute:String="0.0.0.0/0"
 ) {
  fun validated()=copy(connectionMode=choice(connectionMode,CONNECTION_MODE_TUNNEL,setOf(CONNECTION_MODE_TUNNEL,CONNECTION_MODE_PROXY)),primaryAddress=t(primaryAddress,"104.18.1.1"),primaryPort=p(primaryPort),primaryMaxSplit=sp(primaryMaxSplit),irancellAddress=t(irancellAddress,"104.18.1.1"),irancellPort=p(irancellPort),irancellMaxSplit=sp(irancellMaxSplit),fallbackAddress=t(fallbackAddress,"172.66.0.1"),fallbackPort=p(fallbackPort),fallbackMaxSplit=sp(fallbackMaxSplit),telegramAddress=t(telegramAddress,"104.18.9.83"),telegramFallbackAddress=t(telegramFallbackAddress,"104.18.8.83"),telegramPort=p(telegramPort),telegramMaxSplit=sp(telegramMaxSplit),telegramFingerprint=t(telegramFingerprint,"unsafe"),telegramCipherSuites=t(telegramCipherSuites,PATTNG_PYTHON_CIPHER_SUITES).replace(',',':'),outboundProtocol=choice(outboundProtocol,"trojan",setOf("trojan")),transportNetwork=choice(transportNetwork,"ws",setOf("ws")),transportSecurity=choice(transportSecurity,"tls",setOf("tls")),trojanPassword=t(trojanPassword,"humanity"),tlsSni=t(tlsSni,"www.ignitelimit.com"),tlsAlpn=t(tlsAlpn,"http/1.1"),tlsFingerprint=t(tlsFingerprint,"chrome"),wsHost=t(wsHost,"www.ignitelimit.com"),wsPath=t(wsPath,"/assignment").let{if(it.startsWith('/'))it else "/$it"},finalmaskPacket=t(finalmaskPacket,"tlshello"),finalmaskLength=finalmaskLength.coerceIn(1,65535),finalmaskDelayMs=finalmaskDelayMs.coerceIn(0,60000),muxConcurrency=muxConcurrency.coerceIn(1,1024),keepAliveIdleSeconds=keepAliveIdleSeconds.coerceIn(1,7200),keepAliveIntervalSeconds=keepAliveIntervalSeconds.coerceIn(1,600),socksAddress=t(socksAddress,"127.0.0.1"),socksPort=p(socksPort),tunMtu=tunMtu.coerceIn(576,9000),tunAddress=t(tunAddress,"198.18.0.1"),nativeDns=t(nativeDns,"1.1.1.1"),dnsResolverUrl=doh(dnsResolverUrl),tunRoute=route(tunRoute))
  fun edges()=listOf(MciEdge(primaryAddress,primaryPort,"primary",primaryMaxSplit),MciEdge(irancellAddress,irancellPort,"irancell",irancellMaxSplit),MciEdge(fallbackAddress,fallbackPort,"fallback",fallbackMaxSplit))
@@ -40,7 +40,7 @@ data class AdvancedSettingsData(
  companion object { val DEFAULT=AdvancedSettingsData() }
 }
 
-data class AdvancedSettings(val server:String="104.18.1.1",val port:String="443",val protocol:String="trojan",val password:String="humanity",val transport:String="ws",val security:String="tls",val sni:String="www.ignitelimit.com",val wsHost:String="www.ignitelimit.com",val wsPath:String="/assignment",val alpn:String="http/1.1",val fingerprint:String="chrome",val packets:String="tlshello",val fragmentLength:String="5",val fragmentDelay:String="20",val maxSplit:String="2",val domainStrategy:String="UseIPv4",val keepAliveIdle:String="11",val keepAliveInterval:String="1",val mtu:String="1400",val dns:String="1.1.1.1",val route:String="0.0.0.0/0",val mux:Boolean=false,val blockUdp443:Boolean=true,val socksUdp:Boolean=true)
+data class AdvancedSettings(val server:String="104.18.1.1",val port:String="443",val protocol:String="trojan",val password:String="humanity",val transport:String="ws",val security:String="tls",val sni:String="www.ignitelimit.com",val wsHost:String="www.ignitelimit.com",val wsPath:String="/assignment",val alpn:String="http/1.1",val fingerprint:String="chrome",val packets:String="tlshello",val fragmentLength:String="5",val fragmentDelay:String="20",val maxSplit:String="2",val domainStrategy:String="UseIPv4",val keepAliveIdle:String="11",val keepAliveInterval:String="1",val mtu:String="1280",val dns:String="1.1.1.1",val route:String="0.0.0.0/0",val mux:Boolean=false,val blockUdp443:Boolean=true,val socksUdp:Boolean=true)
 
 class AdvancedSettingsStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -53,6 +53,12 @@ class AdvancedSettingsStore(context: Context) {
                 .putInt("tunMtu", 1400)
                 .putBoolean(STREAMING_MTU1400_MIGRATION, true)
                 .apply()
+        }
+        if (!prefs.getBoolean(TUN_MTU1280_MIGRATION, false)) {
+            val currentMtu = prefs.getInt("tunMtu", 1400)
+            val editor = prefs.edit().putBoolean(TUN_MTU1280_MIGRATION, true)
+            if (currentMtu == 1400) editor.putInt("tunMtu", 1280)
+            editor.apply()
         }
     }
     private val mutable = MutableStateFlow(read())
@@ -122,6 +128,7 @@ class AdvancedSettingsStore(context: Context) {
         private const val PREF="advanced_runtime_settings"
         private const val TELEGRAM_EDGE9_MIGRATION="telegram_edge9_primary_v1"
         private const val STREAMING_MTU1400_MIGRATION="streaming_mtu1400_no_telegram_route_tcp443_v2"
+        private const val TUN_MTU1280_MIGRATION="tun_mtu_1280_v1"
         fun load(c:Context)=from(AdvancedSettingsStore(c).snapshot())
         fun reset(c:Context)=from(AdvancedSettingsStore(c).resetDefaults())
         fun save(c:Context,v:AdvancedSettings) { val st=AdvancedSettingsStore(c); val d=st.snapshot(); st.save(d.copy(primaryAddress=v.server,primaryPort=v.port.toIntOrNull()?:d.primaryPort,outboundProtocol=v.protocol,transportNetwork=v.transport,transportSecurity=v.security,trojanPassword=v.password,tlsSni=v.sni,tlsAlpn=v.alpn,tlsFingerprint=v.fingerprint,wsHost=v.wsHost,wsPath=v.wsPath,finalmaskPacket=v.packets,finalmaskLength=v.fragmentLength.toIntOrNull()?:d.finalmaskLength,finalmaskDelayMs=v.fragmentDelay.toIntOrNull()?:d.finalmaskDelayMs,primaryMaxSplit=v.maxSplit.toIntOrNull()?:d.primaryMaxSplit,domainStrategy=v.domainStrategy,keepAliveIdleSeconds=v.keepAliveIdle.toIntOrNull()?:d.keepAliveIdleSeconds,keepAliveIntervalSeconds=v.keepAliveInterval.toIntOrNull()?:d.keepAliveIntervalSeconds,tunMtu=v.mtu.toIntOrNull()?:d.tunMtu,nativeDns=v.dns,tunRoute=v.route,muxEnabled=v.mux,blockUdp443=v.blockUdp443,socksUdp=v.socksUdp)) }
