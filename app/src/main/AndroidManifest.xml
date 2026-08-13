@@ -44,7 +44,7 @@
             android:permission="android.permission.BIND_VPN_SERVICE">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="MCI VPN tunnel packet forwarding" />
+                android:value="MCI VPN tunnel and local SOCKS proxy forwarding" />
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>

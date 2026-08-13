@@ -129,4 +129,3 @@ internal val ToolCardShape = RoundedCornerShape(20.dp)
 internal val ToolCardBrush = Brush.linearGradient(
     listOf(Color(0xE6142231), Color(0xD90B1724)),
 )
-

@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.ui
 
 import android.content.ClipboardManager
+import android.content.ClipData
 import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -39,6 +40,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Edit
@@ -80,6 +82,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -95,9 +98,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.logging.AppLogRepository
+import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.profiles.ProfileLibrary
 import com.uacspoofer.mobile.profiles.CountryMetadata
-import com.uacspoofer.mobile.profiles.ProfileCountryRepository
 import com.uacspoofer.mobile.profiles.ProfileEndpoint
 import com.uacspoofer.mobile.profiles.ProfileLatencyTester
 import com.uacspoofer.mobile.profiles.ProfileLatencyCache
@@ -105,10 +109,11 @@ import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProfileUriParser
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.ProxyProtocol
-import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.ui.theme.UacColors
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -122,8 +127,6 @@ internal fun ConfigsScreen(
 ) {
     val context = LocalContext.current
     val store = remember(context) { ProfileStore(context) }
-    val countryRepository = remember(context) { ProfileCountryRepository.get(context) }
-    val advancedSettings = remember(context) { AdvancedSettingsStore(context) }
     var library by remember { mutableStateOf(store.snapshot()) }
     val latencyCache = remember(context) { ProfileLatencyCache(context) }
     var resolvedCountries by remember { mutableStateOf<Map<String, CountryMetadata>>(emptyMap()) }
@@ -151,28 +154,65 @@ internal fun ConfigsScreen(
     var sortOrder by rememberSaveable { mutableStateOf(ConfigLatencySort.DEFAULT) }
     val latencyTester = remember(context) { ProfileLatencyTester(context) }
     val accent = UacColors.DisconnectedBlue
-    val countryEndpoint = remember(context, activeEndpoint) {
-        activeEndpoint ?: advancedSettings.snapshot().validated().let {
-            ProfileEndpoint(it.primaryAddress, it.primaryPort)
-        }
-    }
+    val latestConnectionState by rememberUpdatedState(connectionState)
+    val countryQueue = remember { Channel<ProxyProfile>(Channel.UNLIMITED) }
+    val queuedCountryLookups = remember { mutableSetOf<String>() }
 
     BackHandler(enabled = selectionMode) {
         selectionMode = false
         markedIds = emptySet()
     }
 
-    LaunchedEffect(
-        countryEndpoint,
-        library.allProfiles.map { "${it.id}:${it.country.countryCode.orEmpty()}" },
-    ) {
-        val countries = buildMap {
-            library.allProfiles.forEach { profile ->
-                val resolution = countryRepository.resolve(profile, countryEndpoint)
-                put(profile.id, resolution.country)
+    LaunchedEffect(library.allProfiles.map { "${it.id}:${it.country.countryCode.orEmpty()}:${it.rawUri.hashCode()}" }) {
+        resolvedCountries = library.allProfiles.associate { it.id to it.country }
+        library.customProfiles
+            .filterNot { it.country.isKnown }
+            .forEach { profile ->
+                val lookupKey = "${profile.id}:${profile.rawUri.hashCode()}"
+                if (queuedCountryLookups.add(lookupKey)) countryQueue.trySend(profile)
+            }
+    }
+
+    LaunchedEffect(countryQueue) {
+        var session: com.uacspoofer.mobile.profiles.SniMakerTestSession? = null
+        var preferredCandidateId: String? = null
+        for (queuedProfile in countryQueue) {
+            while (latestConnectionState == ConnectionState.CONNECTING) delay(400L)
+            val currentProfile = store.snapshot().customProfiles.firstOrNull { it.id == queuedProfile.id }
+                ?: continue
+            if (currentProfile.country.isKnown || currentProfile.rawUri != queuedProfile.rawUri) continue
+            try {
+                val activeSession = session ?: latencyTester.prepareSniMakerSession().also {
+                    session = it
+                    preferredCandidateId = it.initialPreferredCandidateId
+                }
+                val result = latencyTester.measureForSniMaker(
+                    profile = currentProfile,
+                    session = activeSession,
+                    preferredCandidateId = preferredCandidateId,
+                )
+                if (result.candidateId.isNotBlank()) preferredCandidateId = result.candidateId
+                if (result.country.isKnown) {
+                    library = store.updateCountry(currentProfile.id, result.country)
+                    resolvedCountries = resolvedCountries + (currentProfile.id to result.country)
+                    AppLogRepository.info(
+                        LogSource.APP,
+                        "Config country detected profile=${currentProfile.name} " +
+                            "country=${result.country.countryCode} source=${result.countrySource}",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                session = null
+                preferredCandidateId = null
+                AppLogRepository.warning(
+                    LogSource.APP,
+                    "Config country detection failed profile=${currentProfile.name}",
+                    error,
+                )
             }
         }
-        resolvedCountries = countries
     }
 
     fun notify(message: String) {
@@ -187,10 +227,10 @@ internal fun ConfigsScreen(
         if (!selectionChanged && (connectionState != ConnectionState.CONNECTED || !activeChanged)) return
         if (selectionChanged) library = store.select(profile.id)
         if (connectionState == ConnectionState.CONNECTED && activeChanged) {
-            notify("Switching to ${profile.name}...")
+        notify("Switching to ${profile.name}...")
             onSwitchProfile()
         } else if (selectionChanged) {
-            notify("${profile.name} selected for the next connection")
+        notify("${profile.name} selected for the next connection")
         }
     }
 
@@ -222,19 +262,32 @@ internal fun ConfigsScreen(
     fun consumeImportedText(text: String, optionalName: String? = null): Boolean {
         val result = store.importText(text, optionalName)
         if (result.importedCount == 0) {
-            editorError = result.errors.firstOrNull() ?: "Invalid configuration"
+                editorError = result.errors.firstOrNull() ?: "Invalid configuration"
             return false
         }
         val newest = result.library.customProfiles.first()
         library = store.select(newest.id)
         editorError = result.errors.firstOrNull()
         if (connectionState == ConnectionState.CONNECTED) {
-            notify(if (result.importedCount == 1) "Configuration imported; switching..." else "${result.importedCount} configurations imported; switching...")
+                notify(if (result.importedCount == 1) "Configuration imported; switching..." else "${result.importedCount} configurations imported; switching...")
             onSwitchProfile()
         } else {
-            notify(if (result.importedCount == 1) "Configuration imported and selected" else "${result.importedCount} configurations imported")
+                notify(if (result.importedCount == 1) "Configuration imported and selected" else "${result.importedCount} configurations imported")
         }
         return true
+    }
+
+    fun exportMarkedProfiles() {
+        val selected = library.customProfiles.filter { it.id in markedIds }
+        if (selected.isEmpty()) return
+        val payload = selected.joinToString("\n") { profile ->
+            profile.rawUri.trim()
+                .takeIf { ProfileUriParser.extractUris(it).size == 1 }
+                ?: ProfileUriParser.canonicalUri(profile)
+        }
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        clipboard?.setPrimaryClip(ClipData.newPlainText("UAC SNI Spoofer configurations", payload))
+        notify("${selected.size} configuration${if (selected.size == 1) "" else "s"} copied to clipboard")
     }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -243,7 +296,7 @@ internal fun ConfigsScreen(
                 context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
             }.onSuccess { text ->
                 if (consumeImportedText(text)) editorVisible = false
-            }.onFailure { editorError = "Import failed: ${it.message ?: "invalid file"}" }
+        }.onFailure { editorError = "Import failed: ${it.message ?: "invalid file"}" }
         }
     }
 
@@ -282,6 +335,7 @@ internal fun ConfigsScreen(
                     onEnterSelection = { selectionMode = true; markedIds = emptySet() },
                     onCancelSelection = { selectionMode = false; markedIds = emptySet() },
                     onSelectAll = { markedIds = library.customProfiles.mapTo(linkedSetOf(), ProxyProfile::id) },
+                    onExportSelected = ::exportMarkedProfiles,
                     onDeleteSelected = { if (markedIds.isNotEmpty()) bulkDeletePending = true },
                 )
                 Spacer(Modifier.height(12.dp))
@@ -346,7 +400,7 @@ internal fun ConfigsScreen(
                 contentColor = Color(0xFF02101C),
                 shape = RoundedCornerShape(17.dp),
             ) {
-                Icon(Icons.Outlined.Add, "Add configuration", modifier = Modifier.size(25.dp))
+                    Icon(Icons.Outlined.Add, "Add configuration", modifier = Modifier.size(25.dp))
             }
 
             SnackbarHost(
@@ -388,7 +442,7 @@ internal fun ConfigsScreen(
                         check(consumeImportedText(editorUri, editorName.takeIf(String::isNotBlank)))
                     } else {
                         library = store.update(id, editorUri, editorName)
-                        notify("Configuration updated")
+                    notify("Configuration updated")
                     }
                 }.onSuccess {
                     editorVisible = false
@@ -460,6 +514,7 @@ private fun ConfigsTopBar(
     onEnterSelection: () -> Unit,
     onCancelSelection: () -> Unit,
     onSelectAll: () -> Unit,
+    onExportSelected: () -> Unit,
     onDeleteSelected: () -> Unit,
 ) {
     var sortMenuExpanded by remember { mutableStateOf(false) }
@@ -498,6 +553,31 @@ private fun ConfigsTopBar(
             IconButton(onClick = onSelectAll, enabled = count > 0) {
                 Icon(Icons.Outlined.SelectAll, "Select all", tint = UacColors.DisconnectedBlue)
             }
+            IconButton(
+                onClick = onExportSelected,
+                enabled = selectedCount > 0,
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(
+                        if (selectedCount > 0) UacColors.ConnectedGreen.copy(alpha = 0.12f)
+                        else Color.White.copy(alpha = 0.035f),
+                        RoundedCornerShape(12.dp),
+                    )
+                    .border(
+                        1.dp,
+                        if (selectedCount > 0) UacColors.ConnectedGreen.copy(alpha = 0.38f)
+                        else Color.White.copy(alpha = 0.06f),
+                        RoundedCornerShape(12.dp),
+                    ),
+            ) {
+                Icon(
+                    Icons.Outlined.ContentCopy,
+                    "Export selected to clipboard",
+                    tint = if (selectedCount > 0) UacColors.ConnectedGreen
+                    else UacColors.TextSecondary.copy(alpha = 0.35f),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
             IconButton(onClick = onDeleteSelected, enabled = selectedCount > 0) {
                 Icon(
                     Icons.Outlined.DeleteOutline,
@@ -534,10 +614,10 @@ private fun ConfigsTopBar(
                             text = {
                                 Text(
                                     when (option) {
-                                        ConfigLatencySort.DEFAULT -> "Default order"
-                                        ConfigLatencySort.LATENCY_ASC -> "Latency: low to high"
-                                        ConfigLatencySort.LATENCY_DESC -> "Latency: high to low"
-                                        ConfigLatencySort.COUNTRY_ASC -> "Country (A-Z)"
+                                ConfigLatencySort.DEFAULT -> "Default order"
+                                ConfigLatencySort.LATENCY_ASC -> "Latency: low to high"
+                                ConfigLatencySort.LATENCY_DESC -> "Latency: high to low"
+                                ConfigLatencySort.COUNTRY_ASC -> "Country (A-Z)"
                                     },
                                     color = Color.White,
                                 )
@@ -646,14 +726,14 @@ private fun ProfileRow(
             if (selected || active || delayState != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (active) {
-                        Text("MCI tuned / connected", color = accent, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                Text("MCI tuned / connected", color = accent, fontSize = 9.sp, fontWeight = FontWeight.Medium)
                     } else if (selected) {
-                        Text("MCI tuned / selected", color = accent, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                Text("MCI tuned / selected", color = accent, fontSize = 9.sp, fontWeight = FontWeight.Medium)
                     }
                     Spacer(Modifier.weight(1f))
                     when (delayState) {
-                        DelayUiState.Testing -> Text("testing…", color = UacColors.TextSecondary, fontSize = 9.sp)
-                        DelayUiState.Failed -> Text("timeout", color = Color(0xFFFF7483), fontSize = 9.sp)
+                DelayUiState.Testing -> Text("testing…", color = UacColors.TextSecondary, fontSize = 9.sp)
+                DelayUiState.Failed -> Text("Timeout", color = Color(0xFFFF7483), fontSize = 9.sp)
                         is DelayUiState.Ready -> Text("${delayState.millis} ms", color = UacColors.ConnectedGreen, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                         null -> Unit
                     }
@@ -675,7 +755,7 @@ private fun ProfileRow(
                 modifier = Modifier.size(30.dp).background(accent.copy(alpha = 0.13f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.Check, "Selected", tint = accent, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Outlined.Check, "Selected", tint = accent, modifier = Modifier.size(18.dp))
             }
         }
         if (!selectionMode && onEdit != null && onDelete != null) {
@@ -689,17 +769,17 @@ private fun ProfileRow(
                     modifier = Modifier.background(Color(0xFF142231)),
                 ) {
                     DropdownMenuItem(
-                        text = { Text("Real delay", color = Color.White) },
+                    text = { Text("Real delay", color = Color.White) },
                         leadingIcon = { Icon(Icons.Outlined.Speed, null, tint = UacColors.ConnectedGreen) },
                         onClick = { menuExpanded = false; onTestDelay() },
                     )
                     DropdownMenuItem(
-                        text = { Text("Edit", color = Color.White) },
+                    text = { Text("Edit", color = Color.White) },
                         leadingIcon = { Icon(Icons.Outlined.Edit, null, tint = UacColors.DisconnectedBlue) },
                         onClick = { menuExpanded = false; onEdit() },
                     )
                     DropdownMenuItem(
-                        text = { Text("Delete", color = Color(0xFFFF7A88)) },
+                    text = { Text("Delete", color = Color(0xFFFF7A88)) },
                         leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null, tint = Color(0xFFFF7A88)) },
                         onClick = { menuExpanded = false; onDelete() },
                     )
@@ -846,12 +926,12 @@ private fun ProfileEditorSheet(
                     OutlinedButton(onClick = onPaste, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Outlined.ContentPaste, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
-                        Text("Paste")
+                    Text("Paste")
                     }
                     OutlinedButton(onClick = onImport, modifier = Modifier.weight(1f)) {
                         Icon(Icons.Outlined.FileOpen, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
-                        Text("Import file")
+                    Text("Import file")
                     }
                 }
             }

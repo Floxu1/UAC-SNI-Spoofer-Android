@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.ui
 
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -39,9 +40,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -81,7 +84,7 @@ internal fun HomeHeader(
         }
         Icon(
             imageVector = Icons.Outlined.VerifiedUser,
-            contentDescription = "Connection status",
+                contentDescription = "Connection status",
             tint = accent,
             modifier = Modifier.size(if (compact) 22.dp else 24.dp),
         )
@@ -145,6 +148,24 @@ internal fun ConnectButton(
         ),
         label = "connect-glow-intensity",
     )
+    val loadingRotation by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_350, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "connect-loading-rotation",
+    )
+    val loadingSweep by transition.animateFloat(
+        initialValue = 58f,
+        targetValue = 292f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 880, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "connect-loading-sweep",
+    )
     val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow else 1f
     val buttonLabel = when (state) {
         ConnectionState.DISCONNECTED -> "CONNECT"
@@ -203,6 +224,55 @@ internal fun ConnectButton(
                 center = center,
                 style = Stroke(width = 1.2.dp.toPx()),
             )
+            if (state == ConnectionState.CONNECTING) {
+                val progressRadius = surfaceRadius + 8.dp.toPx()
+                val progressTopLeft = Offset(center.x - progressRadius, center.y - progressRadius)
+                val progressSize = Size(progressRadius * 2f, progressRadius * 2f)
+                drawArc(
+                    color = accent.copy(alpha = 0.09f),
+                    startAngle = 0f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = progressTopLeft,
+                    size = progressSize,
+                    style = Stroke(width = 11.dp.toPx()),
+                )
+                drawArc(
+                    color = accent.copy(alpha = 0.18f * animatedGlow),
+                    startAngle = loadingRotation,
+                    sweepAngle = loadingSweep,
+                    useCenter = false,
+                    topLeft = progressTopLeft,
+                    size = progressSize,
+                    style = Stroke(width = 15.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawArc(
+                    brush = Brush.sweepGradient(
+                        colorStops = arrayOf(
+                            0f to accent.copy(alpha = 0.15f),
+                            0.55f to accent,
+                            0.82f to Color.White,
+                            1f to accent.copy(alpha = 0.20f),
+                        ),
+                        center = center,
+                    ),
+                    startAngle = loadingRotation,
+                    sweepAngle = loadingSweep,
+                    useCenter = false,
+                    topLeft = progressTopLeft,
+                    size = progressSize,
+                    style = Stroke(width = 4.6.dp.toPx(), cap = StrokeCap.Round),
+                )
+                drawArc(
+                    color = Color.White.copy(alpha = 0.96f),
+                    startAngle = loadingRotation + loadingSweep - 7f,
+                    sweepAngle = 7f,
+                    useCenter = false,
+                    topLeft = progressTopLeft,
+                    size = progressSize,
+                    style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round),
+                )
+            }
         }
 
         Box(

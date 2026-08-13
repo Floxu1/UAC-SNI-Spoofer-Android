@@ -16,6 +16,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.core.VpnController
+import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
 import com.uacspoofer.mobile.update.AppUpdateManager
 
@@ -34,7 +36,7 @@ class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {
-        requestVpnPermission()
+        continueConnectionStart()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,12 +48,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             val state = ConnectionStateStore.state.collectAsStateWithLifecycle().value
             UacSniSpooferTheme {
-                MainScreen(
-                    state = state,
-                    onConnect = ::beginConnect,
-                    onDisconnect = ::beginDisconnect,
-                    onSwitchProfile = ::beginProfileSwitch,
-                )
+                TvFocusProvider {
+                    MainScreen(
+                        state = state,
+                        onConnect = ::beginConnect,
+                        onDisconnect = ::beginDisconnect,
+                        onSwitchProfile = ::beginProfileSwitch,
+                    )
+                }
             }
         }
     }
@@ -69,6 +73,14 @@ class MainActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            continueConnectionStart()
+        }
+    }
+
+    private fun continueConnectionStart() {
+        if (AdvancedSettingsStore(this).snapshot().connectionMode == CONNECTION_MODE_PROXY) {
+            startVpnService()
         } else {
             requestVpnPermission()
         }

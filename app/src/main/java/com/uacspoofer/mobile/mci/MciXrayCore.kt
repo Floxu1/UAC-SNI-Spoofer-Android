@@ -37,6 +37,7 @@ class MciXrayCore(
         edge: MciEdge,
         settings: AdvancedSettingsData = AdvancedSettingsData.DEFAULT,
         profile: ProxyProfile = ProxyProfile.MCI_BUILT_IN,
+        runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
     ): XrayStartupTiming = lifecycleMutex.withLock {
         stopLocked()
         AppLogRepository.info(LogSource.XRAY, "Starting core for ${edge.role} route")
@@ -50,7 +51,7 @@ class MciXrayCore(
 
         val configStarted = SystemClock.elapsedRealtime()
         val config = File(context.filesDir, "xray-mci-${settings.socksPort}.json").apply {
-            writeText(buildConfig(edge, settings, profile), Charsets.UTF_8)
+            writeText(buildConfig(edge, settings, profile, runtimeOptions), Charsets.UTF_8)
         }
         val configPrepareMs = SystemClock.elapsedRealtime() - configStarted
         val coreStarted = SystemClock.elapsedRealtime()
@@ -174,7 +175,14 @@ class MciXrayCore(
             edge: MciEdge = MciConfig.PRIMARY_EDGE,
             settings: AdvancedSettingsData = AdvancedSettingsData.DEFAULT,
             profile: ProxyProfile = ProxyProfile.MCI_BUILT_IN,
-        ): String = MciXrayConfigBuilder.build(edge, settings, profile, nativeTun = false)
+            runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
+        ): String = MciXrayConfigBuilder.build(
+            edge,
+            settings,
+            profile,
+            nativeTun = false,
+            runtimeOptions = runtimeOptions,
+        )
     }
 }
 

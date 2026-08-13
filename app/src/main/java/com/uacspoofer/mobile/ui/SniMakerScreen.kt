@@ -2,6 +2,7 @@ package com.uacspoofer.mobile.ui
 
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,7 +25,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +40,8 @@ import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Remove
 import androidx.compose.material.icons.outlined.RestartAlt
@@ -50,6 +55,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -63,10 +70,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,6 +87,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.uacspoofer.mobile.profiles.SniCandidateStage
 import com.uacspoofer.mobile.ui.theme.UacColors
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -89,6 +99,7 @@ internal fun SniMakerScreen(
     var importSheetVisible by remember { mutableStateOf(false) }
     var settingsSheetVisible by remember { mutableStateOf(false) }
     var clearConfirmationVisible by remember { mutableStateOf(false) }
+    val resultsListState = rememberLazyListState()
     val visibleRows by remember(controller) { derivedStateOf { controller.visibleRows() } }
     val completed by remember(controller) {
         derivedStateOf { controller.healthyCount + controller.failedCount }
@@ -100,6 +111,12 @@ internal fun SniMakerScreen(
         }
     }
     val accent = Color(0xFF35D6FF)
+
+    LaunchedEffect(controller.healthyCount, controller.sortMode, controller.testing) {
+        if (controller.healthyCount > 0 && controller.sortMode == MakerSortMode.HEALTHY_FIRST) {
+            resultsListState.scrollToItem(0)
+        }
+    }
 
     ToolPageBackground(accent = accent) {
         Column(
@@ -146,6 +163,7 @@ internal fun SniMakerScreen(
             MakerResultsTable(
                 rows = visibleRows,
                 sortMode = controller.sortMode,
+                listState = resultsListState,
                 allMarked = controller.rows.isNotEmpty() && controller.rows.all(MakerConfigRow::marked),
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 onToggle = controller::toggleMarked,
@@ -180,9 +198,9 @@ internal fun SniMakerScreen(
             text = {
                 Text(
                     if (controller.loading || controller.testing || controller.saving) {
-                        "The active operation will stop and all current results and selections will be removed."
+                    "The active operation will stop and all current results and selections will be removed."
                     } else {
-                        "All current results and selections will be removed."
+                    "All current results and selections will be removed."
                     },
                     color = UacColors.TextSecondary,
                 )
@@ -232,7 +250,7 @@ private fun MakerTopBar(
         }
         Column(Modifier.weight(1f)) {
             Text(
-                "SNI Config Maker",
+            "SNI Config Maker",
                 color = Color.White,
                 fontSize = 21.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -240,9 +258,9 @@ private fun MakerTopBar(
             )
             Text(
                 when {
-                    testing -> "Live testing • $healthy healthy"
-                    total > 0 -> "$total configurations • $healthy healthy"
-                    else -> "Subscription and clipboard profiles"
+                testing -> "Live testing • $healthy healthy"
+                total > 0 -> "$total configurations • $healthy healthy"
+                else -> "Subscription and clipboard profiles"
                 },
                 color = UacColors.TextSecondary,
                 fontSize = 10.5.sp,
@@ -322,11 +340,11 @@ private fun MakerProgressStrip(
             Column(Modifier.weight(1f)) {
                 Text(
                     when {
-                        loading -> "Receiving configurations…"
-                        saving -> "Saving healthy configurations…"
-                        testing -> "$completed of $total tested • $testingCount active"
-                        total > 0 -> "$completed of $total tested"
-                        else -> "Import profiles to begin"
+            loading -> "Receiving configurations…"
+            saving -> "Saving healthy configurations…"
+            testing -> "$completed of $total tested • $testingCount active"
+            total > 0 -> "$completed of $total tested"
+            else -> "Import profiles to begin"
                     },
                     color = Color(0xFFC9D8E5),
                     fontSize = 10.5.sp,
@@ -378,7 +396,7 @@ private fun MakerProgressStrip(
                 } else {
                     Icon(
                         Icons.Outlined.Save,
-                        "Save healthy configurations",
+            "Save healthy configurations",
                         tint = if (healthyCount > 0 && !testing && !loading) UacColors.ConnectedGreen else UacColors.TextSecondary.copy(alpha = 0.35f),
                     )
                 }
@@ -391,6 +409,7 @@ private fun MakerProgressStrip(
 private fun MakerResultsTable(
     rows: List<MakerConfigRow>,
     sortMode: MakerSortMode,
+    listState: LazyListState,
     allMarked: Boolean,
     modifier: Modifier,
     onToggle: (String) -> Unit,
@@ -415,9 +434,9 @@ private fun MakerResultsTable(
                 }
             }
         } else {
-            LazyColumn(Modifier.fillMaxSize()) {
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                 items(rows, key = { it.profile.id }) { row ->
-                    MakerResultRow(row = row, onToggle = { onToggle(row.profile.id) })
+                    MakerResultRowFull(row = row, onToggle = { onToggle(row.profile.id) })
                 }
             }
         }
@@ -450,7 +469,7 @@ private fun MakerHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "Status",
+            "Status",
                 color = if (sortMode == MakerSortMode.ORIGINAL) Color(0xFF77CEE9) else Color(0xFF35D6FF),
                 fontSize = 9.sp,
             )
@@ -461,7 +480,7 @@ private fun MakerHeader(
                     MakerSortMode.HEALTHY_FIRST -> Icons.Outlined.ArrowUpward
                     MakerSortMode.FAILED_FIRST -> Icons.Outlined.ArrowDownward
                 },
-                "Sort by status",
+            "Sort by status",
                 tint = if (sortMode == MakerSortMode.ORIGINAL) UacColors.TextSecondary else Color(0xFF35D6FF),
                 modifier = Modifier.size(14.dp),
             )
@@ -472,6 +491,188 @@ private fun MakerHeader(
 }
 
 @Composable
+private fun MakerResultRowFull(row: MakerConfigRow, onToggle: () -> Unit) {
+    val statusColor = when (row.status) {
+        MakerTestStatus.QUEUED -> Color(0xFF71889C)
+        MakerTestStatus.TESTING -> Color(0xFF35D6FF)
+        MakerTestStatus.HEALTHY -> UacColors.ConnectedGreen
+        MakerTestStatus.FAILED -> Color(0xFFFF6F88)
+    }
+    val candidateColor = when (row.candidateStage) {
+        SniCandidateStage.STARTING, SniCandidateStage.PROBING -> Color(0xFF35D6FF)
+        SniCandidateStage.REJECTED -> Color(0xFFFFB454)
+        SniCandidateStage.FAILED, SniCandidateStage.EXHAUSTED -> Color(0xFFFF6F88)
+        SniCandidateStage.PASSED -> UacColors.ConnectedGreen
+        null -> UacColors.TextSecondary
+    }
+    val stageLabel = when (row.candidateStage) {
+        SniCandidateStage.STARTING -> "Starting"
+        SniCandidateStage.PROBING -> "Probing"
+        SniCandidateStage.REJECTED -> "Rejected"
+        SniCandidateStage.FAILED -> "Candidate failed"
+        SniCandidateStage.PASSED -> "Winner"
+        SniCandidateStage.EXHAUSTED -> "All candidates failed - best result"
+        null -> ""
+    }
+    var detailsExpanded by rememberSaveable(row.profile.id) { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(55.dp)
+                .padding(end = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = row.marked,
+                onCheckedChange = { onToggle() },
+                modifier = Modifier.width(37.dp),
+                colors = makerCheckboxColors(),
+            )
+            Row(Modifier.width(62.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (row.country.isKnown) {
+                    CountryFlagIcon(row.country, size = 20.dp)
+                    Spacer(Modifier.width(5.dp))
+                }
+                Text(
+                    text = if (row.status == MakerTestStatus.TESTING) "..." else row.country.countryCode ?: "-",
+                    color = if (row.country.isKnown) Color(0xFFC9D8E5) else UacColors.TextSecondary,
+                    fontSize = 9.5.sp,
+                    fontWeight = if (row.country.isKnown) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
+            Row(Modifier.width(82.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(7.dp).background(statusColor, CircleShape))
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    text = when (row.status) {
+                        MakerTestStatus.QUEUED -> "Queued"
+                        MakerTestStatus.TESTING -> "Testing"
+                        MakerTestStatus.HEALTHY -> "Healthy"
+                        MakerTestStatus.FAILED -> "Failed"
+                    },
+                    color = if (row.status == MakerTestStatus.QUEUED) UacColors.TextSecondary else statusColor,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                )
+            }
+            Text(
+                text = row.latencyMs?.let { "$it ms" } ?: "-",
+                color = if (row.latencyMs != null) UacColors.ConnectedGreen else UacColors.TextSecondary,
+                fontSize = 9.sp,
+                modifier = Modifier.width(52.dp),
+                maxLines = 1,
+            )
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (row.country.isKnown) {
+                        CountryFlagIcon(row.country, size = 16.dp)
+                        Spacer(Modifier.width(5.dp))
+                    }
+                    Text(
+                        text = row.profile.name,
+                        color = Color(0xFFD6E4EF),
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    text = row.displayUri,
+                    color = Color(0xFF7995AA),
+                    fontSize = 8.3.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        if (row.candidateId.isNotBlank()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 37.dp, end = 8.dp, bottom = 8.dp)
+                    .background(candidateColor.copy(alpha = 0.075f), RoundedCornerShape(9.dp))
+                    .border(0.5.dp, candidateColor.copy(alpha = 0.24f), RoundedCornerShape(9.dp))
+                    .animateContentSize()
+                    .clickable { detailsExpanded = !detailsExpanded }
+                    .padding(horizontal = 9.dp, vertical = 7.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (row.status == MakerTestStatus.TESTING) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(11.dp),
+                            color = candidateColor,
+                            strokeWidth = 1.4.dp,
+                        )
+                    } else {
+                        Box(Modifier.size(7.dp).background(candidateColor, CircleShape))
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "Candidate ${row.candidateIndex} of ${row.candidateCount}  •  $stageLabel",
+                        color = candidateColor,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Icon(
+                        imageVector = if (detailsExpanded) Icons.Outlined.KeyboardArrowUp else Icons.Outlined.KeyboardArrowDown,
+                        contentDescription = if (detailsExpanded) "Hide candidate details" else "Show candidate details",
+                        tint = candidateColor,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Text(
+                    text = "${row.candidateId} - ${row.candidateLabel}",
+                    color = Color(0xFFD8E7F2),
+                    fontSize = 8.7.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (detailsExpanded) {
+                    Spacer(Modifier.height(7.dp))
+                    HorizontalDivider(color = candidateColor.copy(alpha = 0.18f), thickness = 0.5.dp)
+                    Spacer(Modifier.height(7.dp))
+                    Text(
+                        text = "Result",
+                        color = UacColors.TextSecondary,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = row.candidateDetail.ifBlank { "Waiting for probe result..." },
+                        color = candidateColor.copy(alpha = 0.92f),
+                        fontSize = 8.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = "Route",
+                        color = UacColors.TextSecondary,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = row.candidateRoute.ifBlank { "Preparing route..." },
+                        color = Color(0xFF9DB7C9),
+                        fontSize = 8.2.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+    }
+    HorizontalDivider(color = Color.White.copy(alpha = 0.055f), thickness = 0.5.dp)
+}
+
+@Composable
 private fun MakerResultRow(row: MakerConfigRow, onToggle: () -> Unit) {
     val statusColor = when (row.status) {
         MakerTestStatus.QUEUED -> Color(0xFF71889C)
@@ -479,10 +680,26 @@ private fun MakerResultRow(row: MakerConfigRow, onToggle: () -> Unit) {
         MakerTestStatus.HEALTHY -> UacColors.ConnectedGreen
         MakerTestStatus.FAILED -> Color(0xFFFF6F88)
     }
+    val candidateColor = when (row.candidateStage) {
+        SniCandidateStage.STARTING, SniCandidateStage.PROBING -> Color(0xFF35D6FF)
+        SniCandidateStage.REJECTED -> Color(0xFFFFB454)
+        SniCandidateStage.FAILED, SniCandidateStage.EXHAUSTED -> Color(0xFFFF6F88)
+        SniCandidateStage.PASSED -> UacColors.ConnectedGreen
+        null -> UacColors.TextSecondary
+    }
+    val candidateStageLabel = when (row.candidateStage) {
+        SniCandidateStage.STARTING -> "Starting"
+        SniCandidateStage.PROBING -> "Probing"
+        SniCandidateStage.REJECTED -> "Rejected"
+        SniCandidateStage.FAILED -> "Candidate failed"
+        SniCandidateStage.PASSED -> "Winner"
+        SniCandidateStage.EXHAUSTED -> "All candidates failed; best result"
+        null -> ""
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(55.dp)
+            .height(if (row.candidateId.isBlank()) 55.dp else 86.dp)
             .clickable(onClick = onToggle)
             .padding(end = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -513,10 +730,10 @@ private fun MakerResultRow(row: MakerConfigRow, onToggle: () -> Unit) {
             Spacer(Modifier.width(5.dp))
             Text(
                 when (row.status) {
-                    MakerTestStatus.QUEUED -> "Queued"
-                    MakerTestStatus.TESTING -> "Testing"
-                    MakerTestStatus.HEALTHY -> "Healthy"
-                    MakerTestStatus.FAILED -> "Failed"
+        MakerTestStatus.QUEUED -> "Queued"
+        MakerTestStatus.TESTING -> "Testing"
+        MakerTestStatus.HEALTHY -> "Healthy"
+        MakerTestStatus.FAILED -> "Failed"
                 },
                 color = if (row.status == MakerTestStatus.QUEUED) UacColors.TextSecondary else statusColor,
                 fontSize = 9.sp,
@@ -553,6 +770,37 @@ private fun MakerResultRow(row: MakerConfigRow, onToggle: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (row.candidateId.isNotBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (row.status == MakerTestStatus.TESTING) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(9.dp),
+                            color = candidateColor,
+                            strokeWidth = 1.2.dp,
+                        )
+                    } else {
+                        Box(Modifier.size(6.dp).background(candidateColor, CircleShape))
+                    }
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = "${row.candidateIndex}/${row.candidateCount} | ${row.candidateId} | ${row.candidateLabel}",
+                        color = candidateColor,
+                        fontSize = 8.2.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    text = "$candidateStageLabel: ${row.candidateDetail} | ${row.candidateRoute}",
+                    color = candidateColor.copy(alpha = 0.82f),
+                    fontSize = 7.6.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
     HorizontalDivider(color = Color.White.copy(alpha = 0.055f), thickness = 0.5.dp)
@@ -633,7 +881,7 @@ private fun ImportSourceSheet(
                 ) {
                     Icon(
                         Icons.Outlined.RestartAlt,
-                        "Reset subscription URL",
+                    "Reset subscription URL",
                         tint = Color(0xFF35D6FF),
                         modifier = Modifier.size(20.dp),
                     )
@@ -682,9 +930,9 @@ private fun ImportSourceSheet(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     if (controller.importSource == MakerImportSource.SUBSCRIPTION) {
-                        "RECEIVE FROM URL"
+                    "RECEIVE FROM URL"
                     } else {
-                        "RECEIVE FROM CLIPBOARD"
+                    "RECEIVE FROM CLIPBOARD"
                     },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
@@ -764,24 +1012,30 @@ private fun TestSettingsSheet(
                     Text("Captured when the next test run starts", color = UacColors.TextSecondary, fontSize = 10.5.sp)
                 }
             }
-            SettingStepper(
-                title = "Concurrent tests",
-                subtitle = "More threads are faster but use more memory",
-                valueText = controller.workerCount.toString(),
-                canDecrease = controller.workerCount > SniMakerController.MIN_WORKERS,
-                canIncrease = controller.workerCount < SniMakerController.MAX_WORKERS,
-                onDecrease = { controller.updateWorkerCount(controller.workerCount - 1) },
-                onIncrease = { controller.updateWorkerCount(controller.workerCount + 1) },
+            TestModeDropdown(
+                selected = controller.testMode,
+                onSelected = controller::updateTestMode,
             )
-            SettingStepper(
-                title = "Timeout per configuration",
-                subtitle = "Total time allowed for all route attempts",
-                valueText = "${controller.timeoutMs / 1000}s",
-                canDecrease = controller.timeoutMs > SniMakerController.MIN_TIMEOUT_MS,
-                canIncrease = controller.timeoutMs < SniMakerController.MAX_TIMEOUT_MS,
-                onDecrease = { controller.updateTimeoutMs(controller.timeoutMs - SniMakerController.TIMEOUT_STEP_MS) },
-                onIncrease = { controller.updateTimeoutMs(controller.timeoutMs + SniMakerController.TIMEOUT_STEP_MS) },
-            )
+            if (controller.testMode == MakerTestMode.DEEP_ADAPTIVE) {
+                SettingStepper(
+                    title = "Concurrent tests",
+                    subtitle = "More threads are faster but use more memory",
+                    valueText = controller.workerCount.toString(),
+                    canDecrease = controller.workerCount > SniMakerController.MIN_WORKERS,
+                    canIncrease = controller.workerCount < SniMakerController.MAX_WORKERS,
+                    onDecrease = { controller.updateWorkerCount(controller.workerCount - 1) },
+                    onIncrease = { controller.updateWorkerCount(controller.workerCount + 1) },
+                )
+                SettingStepper(
+                    title = "Timeout per configuration",
+                    subtitle = "Total time allowed for all route attempts",
+                    valueText = "${controller.timeoutMs / 1000}s",
+                    canDecrease = controller.timeoutMs > SniMakerController.MIN_TIMEOUT_MS,
+                    canIncrease = controller.timeoutMs < SniMakerController.MAX_TIMEOUT_MS,
+                    onDecrease = { controller.updateTimeoutMs(controller.timeoutMs - SniMakerController.TIMEOUT_STEP_MS) },
+                    onIncrease = { controller.updateTimeoutMs(controller.timeoutMs + SniMakerController.TIMEOUT_STEP_MS) },
+                )
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 TextButton(
                     onClick = controller::resetTestSettings,
@@ -799,6 +1053,78 @@ private fun TestSettingsSheet(
                 ) {
                     Text("DONE", fontWeight = FontWeight.Bold)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TestModeDropdown(
+    selected: MakerTestMode,
+    onSelected: (MakerTestMode) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val title = when (selected) {
+        MakerTestMode.COMPATIBILITY -> "Compatibility Scan"
+        MakerTestMode.DEEP_ADAPTIVE -> "Deep Adaptive Test"
+    }
+    val subtitle = when (selected) {
+        MakerTestMode.COMPATIBILITY -> "Same reliable ping method used in Configs + country flag"
+        MakerTestMode.DEEP_ADAPTIVE -> "Hard test across Edge, DNS and Fragment candidates"
+    }
+    Box(Modifier.fillMaxWidth()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true }
+                .border(1.dp, Color(0x5535D6FF), RoundedCornerShape(14.dp)),
+            color = Color(0xB30A1826),
+            shape = RoundedCornerShape(14.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Test method", color = Color(0xFF77CEE9), fontSize = 9.5.sp)
+                    Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text(subtitle, color = UacColors.TextSecondary, fontSize = 9.2.sp)
+                }
+                Icon(Icons.Outlined.KeyboardArrowDown, "Select test method", tint = Color(0xFF35D6FF))
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .widthIn(min = 300.dp)
+                .background(Color(0xFF132433)),
+        ) {
+            MakerTestMode.entries.forEach { mode ->
+                val modeTitle = when (mode) {
+                    MakerTestMode.COMPATIBILITY -> "Compatibility Scan (Default)"
+                    MakerTestMode.DEEP_ADAPTIVE -> "Deep Adaptive Test"
+                }
+                val modeSubtitle = when (mode) {
+                    MakerTestMode.COMPATIBILITY -> "Configs ping method + automatic country flag"
+                    MakerTestMode.DEEP_ADAPTIVE -> "Hard Edge, DNS and Fragment candidate test"
+                }
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(
+                                modeTitle,
+                                color = if (mode == selected) Color(0xFF35D6FF) else Color.White,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(modeSubtitle, color = UacColors.TextSecondary, fontSize = 9.sp)
+                        }
+                    },
+                    onClick = {
+                        onSelected(mode)
+                        expanded = false
+                    },
+                )
             }
         }
     }

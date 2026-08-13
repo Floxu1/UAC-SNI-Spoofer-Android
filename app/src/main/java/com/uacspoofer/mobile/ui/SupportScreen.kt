@@ -91,7 +91,7 @@ internal fun SupportScreen(
             item {
                 SupportIntroCard()
             }
-            item { SectionLabel("Telegram") }
+                item { SectionLabel("Telegram") }
             item {
                 SupportLinkCard(
                     title = "Telegram Channel",
@@ -110,7 +110,7 @@ internal fun SupportScreen(
                     onClick = { openExternalLink(context, TELEGRAM_GROUP_URL) },
                 )
             }
-            item { SectionLabel("Application") }
+                item { SectionLabel("Application") }
             item {
                 VersionAndUpdateCard(
                     state = updateState,
@@ -198,7 +198,7 @@ private fun SupportLinkCard(
             Text(title, color = UacColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Text(address, color = UacColors.TextSecondary, fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Icon(Icons.Outlined.OpenInNew, "Open $title", tint = accent.copy(alpha = 0.82f), modifier = Modifier.size(18.dp))
+            Icon(Icons.Outlined.OpenInNew, "Open $title", tint = accent.copy(alpha = 0.82f), modifier = Modifier.size(18.dp))
     }
 }
 

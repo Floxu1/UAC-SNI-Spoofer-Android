@@ -6,6 +6,7 @@ import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciNativeXrayConfig
+import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import go.Seq
@@ -27,6 +28,7 @@ class XrayNativeTunEngine(private val context: Context) {
         edge: MciEdge,
         settings: AdvancedSettingsData,
         profile: ProxyProfile = ProxyProfile.MCI_BUILT_IN,
+        runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
         establishTun: () -> ParcelFileDescriptor?,
     ) {
         stopLocked()
@@ -49,7 +51,7 @@ class XrayNativeTunEngine(private val context: Context) {
         totalProbeUplink = 0L
         totalProbeDownlink = 0L
         try {
-            core.startLoop(MciNativeXrayConfig.build(edge, settings, profile), tun.fd)
+            core.startLoop(MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions), tun.fd)
             check(core.isRunning) { "Native Xray core did not enter running state" }
             AppLogRepository.info(
                 LogSource.TUN,

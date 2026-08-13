@@ -10,18 +10,24 @@
 
 UAC SNI Spoofer is an open-source Android tool for managing secure connections. It uses Android's native VPN/TUN path with the Xray core and provides a focused interface for connecting, managing configurations, and inspecting real network status.
 
-Current version: **1.0.7**
+Current version: **2.0.0**
 
 ## Features
 
 - Native Android `VpnService` with Xray Native TUN
-- A tuned built-in configuration with primary and fallback routes
+- Adaptive connection planning that fingerprints the current network, tests route candidates, and remembers the winner
+- A tuned built-in configuration with Edge, DNS, primary, and fallback routes
 - VLESS, VMess, and Trojan configuration support
 - Import from text, clipboard, local files, and subscription URLs
-- SNI Config Maker with real latency testing and sorting
+- SNI Config Maker with Quick Scan and Deep Adaptive Test modes
+- Non-destructive subscription merging with duplicate detection
+- Live, collapsible Candidate details for HTTP, DNS, Edge, and Fragment checks
+- Automatic exit-country detection and flags for healthy configurations
+- Multi-select configuration export to the clipboard
 - Live latency, exit country, traffic statistics, and logs
 - Per-app tunnel selection through App Bypass
 - Advanced Fragment, Finalmask, TUN, routing, and keepalive controls
+- A polished connection progress ring with a glow effect
 - Update checks through this repository's Releases section, followed by user-approved installation
 
 ## Requirements

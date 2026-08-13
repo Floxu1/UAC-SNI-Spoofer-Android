@@ -21,10 +21,13 @@ import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciConfig
 import com.uacspoofer.mobile.mci.MciEdge
+import com.uacspoofer.mobile.mci.MciXrayCore
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
 import com.uacspoofer.mobile.ui.MainActivity
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -46,6 +49,7 @@ class UacVpnService : VpnService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
     private val generation = AtomicLong(0L)
+    private val runtimeHealthSuccesses = AtomicLong(0L)
     @Volatile private var connectJob: Job? = null
     @Volatile private var healthJob: Job? = null
     @Volatile private var statsJob: Job? = null
@@ -57,9 +61,12 @@ class UacVpnService : VpnService() {
     @Volatile private var activeCandidate: AdaptiveCandidate? = null
     @Volatile private var activeFingerprint: NetworkFingerprint? = null
     @Volatile private var activeSignature: String? = null
+    @Volatile private var activeConnectionMode = CONNECTION_MODE_TUNNEL
 
     private lateinit var nativeTunEngine: XrayNativeTunEngine
+    private lateinit var proxyCore: MciXrayCore
     private lateinit var connectivityProbe: VpnConnectivityProbe
+    private lateinit var tunConnectivityProbe: VpnConnectivityProbe
     private lateinit var dnsProbe: SocksDnsProbe
     private lateinit var adaptiveProbe: AdaptiveConnectionProbe
     private lateinit var adaptiveProfileStore: AdaptiveProfileStore
@@ -70,12 +77,14 @@ class UacVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        AppLogRepository.info(LogSource.SERVICE, "VPN service created")
+        AppLogRepository.info(LogSource.SERVICE, "Connection service created")
         createNotificationChannel()
         nativeTunEngine = XrayNativeTunEngine(this)
+        proxyCore = MciXrayCore(this)
         connectivityProbe = VpnConnectivityProbe(::activeProbeStats)
+        tunConnectivityProbe = VpnConnectivityProbe(::activeStats)
         dnsProbe = SocksDnsProbe()
-        adaptiveProbe = AdaptiveConnectionProbe(connectivityProbe, dnsProbe)
+        adaptiveProbe = AdaptiveConnectionProbe(connectivityProbe, tunConnectivityProbe, dnsProbe)
         adaptiveProfileStore = AdaptiveProfileStore(this)
         adaptivePlanner = AdaptiveCandidatePlanner(adaptiveProfileStore)
         fingerprintResolver = NetworkFingerprintResolver(this)
@@ -100,7 +109,7 @@ class UacVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        AppLogRepository.info(LogSource.SERVICE, "VPN service stopping")
+        AppLogRepository.info(LogSource.SERVICE, "Connection service stopping")
         generation.incrementAndGet()
         connectJob?.cancel()
         healthJob?.cancel()
@@ -118,7 +127,9 @@ class UacVpnService : VpnService() {
 
     private fun requestConnect() {
         if (resourcesActive || connectJob?.isActive == true) return
-        AppLogRepository.info(LogSource.SERVICE, "Connection requested")
+        val settings = advancedSettingsStore.snapshot()
+        activeConnectionMode = settings.connectionMode
+        AppLogRepository.info(LogSource.SERVICE, "Connection requested mode=$activeConnectionMode")
         profileStore.clearActive()
         ConnectionStateStore.markConnecting()
         try {
@@ -134,7 +145,6 @@ class UacVpnService : VpnService() {
         val token = generation.incrementAndGet()
         val job = serviceScope.launch {
             try {
-                val settings = advancedSettingsStore.snapshot()
                 val profile = profileStore.selectedProfile()
                 lifecycleMutex.withLock { connectRoutes(token, settings, profile) }
             } catch (_: CancellationException) {
@@ -185,7 +195,7 @@ class UacVpnService : VpnService() {
                 resourcesActive = false
             }
             ConnectionStateStore.markDisconnected()
-            AppLogRepository.info(LogSource.SERVICE, "Disconnected; route resources released")
+            AppLogRepository.info(LogSource.SERVICE, "Disconnected; connection resources released")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -260,9 +270,10 @@ class UacVpnService : VpnService() {
         settings: AdvancedSettingsData,
         profile: ProxyProfile,
     ) {
+        activeConnectionMode = settings.connectionMode
         var lastFailure: Throwable? = null
         var bestReport: AdaptiveProbeReport? = null
-        val fingerprint = fingerprintResolver.capture()
+        val fingerprint = fingerprintResolver.captureAdaptive()
         val signature = adaptivePlanner.signature(settings, profile)
         val candidates = adaptivePlanner.candidates(settings, fingerprint, profile)
         AppLogRepository.info(LogSource.SERVICE, "Selected ${profile.protocol.name} profile: ${profile.name}")
@@ -283,7 +294,22 @@ class UacVpnService : VpnService() {
                     LogSource.ADAPTIVE,
                     "Candidate ${index + 1}/${candidates.size} start ${candidate.summary()}",
                 )
-                nativeTunEngine.start(edge, candidateSettings, profile) { establishTun(candidateSettings) }
+                activeConnectionMode = candidateSettings.connectionMode
+                if (isProxyMode()) {
+                    val timing = proxyCore.start(edge, candidateSettings, profile, candidate.runtimeOptions)
+                    AppLogRepository.info(
+                        LogSource.PROXY,
+                        "Local SOCKS5 ready ${candidateSettings.socksAddress}:${candidateSettings.socksPort} " +
+                            "config=${timing.configPrepareMs}ms core=${timing.coreStartupMs}ms ready=${timing.proxyReadyMs}ms",
+                    )
+                } else {
+                    nativeTunEngine.start(
+                        edge = edge,
+                        settings = candidateSettings,
+                        profile = profile,
+                        runtimeOptions = candidate.runtimeOptions,
+                    ) { establishTun(candidateSettings) }
+                }
                 delay(ADAPTIVE_PROBE_WARMUP_MS)
                 val report = adaptiveProbe.verify(candidate)
                 if (bestReport == null || report.score > bestReport!!.score) bestReport = report
@@ -293,6 +319,7 @@ class UacVpnService : VpnService() {
                 if (token != generation.get()) throw CancellationException("stale connect generation")
 
                 resourcesActive = true
+                runtimeHealthSuccesses.set(0L)
                 activeEdge = edge
                 activeCandidate = candidate
                 activeFingerprint = fingerprint
@@ -306,6 +333,18 @@ class UacVpnService : VpnService() {
                     resourcesActive = false
                     return
                 }
+                adaptiveProfileStore.recordWinner(
+                    network = fingerprint,
+                    profile = profile,
+                    signature = signature,
+                    candidate = candidate,
+                    score = report.score,
+                )
+                AppLogRepository.info(
+                    LogSource.ADAPTIVE,
+                    "Stored probe winner ${candidate.id} fingerprint=${fingerprint.key} " +
+                        "cohort=${fingerprint.learningKey()} score=${report.score}",
+                )
                 Log.i(TAG, "adaptive connectivity gate passed on ${candidate.id}: ${report.detail()}")
                 AppLogRepository.info(
                     LogSource.SERVICE,
@@ -330,6 +369,15 @@ class UacVpnService : VpnService() {
                 AppLogRepository.warning(LogSource.ADAPTIVE, "Candidate ${candidate.id} rejected", error)
                 cleanupRoute()
                 resourcesActive = false
+                if (index + 1 < candidates.size) {
+                    val settleDelayMs = candidateRouteSettleDelayMs(fingerprint.transport)
+                    delay(settleDelayMs)
+                    AppLogRepository.debug(
+                        LogSource.ADAPTIVE,
+                        "Underlying ${fingerprint.transport} route settled for ${settleDelayMs}ms " +
+                            "before candidate ${index + 2}/${candidates.size}",
+                    )
+                }
             }
         }
 
@@ -378,10 +426,12 @@ class UacVpnService : VpnService() {
         latencyJob?.cancel()
         latencyJob = null
         nativeTunEngine.stop()
+        proxyCore.stop()
         activeEdge = null
         activeCandidate = null
         activeFingerprint = null
         activeSignature = null
+        runtimeHealthSuccesses.set(0L)
         ConnectionMetricsStore.reset()
         TrafficStatsStore.reset()
     }
@@ -413,11 +463,15 @@ class UacVpnService : VpnService() {
         job.invokeOnCompletion { if (latencyJob === job) latencyJob = null }
     }
 
-    private fun activeStats(): TunStats = nativeTunEngine.stats()
+    private fun activeStats(): TunStats = if (isProxyMode()) TunStats.ZERO else nativeTunEngine.stats()
 
-    private fun activeProbeStats(): TunStats = nativeTunEngine.probeStats()
+    private fun activeProbeStats(): TunStats = if (isProxyMode()) TunStats.ZERO else nativeTunEngine.probeStats()
 
-    private fun activeCoreRunning(): Boolean = nativeTunEngine.isRunning()
+    private fun activeCoreRunning(): Boolean = if (isProxyMode()) proxyCore.isRunning() else nativeTunEngine.isRunning()
+
+    private fun isProxyMode(): Boolean = activeConnectionMode == CONNECTION_MODE_PROXY
+
+    private fun activeModeLabel(): String = if (isProxyMode()) "proxy" else "tunnel"
 
     private fun startAdaptiveLearningMonitor(
         token: Long,
@@ -432,8 +486,8 @@ class UacVpnService : VpnService() {
         val job = serviceScope.launch {
             delay(ADAPTIVE_STABILITY_WINDOW_MS)
             if (token != generation.get() || !resourcesActive || activeCandidate?.id != candidate.id) return@launch
-            val currentNetwork = fingerprintResolver.capture()
-            if (currentNetwork.key != fingerprint.key) {
+            val currentNetwork = fingerprintResolver.captureAdaptive()
+            if (!currentNetwork.isSameUnderlyingNetwork(fingerprint)) {
                 AppLogRepository.warning(
                     LogSource.ADAPTIVE,
                     "Learning skipped for ${candidate.id}; network changed ${fingerprint.key}->${currentNetwork.key}",
@@ -441,27 +495,50 @@ class UacVpnService : VpnService() {
                 return@launch
             }
             val currentStats = activeStats()
-            val trafficHealthy = currentStats.hasBidirectionalGrowthSince(initialStats)
+            val stable = if (candidate.settings.connectionMode == CONNECTION_MODE_PROXY) {
+                try {
+                    val http = connectivityProbe.verifyRuntime()
+                    val dns = dnsProbe.verify(candidate.settings)
+                    AppLogRepository.debug(
+                        LogSource.ADAPTIVE,
+                        "Proxy stability gate candidate=${candidate.id} http=${http.success} dns=${dns.success} " +
+                            "detail=[${http.detail}; ${dns.detail}]",
+                    )
+                    http.success && dns.success
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    AppLogRepository.warning(LogSource.ADAPTIVE, "Proxy stability gate failed", error)
+                    false
+                }
+            } else {
+                currentStats.hasBidirectionalGrowthSince(initialStats) || runtimeHealthSuccesses.get() >= 2L
+            }
             if (!activeCoreRunning()) {
                 adaptiveProfileStore.recordFailure(fingerprint, profile, signature, candidate.id)
                 AppLogRepository.warning(
                     LogSource.ADAPTIVE,
-                    "Candidate ${candidate.id} was not learned because the native core stopped",
+                    "Candidate ${candidate.id} was not learned because the ${activeModeLabel()} core stopped",
                 )
                 return@launch
             }
-            if (!trafficHealthy) {
+            if (!stable) {
                 AppLogRepository.info(
                     LogSource.ADAPTIVE,
-                    "Learning deferred for ${candidate.id}; no bidirectional user TUN traffic was observed",
+                    "Learning deferred for ${candidate.id}; ${activeModeLabel()} stability gate was not satisfied",
                 )
                 return@launch
             }
-            adaptiveProfileStore.recordStable(fingerprint, profile, signature, candidate, initialScore)
+            adaptiveProfileStore.recordWinner(currentNetwork, profile, signature, candidate, initialScore)
+            if (currentNetwork.learningKey() != fingerprint.learningKey()) {
+                adaptiveProfileStore.recordWinner(fingerprint, profile, signature, candidate, initialScore)
+            }
             AppLogRepository.info(
                 LogSource.ADAPTIVE,
-                "Learned stable candidate ${candidate.id} network=${fingerprint.key} score=$initialScore " +
-                    "tunTx=${currentStats.txBytes - initialStats.txBytes} tunRx=${currentStats.rxBytes - initialStats.rxBytes}",
+                "Learned stable candidate ${candidate.id} mode=${candidate.settings.connectionMode} " +
+                    "network=${currentNetwork.key} cohort=${currentNetwork.learningKey()} score=$initialScore " +
+                    "healthPasses=${runtimeHealthSuccesses.get()} tx=${currentStats.txBytes - initialStats.txBytes} " +
+                    "rx=${currentStats.rxBytes - initialStats.rxBytes}",
             )
         }
         adaptiveLearningJob = job
@@ -473,19 +550,30 @@ class UacVpnService : VpnService() {
         val job = serviceScope.launch {
             var mismatchKey: String? = null
             var mismatchCount = 0
+            var observedIdentity = "${initial.carrierClass}|${initial.networkAsn}|${initial.networkProvider}"
             while (true) {
                 delay(NETWORK_WATCH_INTERVAL_MS)
                 if (token != generation.get() || !resourcesActive) return@launch
-                val current = fingerprintResolver.capture()
-                if (current.networkHandle < 0L || current.key == initial.key) {
+                val current = fingerprintResolver.captureAdaptive()
+                if (current.isSameUnderlyingNetwork(initial)) {
+                    val currentIdentity = "${current.carrierClass}|${current.networkAsn}|${current.networkProvider}"
+                    if (currentIdentity != observedIdentity) {
+                        observedIdentity = currentIdentity
+                        AppLogRepository.info(
+                            LogSource.ADAPTIVE,
+                            "Underlying network metadata updated without reconnect carrier=${current.carrierClass} " +
+                                "asn=${current.networkAsn} provider=${current.networkProvider}",
+                        )
+                    }
                     mismatchKey = null
                     mismatchCount = 0
                     continue
                 }
-                if (mismatchKey == current.key) {
+                val currentMismatchKey = "${current.networkHandle}:${current.key}"
+                if (mismatchKey == currentMismatchKey) {
                     mismatchCount += 1
                 } else {
-                    mismatchKey = current.key
+                    mismatchKey = currentMismatchKey
                     mismatchCount = 1
                 }
                 AppLogRepository.debug(
@@ -531,8 +619,8 @@ class UacVpnService : VpnService() {
                 if (token != generation.get() || !resourcesActive) return@launch
 
                 if (!activeCoreRunning()) {
-                    AppLogRepository.warning(LogSource.SERVICE, "Active tunnel core exited; recovering")
-                    scheduleRuntimeRecovery(token, "active tunnel core exited")
+                    AppLogRepository.warning(LogSource.SERVICE, "Active ${activeModeLabel()} core exited; recovering")
+                    scheduleRuntimeRecovery(token, "active ${activeModeLabel()} core exited")
                     return@launch
                 }
 
@@ -542,6 +630,7 @@ class UacVpnService : VpnService() {
                 if (hasDownlink) {
                     previousStats = currentStats
                     guard.recordHealthy()
+                    runtimeHealthSuccesses.incrementAndGet()
                     nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
                     AppLogRepository.debug(
                         LogSource.TUN,
@@ -555,10 +644,15 @@ class UacVpnService : VpnService() {
                 val control = try {
                     val http = connectivityProbe.verifyRuntime()
                     val dns = dnsProbe.verify(settings)
+                    val tun = if (isProxyMode()) null else tunConnectivityProbe.verifyTunRuntime()
+                    val tunReady = tun == null || tun.success || tun.hasSuccessfulPayload()
+                    val dnsReady = dns.success || (!isProxyMode() && http.success && tunReady)
                     RuntimeControlGate(
-                        healthy = http.success && dns.success,
-                        latencyMs = http.latencyMs,
-                        detail = "http=[${http.detail}] dns=[${dns.detail}]",
+                        healthy = isRuntimeControlHealthy(isProxyMode(), http, dns, tun),
+                        latencyMs = tun?.latencyMs ?: http.latencyMs,
+                        detail = "http=[${http.detail}] dns=[${dns.detail}] " +
+                            "dnsDegraded=${!dns.success && dnsReady} " +
+                            "tun=[${tun?.detail ?: "proxy-mode"}] tunCounters=${tun?.success ?: true}",
                     )
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -566,16 +660,20 @@ class UacVpnService : VpnService() {
                     RuntimeControlGate(false, null, "${error.javaClass.simpleName}: ${error.message.orEmpty()}")
                 }
 
-                if (control.healthy && !hasUplink) {
+                if (control.healthy) {
                     guard.recordHealthy()
+                    runtimeHealthSuccesses.incrementAndGet()
                     ConnectionMetricsStore.updateLatency(control.latencyMs)
                     nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
-                    AppLogRepository.debug(LogSource.SERVICE, "Idle runtime control gate passed ${control.detail}")
+                    AppLogRepository.debug(
+                        LogSource.SERVICE,
+                        "Runtime control gate passed uplinkOnly=$hasUplink ${control.detail}",
+                    )
                     continue
                 }
 
-                val failureDetail = if (hasUplink && control.healthy) {
-                    "user TUN uplink advanced without downlink; ${control.detail}"
+                val failureDetail = if (hasUplink) {
+                    "user TUN uplink advanced without downlink and control gate failed; ${control.detail}"
                 } else {
                     control.detail
                 }
@@ -585,7 +683,7 @@ class UacVpnService : VpnService() {
                         nextDelayMs = MciConfig.RUNTIME_HEALTH_RETRY_DELAY_MS
                         AppLogRepository.warning(
                             LogSource.SERVICE,
-                            "Transient health failure ${guard.consecutiveFailures}/${MciConfig.RUNTIME_HEALTH_MAX_FAILURES}; tunnel kept active: $failureDetail",
+                            "Transient health failure ${guard.consecutiveFailures}/${MciConfig.RUNTIME_HEALTH_MAX_FAILURES}; ${activeModeLabel()} kept active: $failureDetail",
                         )
                     }
                     RuntimeHealthAction.RECOVER -> {
@@ -677,7 +775,7 @@ class UacVpnService : VpnService() {
 
     private fun startForegroundNotification(connected: Boolean) {
         val notification = buildNotification(
-            if (connected) R.string.vpn_connected_notification else R.string.vpn_connecting_notification,
+            connectionNotificationText(connected),
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -694,9 +792,16 @@ class UacVpnService : VpnService() {
         getSystemService(NotificationManager::class.java).notify(
             NOTIFICATION_ID,
             buildNotification(
-                if (connected) R.string.vpn_connected_notification else R.string.vpn_connecting_notification,
+                connectionNotificationText(connected),
             ),
         )
+    }
+
+    private fun connectionNotificationText(connected: Boolean): Int = when {
+        isProxyMode() && connected -> R.string.proxy_connected_notification
+        isProxyMode() -> R.string.proxy_connecting_notification
+        connected -> R.string.vpn_connected_notification
+        else -> R.string.vpn_connecting_notification
     }
 
     private fun updateFailureNotification() {

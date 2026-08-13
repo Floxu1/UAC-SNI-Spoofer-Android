@@ -12,19 +12,25 @@
 
 <p><span dir="ltr">UAC SNI Spoofer</span> یک ابزار متن‌باز برای مدیریت اتصال‌های امن در اندروید است. برنامه از مسیر بومی <span dir="ltr">VPN/TUN</span> و هسته <span dir="ltr">Xray</span> استفاده می‌کند و برای اتصال سریع، مدیریت کانفیگ‌ها و بررسی وضعیت واقعی شبکه طراحی شده است.</p>
 
-<p>نسخه فعلی: <strong><span dir="ltr">1.0.7</span></strong></p>
+<p>نسخه فعلی: <strong><span dir="ltr">2.0.0</span></strong></p>
 
 <h2>امکانات</h2>
 
 <ul>
   <li>اتصال مستقیم از طریق <span dir="ltr">Android VpnService</span> و <span dir="ltr">Xray Native TUN</span></li>
-  <li>کانفیگ داخلی بهینه‌شده همراه با مسیرهای اصلی و جایگزین</li>
+  <li>سیستم اتصال تطبیقی برای تشخیص شبکه، آزمایش مسیرهای مختلف و ذخیره بهترین نتیجه برای همان شبکه</li>
+  <li>کانفیگ داخلی بهینه‌شده همراه با <span dir="ltr">Edge</span>، <span dir="ltr">DNS</span> و مسیرهای جایگزین</li>
   <li>پشتیبانی از کانفیگ‌های <span dir="ltr">VLESS</span>، <span dir="ltr">VMess</span> و <span dir="ltr">Trojan</span></li>
   <li>واردکردن کانفیگ از متن، کلیپ‌بورد، فایل یا لینک اشتراک</li>
-  <li>بخش <span dir="ltr">SNI Config Maker</span> برای دریافت، آزمایش و مرتب‌سازی کانفیگ‌ها بر اساس تأخیر واقعی</li>
+  <li>بخش <span dir="ltr">SNI Config Maker</span> با دو حالت <span dir="ltr">Quick Scan</span> و <span dir="ltr">Deep Adaptive Test</span></li>
+  <li>اضافه‌شدن لینک‌های اشتراک جدید به لیست قبلی، بدون پاک‌شدن نتیجه‌ها و بدون ثبت کانفیگ تکراری</li>
+  <li>نمایش زنده <span dir="ltr">Candidate</span> در حال آزمایش و جزئیات جمع‌شونده برای <span dir="ltr">HTTP</span>، <span dir="ltr">DNS</span>، <span dir="ltr">Edge</span> و <span dir="ltr">Fragment</span></li>
+  <li>تشخیص خودکار کشور خروجی و نمایش پرچم برای کانفیگ‌های سالم</li>
+  <li>انتخاب چند کانفیگ در صفحه <span dir="ltr">Configs</span> و کپی‌کردن لینک‌های آن‌ها در کلیپ‌بورد</li>
   <li>نمایش پینگ، کشور خروجی، مصرف ترافیک و گزارش‌های زنده</li>
   <li>انتخاب برنامه‌های داخل یا خارج از تونل با <span dir="ltr">App Bypass</span></li>
   <li>تنظیمات پیشرفته برای <span dir="ltr">Fragment</span>، <span dir="ltr">Finalmask</span>، <span dir="ltr">TUN</span>، مسیریابی و <span dir="ltr">Keepalive</span></li>
+  <li>انیمیشن اتصال جدید با حلقه پیشرفت و جلوه <span dir="ltr">Glow</span></li>
   <li>بررسی نسخه‌های جدید از بخش <span dir="ltr">Releases</span> همین مخزن و نصب به‌روزرسانی با تأیید کاربر</li>
 </ul>
 

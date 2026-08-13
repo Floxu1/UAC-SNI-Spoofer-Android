@@ -25,7 +25,9 @@ data class ProbeResult(
     val durationMs: Long = 0L,
     val txDelta: Long = 0L,
     val rxDelta: Long = 0L,
-)
+) {
+    fun hasSuccessfulPayload(): Boolean = succeededTargets > 0 && totalBytes > 0
+}
 
 class VpnConnectivityProbe(
     private val statsProvider: () -> TunStats,
@@ -36,6 +38,7 @@ class VpnConnectivityProbe(
         attemptAllTargets = true,
         socksAddress = MciConfig.LOCAL_SOCKS_ADDRESS,
         socksPort = MciConfig.LOCAL_SOCKS_PORT,
+        requireTrafficGrowth = false,
         totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
     )
@@ -49,17 +52,23 @@ class VpnConnectivityProbe(
         attemptAllTargets = false,
         socksAddress = MciConfig.LOCAL_SOCKS_ADDRESS,
         socksPort = MciConfig.LOCAL_SOCKS_PORT,
+        requireTrafficGrowth = false,
         totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
     )
 
-    suspend fun verifyCandidate(settings: AdvancedSettingsData): ProbeResult = verifyTargets(
+    suspend fun verifyCandidate(
+        settings: AdvancedSettingsData,
+        totalTimeoutMs: Long = CANDIDATE_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget: Int = CANDIDATE_READ_BYTES_PER_TARGET,
+    ): ProbeResult = verifyTargets(
         requireAllTargets = false,
         attemptAllTargets = true,
         socksAddress = settings.socksAddress,
         socksPort = settings.socksPort,
-        totalTimeoutMs = CANDIDATE_TOTAL_TIMEOUT_MS,
-        readBytesPerTarget = CANDIDATE_READ_BYTES_PER_TARGET,
+        requireTrafficGrowth = false,
+        totalTimeoutMs = totalTimeoutMs.coerceAtLeast(500L),
+        readBytesPerTarget = readBytesPerTarget.coerceAtLeast(MciConfig.PROBE_MIN_BYTES_PER_TARGET),
     )
 
     suspend fun verifyConfirmation(settings: AdvancedSettingsData): ProbeResult = verifyTargets(
@@ -67,15 +76,37 @@ class VpnConnectivityProbe(
         attemptAllTargets = false,
         socksAddress = settings.socksAddress,
         socksPort = settings.socksPort,
+        requireTrafficGrowth = false,
         totalTimeoutMs = CONFIRMATION_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = CONFIRMATION_READ_BYTES_PER_TARGET,
+    )
+
+    suspend fun verifyTunCandidate(): ProbeResult = verifyTargets(
+        requireAllTargets = false,
+        attemptAllTargets = false,
+        socksAddress = null,
+        socksPort = 0,
+        requireTrafficGrowth = true,
+        totalTimeoutMs = TUN_CANDIDATE_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = CONFIRMATION_READ_BYTES_PER_TARGET,
+    )
+
+    suspend fun verifyTunRuntime(): ProbeResult = verifyTargets(
+        requireAllTargets = false,
+        attemptAllTargets = false,
+        socksAddress = null,
+        socksPort = 0,
+        requireTrafficGrowth = true,
+        totalTimeoutMs = TUN_RUNTIME_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
     )
 
     private suspend fun verifyTargets(
         requireAllTargets: Boolean,
         attemptAllTargets: Boolean,
-        socksAddress: String,
+        socksAddress: String?,
         socksPort: Int,
+        requireTrafficGrowth: Boolean,
         totalTimeoutMs: Long,
         readBytesPerTarget: Int,
     ): ProbeResult =
@@ -125,12 +156,13 @@ class VpnConnectivityProbe(
             val crossedTun = after.hasBidirectionalGrowthSince(before)
             val txDelta = (after.txBytes - before.txBytes).coerceAtLeast(0L)
             val rxDelta = (after.rxBytes - before.rxBytes).coerceAtLeast(0L)
-            val success = if (requireAllTargets) {
+            val payloadSuccess = if (requireAllTargets) {
                 successes.size == MciConfig.PROBE_TARGETS.size &&
                     total >= MciConfig.PROBE_MIN_TOTAL_BYTES
             } else {
                 successes.isNotEmpty()
             }
+            val success = payloadSuccess && (!requireTrafficGrowth || crossedTun)
             ProbeResult(
                 success = success,
                 totalBytes = total,
@@ -142,9 +174,12 @@ class VpnConnectivityProbe(
                     }
                     "targets=${successes.joinToString("+")}, payload=$total$traffic"
                 } else {
-                    failures.joinToString(" | ").ifBlank {
-                        "payload gate $total/${MciConfig.PROBE_MIN_TOTAL_BYTES} bytes"
-                    }
+                    buildList {
+                        addAll(failures)
+                        if (payloadSuccess && requireTrafficGrowth && !crossedTun) {
+                            add("direct payload passed; TUN counters unchanged")
+                        }
+                    }.joinToString(" | ").ifBlank { "payload gate $total/${MciConfig.PROBE_MIN_TOTAL_BYTES} bytes" }
                 },
                 latencyMs = latencySamples.sorted().let { samples ->
                     samples.takeIf { it.isNotEmpty() }?.get(samples.size / 2)
@@ -166,7 +201,7 @@ class VpnConnectivityProbe(
         name: String,
         url: String,
         nonce: String,
-        socksAddress: String,
+        socksAddress: String?,
         socksPort: Int,
         readBytes: Int,
     ): TargetOutcome {
@@ -200,18 +235,19 @@ class VpnConnectivityProbe(
 
     private fun downloadProbeBytes(
         url: String,
-        socksAddress: String,
+        socksAddress: String?,
         socksPort: Int,
         readBytes: Int,
     ): Int {
-        val socks = Proxy(
-            Proxy.Type.SOCKS,
-            InetSocketAddress.createUnresolved(
-                socksAddress,
-                socksPort,
-            ),
-        )
-        val connection = URL(url).openConnection(socks) as HttpsURLConnection
+        val connection = if (socksAddress == null) {
+            URL(url).openConnection() as HttpsURLConnection
+        } else {
+            val socks = Proxy(
+                Proxy.Type.SOCKS,
+                InetSocketAddress.createUnresolved(socksAddress, socksPort),
+            )
+            URL(url).openConnection(socks) as HttpsURLConnection
+        }
         try {
             connection.connectTimeout = 4_000
             connection.readTimeout = 4_000
@@ -248,6 +284,8 @@ class VpnConnectivityProbe(
         private const val CANDIDATE_READ_BYTES_PER_TARGET = 16_384
         private const val CONFIRMATION_TOTAL_TIMEOUT_MS = 9_000L
         private const val CONFIRMATION_READ_BYTES_PER_TARGET = 1_024
+        private const val TUN_CANDIDATE_TOTAL_TIMEOUT_MS = 7_000L
+        private const val TUN_RUNTIME_TOTAL_TIMEOUT_MS = 6_000L
     }
 
     private data class TargetOutcome(

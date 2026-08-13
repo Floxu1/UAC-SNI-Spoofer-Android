@@ -129,13 +129,13 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(
-                text = "App Bypass",
+                    text = "App Bypass",
                 color = UacColors.TextPrimary,
                 fontSize = 25.sp,
                 fontWeight = FontWeight.Bold,
             )
             Text(
-                text = "Choose which apps use the secure tunnel",
+                    text = "Choose which apps use the secure tunnel",
                 color = UacColors.TextSecondary,
                 fontSize = 13.sp,
             )
@@ -224,7 +224,7 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "All installed apps are routed through the VPN.",
+            text = "All installed apps are routed through the VPN.",
                         color = UacColors.TextSecondary,
                         fontSize = 13.sp,
                     )

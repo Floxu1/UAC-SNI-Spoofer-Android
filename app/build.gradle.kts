@@ -1,8 +1,22 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val signingPropertiesFile = providers.gradleProperty("uacSigningProperties").orNull
+    ?.let(::file)
+    ?: providers.environmentVariable("UAC_SIGNING_PROPERTIES").orNull?.let(::file)
+    ?: rootProject.file("../signing.properties")
+val signingProperties = Properties().apply {
+    if (signingPropertiesFile.isFile) {
+        signingPropertiesFile.inputStream().use { load(it) }
+    }
+}
+val releaseSigningAvailable = signingPropertiesFile.isFile &&
+    signingProperties.getProperty("storeFile").orEmpty().isNotBlank()
 
 android {
     namespace = "com.uacspoofer.mobile"
@@ -13,24 +27,55 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 107
-        versionName = "1.0.7"
+        versionCode = 200
+        versionName = "2.0.0"
 
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-        }
+        buildConfigField("boolean", "TV_MODE", "false")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (releaseSigningAvailable) {
+            create("release") {
+                storeFile = signingPropertiesFile.parentFile.resolve(signingProperties.getProperty("storeFile"))
+                storePassword = signingProperties.getProperty("storePassword")
+                keyAlias = signingProperties.getProperty("keyAlias")
+                keyPassword = signingProperties.getProperty("keyPassword")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
+        }
         release {
             isMinifyEnabled = false
             isShrinkResources = false
+            signingConfig = signingConfigs.findByName("release")
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+        }
+        create("tv") {
+            initWith(getByName("debug"))
+            buildConfigField("boolean", "TV_MODE", "true")
+            ndk {
+                abiFilters.clear()
+                abiFilters += "armeabi-v7a"
+            }
+            matchingFallbacks += listOf("debug")
         }
     }
 
@@ -55,6 +100,19 @@ android {
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+}
+
+tasks.register("copyTvApkNextToDebug") {
+    dependsOn("assembleTv")
+    doLast {
+        copy {
+            from(layout.buildDirectory.dir("outputs/apk/tv")) {
+                include("*.apk")
+                rename { "app-tv-armeabi-v7a.apk" }
+            }
+            into(layout.buildDirectory.dir("outputs/apk/debug"))
         }
     }
 }

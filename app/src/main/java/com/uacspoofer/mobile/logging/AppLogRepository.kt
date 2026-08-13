@@ -90,5 +90,6 @@ enum class LogSource(val label: String) {
     SERVICE("SERVICE"),
     ADAPTIVE("ADAPT"),
     XRAY("XRAY"),
+    PROXY("PROXY"),
     TUN("TUN"),
 }

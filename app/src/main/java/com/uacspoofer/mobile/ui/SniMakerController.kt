@@ -7,16 +7,19 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.uacspoofer.mobile.profiles.CountryMetadata
+import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
 import com.uacspoofer.mobile.profiles.ProfileLatencyTester
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProfileUriParser
 import com.uacspoofer.mobile.profiles.ProxyProfile
+import com.uacspoofer.mobile.profiles.SniCandidateProgress
+import com.uacspoofer.mobile.profiles.SniCandidateStage
 import com.uacspoofer.mobile.profiles.SubscriptionConfigParser
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.net.HttpURLConnection
-import java.net.SocketTimeoutException
 import java.net.URL
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,12 +30,22 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 
 internal enum class MakerTestStatus { QUEUED, TESTING, HEALTHY, FAILED }
 
 internal enum class MakerImportSource { SUBSCRIPTION, CLIPBOARD }
+
+internal enum class MakerTestMode(val storageValue: String) {
+    COMPATIBILITY("compatibility"),
+    DEEP_ADAPTIVE("deep_adaptive");
+
+    companion object {
+        fun fromStorage(value: String?): MakerTestMode = entries.firstOrNull {
+            it.storageValue == value
+        } ?: COMPATIBILITY
+    }
+}
 
 internal enum class MakerSortMode {
     ORIGINAL,
@@ -56,6 +69,13 @@ internal data class MakerConfigRow(
     val country: CountryMetadata = CountryMetadata.UNKNOWN,
     val error: String = "",
     val marked: Boolean = false,
+    val candidateId: String = "",
+    val candidateLabel: String = "",
+    val candidateIndex: Int = 0,
+    val candidateCount: Int = 0,
+    val candidateStage: SniCandidateStage? = null,
+    val candidateRoute: String = "",
+    val candidateDetail: String = "",
 )
 
 
@@ -91,6 +111,10 @@ internal class SniMakerController(context: Context) : Closeable {
         private set
     var sortMode by mutableStateOf(MakerSortMode.HEALTHY_FIRST)
         private set
+    var testMode by mutableStateOf(
+        MakerTestMode.fromStorage(preferences.getString(KEY_TEST_MODE, null)),
+    )
+        private set
     var workerCount by mutableIntStateOf(
         preferences.getInt(KEY_WORKERS, DEFAULT_WORKERS).coerceIn(MIN_WORKERS, MAX_WORKERS),
     )
@@ -99,6 +123,22 @@ internal class SniMakerController(context: Context) : Closeable {
         preferences.getInt(KEY_TIMEOUT, DEFAULT_TIMEOUT_MS).coerceIn(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
     )
         private set
+
+    init {
+        if (!preferences.getBoolean(KEY_ADAPTIVE_TEST_MIGRATION, false)) {
+            if (preferences.getInt(KEY_WORKERS, LEGACY_DEFAULT_WORKERS) == LEGACY_DEFAULT_WORKERS) {
+                workerCount = DEFAULT_WORKERS
+            }
+            if (preferences.getInt(KEY_TIMEOUT, LEGACY_DEFAULT_TIMEOUT_MS) == LEGACY_DEFAULT_TIMEOUT_MS) {
+                timeoutMs = DEFAULT_TIMEOUT_MS
+            }
+            preferences.edit()
+                .putInt(KEY_WORKERS, workerCount)
+                .putInt(KEY_TIMEOUT, timeoutMs)
+                .putBoolean(KEY_ADAPTIVE_TEST_MIGRATION, true)
+                .apply()
+        }
+    }
 
     val healthyCount: Int get() = rows.count { it.status == MakerTestStatus.HEALTHY }
     val failedCount: Int get() = rows.count { it.status == MakerTestStatus.FAILED }
@@ -153,12 +193,18 @@ internal class SniMakerController(context: Context) : Closeable {
         persistTestSettings()
     }
 
+    fun updateTestMode(value: MakerTestMode) {
+        testMode = value
+        persistTestSettings()
+    }
+
     fun updateTimeoutMs(value: Int) {
         timeoutMs = normalizeTimeout(value)
         persistTestSettings()
     }
 
     fun resetTestSettings() {
+        testMode = MakerTestMode.COMPATIBILITY
         workerCount = DEFAULT_WORKERS
         timeoutMs = DEFAULT_TIMEOUT_MS
         persistTestSettings()
@@ -205,13 +251,29 @@ internal class SniMakerController(context: Context) : Closeable {
                     MakerImportSource.CLIPBOARD -> clipboardSnapshot
                 }
                 val result = withContext(Dispatchers.Default) { SubscriptionConfigParser.parse(selectedInput) }
-                rows.clear()
-                result.profiles.chunked(LOAD_BATCH_SIZE).forEach { batch ->
-                    rows.addAll(batch.map { profile -> MakerConfigRow(prepareSniMakerProfile(profile)) })
+                val currentProfiles = rows.map(MakerConfigRow::profile)
+                val currentRowCount = rows.size
+                val existingKeys = withContext(Dispatchers.Default) {
+                    currentProfiles.mapTo(HashSet(currentProfiles.size * 2), ::profileIdentityKey)
+                }
+                val unseenProfiles = withContext(Dispatchers.Default) {
+                    val seen = existingKeys.toMutableSet()
+                    result.profiles.asSequence()
+                        .map(::prepareSniMakerProfile)
+                        .filter { profile -> seen.add(profileIdentityKey(profile)) }
+                        .toList()
+                }
+                val newProfiles = unseenProfiles.take((MAX_TOTAL_ROWS - currentRowCount).coerceAtLeast(0))
+                newProfiles.chunked(LOAD_BATCH_SIZE).forEach { batch ->
+                    rows.addAll(batch.map(::MakerConfigRow))
                     yield()
                 }
+                val duplicateCount = (result.profiles.size - unseenProfiles.size).coerceAtLeast(0)
+                val limitSkippedCount = unseenProfiles.size - newProfiles.size
                 notice = buildString {
-                    append("${rows.size} SNI-ready configurations")
+                    append("${newProfiles.size} new configurations added | ${rows.size} total")
+                    if (duplicateCount > 0) append(" | $duplicateCount duplicates kept once")
+                    if (limitSkippedCount > 0) append(" | $limitSkippedCount skipped by list limit")
                     if (result.decodedPayloadCount > 0) append(" • ${result.decodedPayloadCount} Base64 decoded")
                     if (result.invalidCount > 0) append(" • ${result.invalidCount} invalid skipped")
                     if (result.truncated) append(" • input limit reached")
@@ -233,7 +295,8 @@ internal class SniMakerController(context: Context) : Closeable {
             return
         }
         val generation = ++testGeneration
-        val workersSnapshot = workerCount
+        val modeSnapshot = testMode
+        val workersSnapshot = if (modeSnapshot == MakerTestMode.COMPATIBILITY) 1 else workerCount
         val timeoutSnapshot = timeoutMs
         testing = true
         val resetRows = rows.map { row ->
@@ -245,13 +308,30 @@ internal class SniMakerController(context: Context) : Closeable {
                 latencyMs = null,
                 error = "",
                 country = CountryMetadata.UNKNOWN,
+                candidateId = "",
+                candidateLabel = "",
+                candidateIndex = 0,
+                candidateCount = 0,
+                candidateStage = null,
+                candidateRoute = "",
+                candidateDetail = "",
             )
         }
         rows.clear()
         rows.addAll(resetRows)
-        notice = "Testing ${rows.size} configs • $workersSnapshot threads • ${timeoutSnapshot}ms timeout"
+        notice = "Preparing adaptive test for ${rows.size} configs…"
         testJob = scope.launch {
             try {
+                val session = if (modeSnapshot == MakerTestMode.DEEP_ADAPTIVE) {
+                    withContext(Dispatchers.IO) { tester.prepareSniMakerSession() }
+                } else {
+                    null
+                }
+                val preferredCandidate = AtomicReference(session?.initialPreferredCandidateId)
+                notice = when (modeSnapshot) {
+                    MakerTestMode.COMPATIBILITY -> "Compatibility Scan | ${rows.size} configs | Configs ping method"
+                    MakerTestMode.DEEP_ADAPTIVE -> "Deep Adaptive Test | ${rows.size} configs | $workersSnapshot workers | ${timeoutSnapshot}ms"
+                }
                 coroutineScope {
                     val queue = Channel<Int>(workersSnapshot * 2)
                     val workers = List(workersSnapshot) {
@@ -261,11 +341,32 @@ internal class SniMakerController(context: Context) : Closeable {
                                     rows[index].also { rows[index] = it.copy(status = MakerTestStatus.TESTING) }
                                 }
                                 val updated = try {
-                                    val perProbeTimeout = (timeoutSnapshot / 3).coerceIn(1_000, 4_000)
-                                    val result = withTimeoutOrNull(timeoutSnapshot.toLong()) {
-                                        tester.measureForSniMaker(startingRow.profile, perProbeTimeout)
-                                    } ?: throw SocketTimeoutException("Timed out after ${timeoutSnapshot}ms")
-                                    startingRow.copy(
+                                    val result = when (modeSnapshot) {
+                                        MakerTestMode.COMPATIBILITY -> tester.measureCompatibilityScan(startingRow.profile)
+                                        MakerTestMode.DEEP_ADAPTIVE -> tester.measureForSniMaker(
+                                            profile = startingRow.profile,
+                                            session = requireNotNull(session),
+                                            preferredCandidateId = preferredCandidate.get(),
+                                            totalTimeoutMs = timeoutSnapshot,
+                                            onCandidateProgress = { progress ->
+                                                withContext(Dispatchers.Main.immediate) {
+                                                    if (generation == testGeneration && index < rows.size &&
+                                                        rows[index].profile.id == startingRow.profile.id
+                                                    ) {
+                                                        rows[index] = rows[index].withCandidate(progress)
+                                                    }
+                                                }
+                                            },
+                                        )
+                                    }
+                                    if (result.candidateId.isNotBlank()) {
+                                        preferredCandidate.set(result.candidateId)
+                                    }
+                                    val latestRow = withContext(Dispatchers.Main.immediate) {
+                                        rows.getOrNull(index)?.takeIf { it.profile.id == startingRow.profile.id }
+                                            ?: startingRow
+                                    }
+                                    latestRow.copy(
                                         status = MakerTestStatus.HEALTHY,
                                         latencyMs = result.latencyMs,
                                         country = result.country,
@@ -274,11 +375,26 @@ internal class SniMakerController(context: Context) : Closeable {
                                             startingRow.profile.copy(country = result.country),
                                         ),
                                         error = "",
+                                        candidateId = result.candidateId,
+                                        candidateLabel = result.candidateLabel,
+                                        candidateIndex = if (result.candidateId.isNotBlank()) 1 else 0,
+                                        candidateCount = if (result.candidateId.isNotBlank()) 1 else 0,
+                                        candidateStage = SniCandidateStage.PASSED,
+                                        candidateDetail = result.probeDetail,
+                                        candidateRoute = if (modeSnapshot == MakerTestMode.COMPATIBILITY) {
+                                            "5 HTTPS probes | 3 successes required | country via exit IP"
+                                        } else {
+                                            latestRow.candidateRoute
+                                        },
                                     )
                                 } catch (cancelled: CancellationException) {
                                     throw cancelled
                                 } catch (error: Throwable) {
-                                    startingRow.copy(
+                                    val latestRow = withContext(Dispatchers.Main.immediate) {
+                                        rows.getOrNull(index)?.takeIf { it.profile.id == startingRow.profile.id }
+                                            ?: startingRow
+                                    }
+                                    latestRow.copy(
                                         status = MakerTestStatus.FAILED,
                                         error = error.message.orEmpty().take(120),
                                     )
@@ -300,11 +416,35 @@ internal class SniMakerController(context: Context) : Closeable {
                 
                 if (generation == testGeneration) {
                     val resetActive = rows.map { row ->
-                        if (row.status == MakerTestStatus.TESTING) row.copy(status = MakerTestStatus.QUEUED) else row
+                        if (row.status == MakerTestStatus.TESTING) {
+                            row.copy(
+                                status = MakerTestStatus.QUEUED,
+                                candidateStage = null,
+                                candidateDetail = "",
+                            )
+                        } else {
+                            row
+                        }
                     }
                     rows.clear()
                     rows.addAll(resetActive)
                     notice = "Tests stopped • $healthyCount healthy results kept"
+                }
+            } catch (error: Throwable) {
+                if (generation == testGeneration) {
+                    val failed = rows.map { row ->
+                        if (row.status == MakerTestStatus.QUEUED || row.status == MakerTestStatus.TESTING) {
+                            row.copy(
+                                status = MakerTestStatus.FAILED,
+                                error = error.message.orEmpty().take(120),
+                            )
+                        } else {
+                            row
+                        }
+                    }
+                    rows.clear()
+                    rows.addAll(failed)
+                    notice = "Adaptive test setup failed: ${error.message ?: error.javaClass.simpleName}"
                 }
             } finally {
                 if (generation == testGeneration) testing = false
@@ -342,7 +482,7 @@ internal class SniMakerController(context: Context) : Closeable {
         saveJob = scope.launch {
             try {
                 val result = withContext(Dispatchers.Default) {
-                    profileStore.importText(selected.joinToString("\n") { ProfileUriParser.canonicalUri(it.profile) })
+                    profileStore.importProfiles(selected.map(MakerConfigRow::profile))
                 }
                 notice = "${result.importedCount} healthy configurations saved to Configs"
             } catch (cancelled: CancellationException) {
@@ -373,6 +513,7 @@ internal class SniMakerController(context: Context) : Closeable {
 
     private fun persistTestSettings() {
         preferences.edit()
+            .putString(KEY_TEST_MODE, testMode.storageValue)
             .putInt(KEY_WORKERS, workerCount)
             .putInt(KEY_TIMEOUT, timeoutMs)
             .apply()
@@ -416,6 +557,46 @@ internal class SniMakerController(context: Context) : Closeable {
         append("\n\n… ${value.length - MAX_EDITOR_CHARS} more characters loaded; Receive uses all data.")
     }
 
+    private fun MakerConfigRow.withCandidate(progress: SniCandidateProgress): MakerConfigRow = copy(
+        candidateId = progress.candidateId,
+        candidateLabel = progress.candidateLabel,
+        candidateIndex = progress.candidateIndex,
+        candidateCount = progress.candidateCount,
+        candidateStage = progress.stage,
+        candidateRoute = progress.routeSummary,
+        candidateDetail = progress.detail,
+        error = if (progress.stage == SniCandidateStage.EXHAUSTED) progress.detail else error,
+    )
+
+    private fun profileIdentityKey(profile: ProxyProfile): String {
+        val direct = DirectCompatProfileParser.parse(profile)
+        if (direct != null) {
+            val identity = direct.identity
+            return listOf(
+                identity.protocol.wireName,
+                direct.address.lowercase(),
+                direct.port.toString(),
+                identity.credential,
+                identity.network.lowercase(),
+                identity.security.lowercase(),
+                identity.sni.lowercase(),
+                identity.host.lowercase(),
+                identity.path,
+                identity.alpn.lowercase(),
+                identity.fingerprint.lowercase(),
+                identity.allowInsecure.toString(),
+                identity.flow,
+                identity.encryption.lowercase(),
+                identity.alterId.toString(),
+                identity.serviceName,
+                identity.authority.lowercase(),
+            ).joinToString("\u001F")
+        }
+        return ProfileUriParser.canonicalUri(
+            profile.copy(name = "", country = CountryMetadata.UNKNOWN),
+        )
+    }
+
     private fun List<MakerConfigRow>.inStatusOrder(vararg order: MakerTestStatus): List<MakerConfigRow> {
         val buckets = Array(MakerTestStatus.entries.size) { ArrayList<MakerConfigRow>() }
         forEach { row -> buckets[row.status.ordinal].add(row) }
@@ -427,20 +608,25 @@ internal class SniMakerController(context: Context) : Closeable {
 
     companion object {
         const val MIN_WORKERS = 1
-        const val MAX_WORKERS = 12
+        const val MAX_WORKERS = 4
         const val MIN_TIMEOUT_MS = 3_000
         const val MAX_TIMEOUT_MS = 30_000
         const val TIMEOUT_STEP_MS = 1_000
-        const val DEFAULT_WORKERS = 6
-        const val DEFAULT_TIMEOUT_MS = 8_000
+        const val DEFAULT_WORKERS = 3
+        const val DEFAULT_TIMEOUT_MS = 20_000
 
         private const val PREFERENCES_NAME = "sni_config_maker"
         private const val KEY_URL = "subscription_url"
         private const val KEY_WORKERS = "test_workers"
         private const val KEY_TIMEOUT = "test_timeout_ms"
+        private const val KEY_TEST_MODE = "test_mode"
+        private const val KEY_ADAPTIVE_TEST_MIGRATION = "adaptive_test_settings_v1"
+        private const val LEGACY_DEFAULT_WORKERS = 6
+        private const val LEGACY_DEFAULT_TIMEOUT_MS = 8_000
         private const val DEFAULT_SUBSCRIPTION_URL =
             "https://gitverse.ru/api/repos/flaafix/AetrisVPN_Black_list/raw/branch/master/configs.txt"
         private const val LOAD_BATCH_SIZE = 250
+        private const val MAX_TOTAL_ROWS = 10_000
         private const val MAX_URL_CHARS = 2_048
         private const val MAX_PASTE_CHARS = 24 * 1024 * 1024
         private const val MAX_EDITOR_CHARS = 64 * 1024

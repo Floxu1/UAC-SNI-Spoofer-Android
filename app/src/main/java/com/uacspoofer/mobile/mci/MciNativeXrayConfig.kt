@@ -9,5 +9,12 @@ internal object MciNativeXrayConfig {
         edge: MciEdge = MciConfig.PRIMARY_EDGE,
         settings: AdvancedSettingsData = AdvancedSettingsData.DEFAULT,
         profile: ProxyProfile = ProxyProfile.MCI_BUILT_IN,
-    ): String = MciXrayConfigBuilder.build(edge, settings, profile, nativeTun = true)
+        runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
+    ): String = MciXrayConfigBuilder.build(
+        edge,
+        settings,
+        profile,
+        nativeTun = true,
+        runtimeOptions = runtimeOptions,
+    )
 }

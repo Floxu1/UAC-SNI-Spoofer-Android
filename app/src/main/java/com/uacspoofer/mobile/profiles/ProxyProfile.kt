@@ -89,6 +89,7 @@ data class ProxyProfile(
             path = "/assignment",
             alpn = "http/1.1",
             fingerprint = "chrome",
+            country = CountryMetadata.resolve("FR", "France"),
             isBuiltIn = true,
         )
     }

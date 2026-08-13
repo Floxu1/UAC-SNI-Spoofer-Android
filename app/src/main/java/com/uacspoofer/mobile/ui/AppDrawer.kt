@@ -39,7 +39,6 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Language
-import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.SupportAgent
 import androidx.compose.material.icons.outlined.VerifiedUser
@@ -68,7 +67,6 @@ internal enum class DrawerDestination {
     HOME,
     CONFIGS,
     SNI_MAKER,
-    SNI_LAB,
     LIVE_LOGS,
     APP_BYPASS,
     ADVANCED_SETTINGS,
@@ -95,8 +93,7 @@ private val DrawerItems = listOf(
     DrawerItem(DrawerDestination.HOME, "Home", Icons.Outlined.Home),
     DrawerItem(DrawerDestination.CONFIGS, "Configs", Icons.Outlined.Description),
     DrawerItem(DrawerDestination.SNI_MAKER, "SNI Config Maker", Icons.Outlined.Code),
-    DrawerItem(DrawerDestination.SNI_LAB, "SNI Lab", Icons.Outlined.Science),
-    DrawerItem(DrawerDestination.LIVE_LOGS, "Live Logs", Icons.AutoMirrored.Outlined.ListAlt),
+    DrawerItem(DrawerDestination.LIVE_LOGS, "Logs", Icons.AutoMirrored.Outlined.ListAlt),
     DrawerItem(DrawerDestination.APP_BYPASS, "App Bypass", Icons.Outlined.Block),
     DrawerItem(DrawerDestination.ADVANCED_SETTINGS, "Advanced Settings", Icons.Outlined.Tune),
     DrawerItem(DrawerDestination.SUPPORT, "Support", Icons.Outlined.SupportAgent),

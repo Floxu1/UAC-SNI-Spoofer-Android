@@ -43,7 +43,7 @@ object MciConfig {
     
     const val FINALMASK_PACKET = "tlshello"
     const val FINALMASK_LENGTH = 5
-    const val FINALMASK_DELAY_MS = 20
+    const val FINALMASK_DELAY_MS = 0
     const val FINALMASK_MAX_SPLIT = 2
     const val XRAY_KEEPALIVE_IDLE_SECONDS = 11
     const val XRAY_KEEPALIVE_INTERVAL_SECONDS = 1
@@ -75,5 +75,6 @@ object MciConfig {
     val PROBE_TARGETS = listOf(
         ProbeTarget("Google", "https://www.google.com/robots.txt"),
         ProbeTarget("YouTube", "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"),
+        ProbeTarget("Telegram", "https://telegram.org/img/t_logo.png"),
     )
 }

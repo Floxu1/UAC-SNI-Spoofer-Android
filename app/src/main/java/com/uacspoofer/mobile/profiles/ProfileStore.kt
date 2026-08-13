@@ -72,12 +72,43 @@ class ProfileStore(context: Context) {
     }
 
     @Synchronized
+    fun importProfiles(profiles: List<ProxyProfile>): ProfileImportResult {
+        if (profiles.isEmpty()) return ProfileImportResult(snapshot(), 0, emptyList())
+        val current = snapshot().customProfiles.toMutableList()
+        var imported = 0
+        profiles.asReversed().forEach { profile ->
+            if (profile.isBuiltIn) return@forEach
+            val canonical = ProfileUriParser.canonicalUri(profile)
+            current.removeAll { existing ->
+                existing.id == profile.id || ProfileUriParser.canonicalUri(existing) == canonical
+            }
+            current.add(0, profile)
+            imported++
+        }
+        if (imported > 0) writeProfiles(current)
+        return ProfileImportResult(snapshot(), imported, emptyList())
+    }
+
+    @Synchronized
     fun update(id: String, rawUri: String, name: String): ProfileLibrary {
         require(id != ProxyProfile.BUILT_IN_ID) { "Built-in profile is read-only" }
         val current = snapshot().customProfiles.toMutableList()
         val index = current.indexOfFirst { it.id == id }
         require(index >= 0) { "Profile is no longer available" }
         current[index] = ProfileUriParser.parse(rawUri, id = id, nameOverride = name)
+        writeProfiles(current)
+        return snapshot()
+    }
+
+    @Synchronized
+    fun updateCountry(id: String, country: CountryMetadata): ProfileLibrary {
+        require(id != ProxyProfile.BUILT_IN_ID) { "Built-in profile is read-only" }
+        if (!country.isKnown) return snapshot()
+        val current = snapshot().customProfiles.toMutableList()
+        val index = current.indexOfFirst { it.id == id }
+        require(index >= 0) { "Profile is no longer available" }
+        if (current[index].country == country) return snapshot()
+        current[index] = current[index].copy(country = country)
         writeProfiles(current)
         return snapshot()
     }
@@ -137,7 +168,15 @@ class ProfileStore(context: Context) {
                 val id = item.optString("id")
                 val uri = item.optString("uri")
                 val name = item.optString("name")
-                runCatching { ProfileUriParser.parse(uri, id = id, nameOverride = name) }
+                val storedCountry = CountryMetadata.resolve(
+                    item.optString("countryCode"),
+                    item.optString("countryName"),
+                )
+                runCatching {
+                    ProfileUriParser.parse(uri, id = id, nameOverride = name).let { profile ->
+                        if (storedCountry.isKnown) profile.copy(country = storedCountry) else profile
+                    }
+                }
                     .getOrNull()?.let(::add)
             }
         }
@@ -146,12 +185,18 @@ class ProfileStore(context: Context) {
     private fun writeProfiles(profiles: List<ProxyProfile>) {
         val array = JSONArray()
         profiles.forEach { profile ->
-            array.put(
-                JSONObject()
-                    .put("id", profile.id)
-                    .put("name", profile.name)
-                    .put("uri", ProfileUriParser.canonicalUri(profile)),
-            )
+            val persistedUri = profile.rawUri
+                .takeIf { ProfileUriParser.extractUris(it).isNotEmpty() }
+                ?: ProfileUriParser.canonicalUri(profile)
+            val item = JSONObject()
+                .put("id", profile.id)
+                .put("name", profile.name)
+                .put("uri", persistedUri)
+            if (profile.country.isKnown) {
+                item.put("countryCode", profile.country.countryCode)
+                item.put("countryName", profile.country.countryName)
+            }
+            array.put(item)
         }
         prefs.edit().putString(KEY_PROFILES, array.toString()).apply()
     }

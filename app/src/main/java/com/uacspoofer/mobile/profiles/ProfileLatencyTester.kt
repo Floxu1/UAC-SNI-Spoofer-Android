@@ -7,6 +7,17 @@ import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciXrayCore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
+import com.uacspoofer.mobile.vpn.AdaptiveCandidate
+import com.uacspoofer.mobile.vpn.AdaptiveCandidatePlanner
+import com.uacspoofer.mobile.vpn.AdaptiveConnectionProbe
+import com.uacspoofer.mobile.vpn.AdaptiveDnsResolvers
+import com.uacspoofer.mobile.vpn.AdaptiveProfileStore
+import com.uacspoofer.mobile.vpn.NetworkFingerprint
+import com.uacspoofer.mobile.vpn.NetworkFingerprintResolver
+import com.uacspoofer.mobile.vpn.SocksDnsProbe
+import com.uacspoofer.mobile.vpn.TunStats
+import com.uacspoofer.mobile.vpn.VpnConnectivityProbe
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -22,9 +33,16 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 data class SniProfileProbeResult(
@@ -32,11 +50,41 @@ data class SniProfileProbeResult(
     val country: CountryMetadata,
     val exitIp: String,
     val countrySource: String,
+    val candidateId: String = "",
+    val candidateLabel: String = "",
+    val probeDetail: String = "",
 )
 
+data class SniMakerTestSession(
+    val settings: com.uacspoofer.mobile.settings.AdvancedSettingsData,
+    val network: NetworkFingerprint,
+    val initialPreferredCandidateId: String?,
+)
+
+enum class SniCandidateStage { STARTING, PROBING, REJECTED, FAILED, PASSED, EXHAUSTED }
+
+data class SniCandidateProgress(
+    val candidateId: String,
+    val candidateLabel: String,
+    val candidateIndex: Int,
+    val candidateCount: Int,
+    val stage: SniCandidateStage,
+    val routeSummary: String,
+    val detail: String,
+)
 
 class ProfileLatencyTester(context: Context) {
     private val appContext = context.applicationContext
+    private val settingsStore = AdvancedSettingsStore(appContext)
+    private val profileStore = ProfileStore(appContext)
+    private val adaptiveProfileStore = AdaptiveProfileStore(appContext)
+    private val adaptivePlanner = AdaptiveCandidatePlanner(adaptiveProfileStore)
+    private val fingerprintResolver = NetworkFingerprintResolver(appContext)
+    private val adaptiveProbe = AdaptiveConnectionProbe(
+        connectivityProbe = VpnConnectivityProbe { TunStats.ZERO },
+        tunConnectivityProbe = VpnConnectivityProbe { TunStats.ZERO },
+        dnsProbe = SocksDnsProbe(),
+    )
 
     suspend fun measure(profile: ProxyProfile): Long =
         measureInternal(
@@ -45,19 +93,224 @@ class ProfileLatencyTester(context: Context) {
             minSuccessCount = MIN_SUCCESS_COUNT,
             resolveCountry = false,
             probeTimeoutMs = PROBE_TIMEOUT_MS,
+            parallelProbes = false,
         ).latencyMs
 
+    suspend fun measureCompatibilityScan(profile: ProxyProfile): SniProfileProbeResult =
+        measureInternal(
+            profile = profile,
+            probeCount = PROBE_COUNT,
+            minSuccessCount = MIN_SUCCESS_COUNT,
+            resolveCountry = true,
+            probeTimeoutMs = PROBE_TIMEOUT_MS,
+            parallelProbes = true,
+        )
+
     
+    suspend fun prepareSniMakerSession(): SniMakerTestSession = withContext(Dispatchers.IO) {
+        val settings = settingsStore.snapshot().validated()
+        val network = fingerprintResolver.captureAdaptive()
+        val selectedProfile = profileStore.selectedProfile()
+        val preferred = adaptivePlanner.candidates(settings, network, selectedProfile)
+            .firstOrNull(AdaptiveCandidate::learned)
+            ?.id
+        AppLogRepository.info(
+            LogSource.APP,
+            "SNI Maker adaptive session network=${network.summary()} preferred=${preferred ?: "none"}",
+        )
+        SniMakerTestSession(settings, network, preferred)
+    }
+
     suspend fun measureForSniMaker(
         profile: ProxyProfile,
-        probeTimeoutMs: Int = MAKER_DEFAULT_TIMEOUT_MS,
-    ): SniProfileProbeResult = measureInternal(
-        profile = profile,
-        probeCount = MAKER_PROBE_COUNT,
-        minSuccessCount = MAKER_MIN_SUCCESS_COUNT,
-        resolveCountry = true,
-        probeTimeoutMs = probeTimeoutMs.coerceIn(MIN_MAKER_TIMEOUT_MS, MAX_MAKER_TIMEOUT_MS),
+        session: SniMakerTestSession,
+        preferredCandidateId: String?,
+        totalTimeoutMs: Int = MAKER_DEFAULT_TIMEOUT_MS,
+        onCandidateProgress: suspend (SniCandidateProgress) -> Unit = {},
+    ): SniProfileProbeResult = withContext(Dispatchers.IO) {
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + totalTimeoutMs.coerceIn(MIN_MAKER_TIMEOUT_MS, MAX_MAKER_TIMEOUT_MS)
+        val signature = adaptivePlanner.signature(session.settings, profile)
+        val planned = adaptivePlanner.candidates(session.settings, session.network, profile)
+        val candidates = planned.sortedBy { candidate ->
+            when (candidate.id) {
+                AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID -> 0
+                preferredCandidateId -> 1
+                else -> 2
+            }
+        }
+        val reservedPort = reservePort()
+        var bestReport: com.uacspoofer.mobile.vpn.AdaptiveProbeReport? = null
+        var bestCandidate: AdaptiveCandidate? = null
+        var lastCandidate: AdaptiveCandidate? = null
+        var lastCandidateIndex = 0
+        var lastError: Throwable? = null
+        try {
+            for ((index, candidate) in candidates.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                val remainingMs = deadline - SystemClock.elapsedRealtime()
+                if (remainingMs < MIN_ROUTE_BUDGET_MS) break
+                lastCandidate = candidate
+                lastCandidateIndex = index + 1
+                val routeBudgetMs = remainingMs.coerceAtMost(MAX_ROUTE_BUDGET_MS)
+                val probeSettings = candidate.settings.copy(
+                    connectionMode = CONNECTION_MODE_PROXY,
+                    socksAddress = "127.0.0.1",
+                    socksPort = reservedPort,
+                    socksUdp = false,
+                ).validated()
+                val probeCandidate = candidate.copy(settings = probeSettings)
+                val core = MciXrayCore(appContext)
+                try {
+                    onCandidateProgress(
+                        candidate.progress(
+                            index = index,
+                            count = candidates.size,
+                            stage = SniCandidateStage.STARTING,
+                            detail = "Starting Xray route",
+                        ),
+                    )
+                    AppLogRepository.debug(
+                        LogSource.APP,
+                        "SNI Maker candidate ${index + 1}/${candidates.size} profile=${profile.name} " +
+                            probeCandidate.summary(),
+                    )
+                    val report = withTimeoutOrNull(routeBudgetMs) {
+                        core.start(candidate.edge, probeSettings, profile, candidate.runtimeOptions)
+                        delay(SNI_MAKER_WARMUP_MS)
+                        onCandidateProgress(
+                            candidate.progress(
+                                index = index,
+                                count = candidates.size,
+                                stage = SniCandidateStage.PROBING,
+                                detail = "Testing HTTP and DNS",
+                            ),
+                        )
+                        val probeBudget = (deadline - SystemClock.elapsedRealtime())
+                            .coerceIn(MIN_ROUTE_BUDGET_MS, routeBudgetMs)
+                        adaptiveProbe.verifyForSniMaker(probeCandidate, probeBudget)
+                    } ?: throw SocketTimeoutException("Candidate ${candidate.id} timed out after ${routeBudgetMs}ms")
+                    if (bestReport == null || report.score > bestReport!!.score) {
+                        bestReport = report
+                        bestCandidate = candidate
+                    }
+                    AppLogRepository.info(
+                        LogSource.APP,
+                        "SNI Maker candidate=${candidate.id} profile=${profile.name} ${report.detail()}",
+                    )
+                    onCandidateProgress(
+                        candidate.progress(
+                            index = index,
+                            count = candidates.size,
+                            stage = if (report.accepted) SniCandidateStage.PASSED else SniCandidateStage.REJECTED,
+                            detail = report.uiDetail(),
+                        ),
+                    )
+                    if (!report.accepted) continue
+                    adaptiveProfileStore.recordWinner(
+                        network = session.network,
+                        profile = profile,
+                        signature = signature,
+                        candidate = candidate,
+                        score = report.score,
+                    )
+                    val latency = listOfNotNull(report.http.latencyMs, report.dns.latencyMs)
+                        .minOrNull()
+                        ?: report.durationMs
+                    val exit = lookupExitCountryFast(
+                        probeSettings.socksAddress,
+                        probeSettings.socksPort,
+                    )
+                    AppLogRepository.info(
+                        LogSource.APP,
+                        "SNI Maker country candidate=${candidate.id} profile=${profile.name} " +
+                            "source=${exit.source} ip=${exit.ip.ifBlank { "-" }} " +
+                            "country=${exit.country.countryCode ?: "XX"}",
+                    )
+                    return@withContext SniProfileProbeResult(
+                        latencyMs = latency,
+                        country = exit.country.takeIf(CountryMetadata::isKnown) ?: profile.country,
+                        exitIp = exit.ip,
+                        countrySource = exit.source,
+                        candidateId = candidate.id,
+                        candidateLabel = candidate.label,
+                        probeDetail = report.uiDetail(),
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    lastError = error
+                    onCandidateProgress(
+                        candidate.progress(
+                            index = index,
+                            count = candidates.size,
+                            stage = SniCandidateStage.FAILED,
+                            detail = error.uiMessage(),
+                        ),
+                    )
+                    AppLogRepository.warning(
+                        LogSource.APP,
+                        "SNI Maker candidate=${candidate.id} profile=${profile.name} failed",
+                        error,
+                    )
+                } finally {
+                    runCatching { core.stop() }
+                        .onFailure { AppLogRepository.warning(LogSource.XRAY, "SNI Maker core cleanup failed", it) }
+                }
+            }
+        } finally {
+            releasePort(reservedPort)
+        }
+        val best = bestReport?.detail() ?: lastError?.message ?: "no candidate completed"
+        val finalCandidate = bestCandidate ?: lastCandidate
+        if (finalCandidate != null) {
+            onCandidateProgress(
+                finalCandidate.progress(
+                    index = if (bestCandidate != null) candidates.indexOf(finalCandidate) else lastCandidateIndex - 1,
+                    count = candidates.size,
+                    stage = SniCandidateStage.EXHAUSTED,
+                    detail = bestReport?.uiDetail() ?: lastError.uiMessage(),
+                ),
+            )
+        }
+        throw IllegalStateException("No adaptive candidate passed; best=$best")
+    }
+
+    private fun AdaptiveCandidate.progress(
+        index: Int,
+        count: Int,
+        stage: SniCandidateStage,
+        detail: String,
+    ) = SniCandidateProgress(
+        candidateId = id,
+        candidateLabel = label,
+        candidateIndex = index + 1,
+        candidateCount = count,
+        stage = stage,
+        routeSummary = buildString {
+            append("edge=").append(edge.address).append(':').append(edge.port)
+            append(" | DNS=").append(AdaptiveDnsResolvers.idFor(settings.dnsResolverUrl))
+            append(" | fragment=")
+            if (runtimeOptions.finalmaskEnabled) {
+                append(settings.finalmaskPacket).append('/')
+                    .append(settings.finalmaskLength).append('/')
+                    .append(settings.finalmaskDelayMs).append("ms")
+            } else {
+                append("off")
+            }
+        },
+        detail = detail,
     )
+
+    private fun com.uacspoofer.mobile.vpn.AdaptiveProbeReport.uiDetail(): String =
+        "HTTP ${http.succeededTargets}/${http.attemptedTargets} | " +
+            "DNS ${if (dns.success) "OK" else "failed"} | score=$score | $acceptanceMode"
+
+    private fun Throwable?.uiMessage(): String {
+        if (this == null) return "No candidate completed within the time budget"
+        val reason = message?.substringBefore('\n')?.take(100).orEmpty()
+        return if (reason.isBlank()) javaClass.simpleName else "${javaClass.simpleName}: $reason"
+    }
 
     private suspend fun measureInternal(
         profile: ProxyProfile,
@@ -65,12 +318,13 @@ class ProfileLatencyTester(context: Context) {
         minSuccessCount: Int,
         resolveCountry: Boolean,
         probeTimeoutMs: Int,
+        parallelProbes: Boolean,
     ): SniProfileProbeResult = withContext(Dispatchers.IO) {
         val totalStarted = SystemClock.elapsedRealtime()
         val reservedPort = reservePort()
         try {
         val prepareStarted = SystemClock.elapsedRealtime()
-        val base = AdvancedSettingsStore(appContext).snapshot().validated()
+        val base = settingsStore.snapshot().validated()
         val probeSettings = base.copy(
             socksAddress = "127.0.0.1",
             socksPort = reservedPort,
@@ -88,19 +342,48 @@ class ProfileLatencyTester(context: Context) {
                 var timeoutCount = 0
                 var failureCount = 0
 
-                ProbeSession(probeSettings.socksAddress, probeSettings.socksPort, probeTimeoutMs).use { session ->
-                    repeat(probeCount) {
-                        currentCoroutineContext().ensureActive()
-                        try {
-                            samples += session.probe()
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: SocketTimeoutException) {
-                            timeoutCount++
-                            session.reset()
-                        } catch (_: Throwable) {
-                            failureCount++
-                            session.reset()
+                if (parallelProbes) {
+                    val attempts = coroutineScope {
+                        List(probeCount) {
+                            async(Dispatchers.IO) {
+                                try {
+                                    val sample = ProbeSession(
+                                        probeSettings.socksAddress,
+                                        probeSettings.socksPort,
+                                        probeTimeoutMs,
+                                    ).use(ProbeSession::probe)
+                                    ProbeAttempt(sample = sample)
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (error: Throwable) {
+                                    ProbeAttempt(error = error)
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                    attempts.forEach { attempt ->
+                        attempt.sample?.let(samples::add)
+                        when (attempt.error) {
+                            is SocketTimeoutException -> timeoutCount++
+                            null -> Unit
+                            else -> failureCount++
+                        }
+                    }
+                } else {
+                    ProbeSession(probeSettings.socksAddress, probeSettings.socksPort, probeTimeoutMs).use { session ->
+                        repeat(probeCount) {
+                            currentCoroutineContext().ensureActive()
+                            try {
+                                samples += session.probe()
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: SocketTimeoutException) {
+                                timeoutCount++
+                                session.reset()
+                            } catch (_: Throwable) {
+                                failureCount++
+                                session.reset()
+                            }
                         }
                     }
                 }
@@ -112,10 +395,9 @@ class ProfileLatencyTester(context: Context) {
                 val reportedLatencyMs = medianSuccessful(rawProbeMs)
                 val totalTestMs = SystemClock.elapsedRealtime() - totalStarted
                 val exit = if (resolveCountry) {
-                    lookupExitCountry(
+                    lookupExitCountryFast(
                         probeSettings.socksAddress,
                         probeSettings.socksPort,
-                        probeTimeoutMs.coerceAtMost(COUNTRY_TIMEOUT_MS),
                     )
                 } else {
                     ExitLocation.UNKNOWN
@@ -148,6 +430,13 @@ class ProfileLatencyTester(context: Context) {
                     country = exit.country,
                     exitIp = exit.ip,
                     countrySource = exit.source,
+                    candidateId = if (resolveCountry) "configs-ping" else "",
+                    candidateLabel = if (resolveCountry) "Compatibility Scan" else "",
+                    probeDetail = if (resolveCountry) {
+                        "HTTPS ${samples.size}/$probeCount | edge=${edge.role} | country=${exit.country.countryCode ?: "unknown"}"
+                    } else {
+                        ""
+                    },
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -274,26 +563,65 @@ class ProfileLatencyTester(context: Context) {
     
     private fun lookupExitCountry(socksHost: String, socksPort: Int, timeoutMs: Int): ExitLocation {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
-        runCatching {
+        runCatching { lookupIpWho(proxy, timeoutMs) }
+            .getOrNull()?.takeIf { it.country.isKnown }?.let { return it }
+        runCatching { lookupCountryIs(proxy, timeoutMs) }
+            .getOrNull()?.takeIf { it.country.isKnown }?.let { return it }
+        runCatching { lookupCloudflareTrace(proxy, timeoutMs) }
+            .getOrNull()?.takeIf { it.country.isKnown }?.let { return it }
+        return ExitLocation.UNKNOWN
+    }
+
+    private suspend fun lookupExitCountryFast(socksHost: String, socksPort: Int): ExitLocation = coroutineScope {
+        val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksHost, socksPort))
+        val results = Channel<ExitLocation>(capacity = COUNTRY_LOOKUP_PROVIDERS)
+        val lookups = listOf<() -> ExitLocation>(
+            { lookupIpWho(proxy, COUNTRY_PROVIDER_TIMEOUT_MS) },
+            { lookupCountryIs(proxy, COUNTRY_PROVIDER_TIMEOUT_MS) },
+            { lookupCloudflareTrace(proxy, COUNTRY_PROVIDER_TIMEOUT_MS) },
+        )
+        val jobs = lookups.map { lookup ->
+            launch(Dispatchers.IO) {
+                results.send(runCatching(lookup).getOrDefault(ExitLocation.UNKNOWN))
+            }
+        }
+        try {
+            withTimeoutOrNull(COUNTRY_TOTAL_TIMEOUT_MS) {
+                repeat(lookups.size) {
+                    val result = results.receive()
+                    if (result.country.isKnown) return@withTimeoutOrNull result
+                }
+                ExitLocation.UNKNOWN
+            } ?: ExitLocation.UNKNOWN
+        } finally {
+            jobs.forEach { it.cancel() }
+            results.close()
+        }
+    }
+
+    private fun lookupIpWho(proxy: Proxy, timeoutMs: Int): ExitLocation {
             val json = JSONObject(fetchSmall("https://ipwho.is/?fields=success,ip,country_code,country", proxy, timeoutMs))
             if (json.optBoolean("success", true)) {
                 val country = CountryMetadata.resolve(json.optString("country_code"), json.optString("country"))
                 if (country.isKnown) return ExitLocation(json.optString("ip"), country, "ipwho.is")
             }
-        }
-        runCatching {
+        return ExitLocation.UNKNOWN
+    }
+
+    private fun lookupCountryIs(proxy: Proxy, timeoutMs: Int): ExitLocation {
             val json = JSONObject(fetchSmall("https://api.country.is/", proxy, timeoutMs))
             val country = CountryMetadata.resolve(json.optString("country"), null)
             if (country.isKnown) return ExitLocation(json.optString("ip"), country, "api.country.is")
-        }
-        runCatching {
+        return ExitLocation.UNKNOWN
+    }
+
+    private fun lookupCloudflareTrace(proxy: Proxy, timeoutMs: Int): ExitLocation {
             val values = fetchSmall("https://www.cloudflare.com/cdn-cgi/trace", proxy, timeoutMs)
                 .lineSequence()
                 .mapNotNull { line -> line.split('=', limit = 2).takeIf { it.size == 2 } }
                 .associate { it[0].trim() to it[1].trim() }
             val country = CountryMetadata.resolve(values["loc"], null)
             if (country.isKnown) return ExitLocation(values["ip"].orEmpty(), country, "cloudflare-trace")
-        }
         return ExitLocation.UNKNOWN
     }
 
@@ -329,6 +657,11 @@ class ProfileLatencyTester(context: Context) {
         val headerWaitMs: Long,
     )
 
+    private data class ProbeAttempt(
+        val sample: ProbeSample? = null,
+        val error: Throwable? = null,
+    )
+
     private data class ConnectionTiming(
         val connectMs: Long,
         val tlsHandshakeMs: Long,
@@ -355,12 +688,16 @@ class ProfileLatencyTester(context: Context) {
         private const val PROBE_TIMEOUT_MS = 4_000
         private const val PROBE_COUNT = 5
         private const val MIN_SUCCESS_COUNT = 3
-        private const val MAKER_PROBE_COUNT = 1
-        private const val MAKER_MIN_SUCCESS_COUNT = 1
-        private const val MAKER_DEFAULT_TIMEOUT_MS = 2_500
-        private const val MIN_MAKER_TIMEOUT_MS = 1_000
-        private const val MAX_MAKER_TIMEOUT_MS = 12_000
+        private const val MAKER_DEFAULT_TIMEOUT_MS = 20_000
+        private const val MIN_MAKER_TIMEOUT_MS = 3_000
+        private const val MAX_MAKER_TIMEOUT_MS = 30_000
+        private const val MIN_ROUTE_BUDGET_MS = 1_000L
+        private const val MAX_ROUTE_BUDGET_MS = 7_500L
+        private const val SNI_MAKER_WARMUP_MS = 100L
         private const val COUNTRY_TIMEOUT_MS = 3_500
+        private const val COUNTRY_PROVIDER_TIMEOUT_MS = 2_200
+        private const val COUNTRY_TOTAL_TIMEOUT_MS = 2_750L
+        private const val COUNTRY_LOOKUP_PROVIDERS = 3
         private const val MAX_COUNTRY_BYTES = 64 * 1024
         private const val MAX_HEADER_BYTES = 16 * 1024
         private const val PORT_RESERVATION_ATTEMPTS = 32

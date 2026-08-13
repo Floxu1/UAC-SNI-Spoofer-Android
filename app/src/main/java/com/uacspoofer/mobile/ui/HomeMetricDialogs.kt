@@ -190,11 +190,11 @@ internal fun HomeCountryDialog(
                     .border(1.dp, DialogBorder.copy(alpha = 0.52f), RoundedCornerShape(16.dp))
                     .padding(horizontal = 15.dp, vertical = 8.dp),
             ) {
-                MetricDetailRow("IP address", info.ipAddress)
-                MetricDetailRow("ISP", info.isp.ifBlank { "Not reported" })
-                MetricDetailRow("City", info.city.ifBlank { "Not reported" })
-                MetricDetailRow("Region", info.region.ifBlank { "Not reported" })
-                MetricDetailRow("Country", info.country.ifBlank { info.countryCode.ifBlank { "Not reported" } })
+                    MetricDetailRow("IP address", info.ipAddress)
+                    MetricDetailRow("ISP", info.isp.ifBlank { "Not reported" })
+                    MetricDetailRow("City", info.city.ifBlank { "Not reported" })
+                    MetricDetailRow("Region", info.region.ifBlank { "Not reported" })
+                    MetricDetailRow("Country", info.country.ifBlank { info.countryCode.ifBlank { "Not reported" } })
             }
             Spacer(Modifier.height(10.dp))
             Row(
@@ -405,8 +405,8 @@ private fun HomeConfigDialogRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         when {
-                            active -> "Connected"
-                            selected -> "Selected for next connection"
+                active -> "Connected"
+                selected -> "Selected for next connection"
                             else -> ""
                         },
                         color = accent,
@@ -426,7 +426,7 @@ private fun HomeConfigDialogRow(
                 modifier = Modifier.size(27.dp).background(accent.copy(alpha = 0.13f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.Check, "Selected", tint = accent, modifier = Modifier.size(17.dp))
+            Icon(Icons.Outlined.Check, "Selected", tint = accent, modifier = Modifier.size(17.dp))
             }
         }
     }
@@ -558,7 +558,7 @@ private fun AnimatedHomeMetricDialog(
                                 Text(subtitle, color = UacColors.TextSecondary, fontSize = 10.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             IconButton(onClick = onDismissRequest, modifier = Modifier.size(36.dp)) {
-                                Icon(Icons.Rounded.Close, "Close", tint = UacColors.TextSecondary, modifier = Modifier.size(20.dp))
+                            Icon(Icons.Rounded.Close, "Close", tint = UacColors.TextSecondary, modifier = Modifier.size(20.dp))
                             }
                         }
                         Spacer(Modifier.height(14.dp))
