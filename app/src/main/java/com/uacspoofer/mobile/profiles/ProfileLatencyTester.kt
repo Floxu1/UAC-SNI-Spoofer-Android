@@ -1,10 +1,13 @@
 package com.uacspoofer.mobile.profiles
 
 import android.content.Context
+import android.net.Network
 import android.os.SystemClock
 import android.util.Log
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.mci.MciEdge
+import com.uacspoofer.mobile.mci.MciXrayBatchRoute
 import com.uacspoofer.mobile.mci.MciXrayCore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
@@ -13,12 +16,24 @@ import com.uacspoofer.mobile.vpn.AdaptiveCandidatePlanner
 import com.uacspoofer.mobile.vpn.AdaptiveConnectionProbe
 import com.uacspoofer.mobile.vpn.AdaptiveDnsResolvers
 import com.uacspoofer.mobile.vpn.AdaptiveProfileStore
+import com.uacspoofer.mobile.vpn.AdaptiveRouteMetrics
 import com.uacspoofer.mobile.vpn.AdaptiveSavedRoute
+import com.uacspoofer.mobile.vpn.CloudflareEdgeCandidate
+import com.uacspoofer.mobile.vpn.CloudflareEdgeDiscovery
+import com.uacspoofer.mobile.vpn.CloudflareEdgeDiscoveryResult
+import com.uacspoofer.mobile.vpn.CloudflareDiscoveryPhase
+import com.uacspoofer.mobile.vpn.CloudflareDiscoveryProgress
+import com.uacspoofer.mobile.vpn.CloudflareSuitability
 import com.uacspoofer.mobile.vpn.NetworkFingerprint
 import com.uacspoofer.mobile.vpn.NetworkFingerprintResolver
+import com.uacspoofer.mobile.vpn.RouteMtuProbeCoordinator
+import com.uacspoofer.mobile.vpn.RouteNativeMtuProbeRequest
+import com.uacspoofer.mobile.vpn.RouteProbeBusyException
+import com.uacspoofer.mobile.vpn.RouteProbePermissionRequiredException
 import com.uacspoofer.mobile.vpn.SocksDnsProbe
 import com.uacspoofer.mobile.vpn.TunStats
 import com.uacspoofer.mobile.vpn.VpnConnectivityProbe
+import com.uacspoofer.mobile.vpn.selectSubnetDiverseEdges
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -29,6 +44,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.HttpsURLConnection
@@ -42,6 +58,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -73,6 +91,34 @@ data class RouteSpeedTestPlan(
     val savedBackupId: String?,
     val savedBackupLabel: String?,
     val savedBackup: AdaptiveSavedRoute?,
+    val discoveryId: String,
+    val discoverySummary: String,
+    val discoveredEdgeCount: Int,
+    val underlyingNetwork: Network? = null,
+)
+
+enum class RoutePreparationStep(val number: Int) {
+    PROFILE_SNAPSHOT(1),
+    NETWORK_DETECTION(2),
+    EDGE_POOL(3),
+    TCP_TLS_PREFLIGHT(4),
+    XRAY_SCREENING(5),
+    CONNECTIVITY_VALIDATION(6),
+    ROUTE_MATRIX(7),
+    ;
+
+    companion object {
+        const val TOTAL = 7
+    }
+}
+
+data class RoutePreparationProgress(
+    val step: RoutePreparationStep,
+    val completed: Int = 0,
+    val total: Int = 0,
+    val healthy: Int = 0,
+    val currentTarget: String = "",
+    val detail: String = "",
 )
 
 enum class RouteSpeedProbeStage { STARTING, PROBING }
@@ -91,7 +137,29 @@ data class RouteSpeedProbeResult(
     val dnsSucceeded: Boolean,
     val detail: String,
     val error: String? = null,
+    val uploadBytes: Int = 0,
+    val downloadBytes: Int = payloadBytes,
+    val uploadKbps: Long = 0L,
+    val downloadKbps: Long = throughputKbps,
+    val jitterMs: Long? = null,
+    val transferMode: RouteTransferMeasurementMode = RouteTransferMeasurementMode.SOCKS_PROXY,
+    val transferValidated: Boolean = false,
+    val endpointFailure: RouteEndpointFailure? = null,
+    val txDelta: Long = 0L,
+    val rxDelta: Long = 0L,
+    val mtuValidated: Boolean = false,
 )
+
+sealed interface RouteSpeedQualifierEvent {
+    data class Running(
+        val candidateIds: List<String>,
+        val stage: RouteSpeedProbeStage,
+    ) : RouteSpeedQualifierEvent
+
+    data class Completed(
+        val results: List<RouteSpeedProbeResult>,
+    ) : RouteSpeedQualifierEvent
+}
 
 enum class SniCandidateStage { STARTING, PROBING, REJECTED, FAILED, PASSED, EXHAUSTED }
 
@@ -112,11 +180,13 @@ class ProfileLatencyTester(context: Context) {
     private val adaptiveProfileStore = AdaptiveProfileStore(appContext)
     private val adaptivePlanner = AdaptiveCandidatePlanner(adaptiveProfileStore)
     private val fingerprintResolver = NetworkFingerprintResolver(appContext)
+    private val routeConnectivityProbe = VpnConnectivityProbe { TunStats.ZERO }
     private val adaptiveProbe = AdaptiveConnectionProbe(
-        connectivityProbe = VpnConnectivityProbe { TunStats.ZERO },
+        connectivityProbe = routeConnectivityProbe,
         tunConnectivityProbe = VpnConnectivityProbe { TunStats.ZERO },
         dnsProbe = SocksDnsProbe(),
     )
+    private val transferProbe = RouteTransferProbe()
 
     suspend fun measure(profile: ProxyProfile): Long =
         measureInternal(
@@ -153,18 +223,110 @@ class ProfileLatencyTester(context: Context) {
         SniMakerTestSession(settings, network, preferred)
     }
 
-    suspend fun prepareRouteSpeedTest(): RouteSpeedTestPlan = withContext(Dispatchers.IO) {
+    suspend fun prepareRouteSpeedTest(
+        profileOverride: ProxyProfile? = null,
+        onProgress: suspend (RoutePreparationProgress) -> Unit = {},
+    ): RouteSpeedTestPlan = withContext(Dispatchers.IO) {
         val settings = settingsStore.snapshot().validated()
-        val network = fingerprintResolver.captureAdaptive()
-        val profile = profileStore.selectedProfile()
-        val candidates = adaptivePlanner.routeSpeedCandidates(settings, network, profile)
+        val profile = (profileOverride ?: profileStore.selectedProfile()).copy()
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.PROFILE_SNAPSHOT,
+                completed = 1,
+                total = 1,
+                currentTarget = profile.name,
+                detail = "Profile settings frozen",
+            ),
+        )
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.NETWORK_DETECTION,
+                total = 1,
+                detail = "Reading the active network fingerprint",
+            ),
+        )
+        val networkContext = fingerprintResolver.captureAdaptiveContext()
+        val network = networkContext.fingerprint
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.NETWORK_DETECTION,
+                completed = 1,
+                total = 1,
+                currentTarget = network.transport,
+                detail = "Network fingerprint ready",
+            ),
+        )
         val signature = adaptivePlanner.signature(settings, profile)
         val savedChampion = adaptiveProfileStore.savedRoute(network, profile, signature)
         val savedBackup = adaptiveProfileStore.savedBackupRoute(network, profile, signature)
+        val savedEdges = listOfNotNull(savedChampion, savedBackup).map { saved ->
+            MciEdge(saved.address, saved.port, saved.role, saved.maxSplit)
+        }
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.EDGE_POOL,
+                detail = "Collecting current, original, saved, DNS and official edges",
+            ),
+        )
+        val discovery = CloudflareEdgeDiscovery.create(appContext).discover(
+            settings = settings,
+            profile = profile,
+            networkContext = networkContext,
+            profileSignature = signature,
+            savedEdges = savedEdges,
+            onProgress = { progress ->
+                onProgress(progress.toRoutePreparationProgress())
+            },
+        )
+        val selectedDiscovery = validateDiscoveredEdges(
+            settings = settings,
+            profile = profile,
+            network = network,
+            signature = signature,
+            discovery = discovery,
+            onProgress = onProgress,
+        )
+        val selectedEdges = selectedDiscovery.selected.mapIndexed { index, edge ->
+            edge.toMciEdge(
+                role = if (index < selectedDiscovery.primary.size) {
+                    "discovered-${index + 1}"
+                } else {
+                    "discovered-backup-${index - selectedDiscovery.primary.size + 1}"
+                },
+                maxSplit = settings.primaryMaxSplit,
+            )
+        }
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.ROUTE_MATRIX,
+                total = 1,
+                healthy = selectedEdges.size,
+                detail = "Combining Edge, DNS, tuning and MTU routes",
+            ),
+        )
+        val cloudflareEligible = profile.isBuiltIn || discovery.suitability.status == CloudflareSuitability.ELIGIBLE
+        val candidates = adaptivePlanner.routeSpeedCandidates(
+            base = settings,
+            network = network,
+            profile = profile,
+            discoveredEdges = selectedEdges,
+            cloudflareEligible = cloudflareEligible,
+        )
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.ROUTE_MATRIX,
+                completed = candidates.size,
+                total = candidates.size,
+                healthy = selectedEdges.size,
+                detail = "${candidates.size} route candidates ready",
+            ),
+        )
         AppLogRepository.info(
             LogSource.APP,
             "Route Speed Test plan profile=${profile.name} network=${network.summary()} " +
-                "candidates=${candidates.joinToString { it.id }}",
+                "discovery=${selectedDiscovery.discoveryId} suitability=${discovery.suitability.status} " +
+                "edges=${selectedEdges.joinToString { "${it.address}:${it.port}" }} " +
+                "logicalCandidates=${candidates.size}",
         )
         RouteSpeedTestPlan(
             profile = profile,
@@ -181,12 +343,214 @@ class ProfileLatencyTester(context: Context) {
             savedBackupId = savedBackup?.id,
             savedBackupLabel = savedBackup?.label,
             savedBackup = savedBackup,
+            discoveryId = selectedDiscovery.discoveryId,
+            discoverySummary = buildString {
+                append(discovery.suitability.status.name.lowercase())
+                append(" • ").append(discovery.candidates.size).append(" preflight")
+                append(" • ").append(selectedEdges.size).append(" Xray-selected edges")
+            },
+            discoveredEdgeCount = selectedEdges.size,
+            underlyingNetwork = networkContext.network,
         )
     }
+
+    private suspend fun validateDiscoveredEdges(
+        settings: com.uacspoofer.mobile.settings.AdvancedSettingsData,
+        profile: ProxyProfile,
+        network: NetworkFingerprint,
+        signature: String,
+        discovery: CloudflareEdgeDiscoveryResult,
+        onProgress: suspend (RoutePreparationProgress) -> Unit,
+    ): CloudflareEdgeDiscoveryResult {
+        if (discovery.suitability.status != CloudflareSuitability.ELIGIBLE) {
+            onProgress(
+                RoutePreparationProgress(
+                    step = RoutePreparationStep.XRAY_SCREENING,
+                    completed = 1,
+                    total = 1,
+                    detail = "Cloudflare edge screening is not required for this profile",
+                ),
+            )
+            onProgress(
+                RoutePreparationProgress(
+                    step = RoutePreparationStep.CONNECTIVITY_VALIDATION,
+                    completed = 1,
+                    total = 1,
+                    detail = "Using the original direct route",
+                ),
+            )
+            return discovery
+        }
+        val eligible = discovery.candidates.filter { edge ->
+            edge.reserved || edge.preflight?.tcpSucceeded == true
+        }
+        if (eligible.isEmpty()) {
+            onProgress(
+                RoutePreparationProgress(
+                    step = RoutePreparationStep.XRAY_SCREENING,
+                    completed = 1,
+                    total = 1,
+                    detail = "No preflight edge was available for Xray screening",
+                ),
+            )
+            return discovery
+        }
+        val validationCandidates = buildList {
+            val customRuntime = if (profile.isBuiltIn) {
+                com.uacspoofer.mobile.mci.MciXrayRuntimeOptions.DEFAULT
+            } else {
+                com.uacspoofer.mobile.mci.MciXrayRuntimeOptions(
+                    identityOverride = profile.runtimeIdentity(settings),
+                    preserveEmptyAlpn = true,
+                    preserveTransportFields = true,
+                )
+            }
+            eligible.forEachIndexed { index, edge ->
+                val endpoint = edge.toMciEdge("edge-check-${index + 1}", settings.primaryMaxSplit)
+                add(
+                    AdaptiveCandidate(
+                        id = "edge-check-$index-stable",
+                        label = "Edge ${edge.address} stable",
+                        edge = endpoint,
+                        settings = settings.copy(finalmaskDelayMs = 20).validated(),
+                        runtimeOptions = customRuntime,
+                    ),
+                )
+                add(
+                    AdaptiveCandidate(
+                        id = "edge-check-$index-deep",
+                        label = "Edge ${edge.address} deep",
+                        edge = endpoint.copy(finalmaskMaxSplit = 100),
+                        settings = settings.copy(finalmaskDelayMs = 5).validated(),
+                        runtimeOptions = customRuntime,
+                    ),
+                )
+            }
+        }
+        val provisionalPlan = RouteSpeedTestPlan(
+            profile = profile,
+            session = SniMakerTestSession(settings, network, null),
+            signature = signature,
+            candidates = validationCandidates,
+            savedChampionId = null,
+            savedChampionLabel = null,
+            savedChampion = null,
+            savedBackupId = null,
+            savedBackupLabel = null,
+            savedBackup = null,
+            discoveryId = discovery.discoveryId,
+            discoverySummary = "edge validation",
+            discoveredEdgeCount = eligible.size,
+            underlyingNetwork = null,
+        )
+        var completed = 0
+        var screenedHealthy = 0
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.XRAY_SCREENING,
+                total = validationCandidates.size,
+                detail = "Starting Xray edge screening",
+            ),
+        )
+        val results = measureRouteSpeedQualifier(provisionalPlan, validationCandidates) { event ->
+            if (event is RouteSpeedQualifierEvent.Completed) {
+                completed += event.results.size
+                screenedHealthy += event.results.count(RouteSpeedProbeResult::accepted)
+                onProgress(
+                    RoutePreparationProgress(
+                        step = RoutePreparationStep.XRAY_SCREENING,
+                        completed = completed.coerceAtMost(validationCandidates.size),
+                        total = validationCandidates.size,
+                        healthy = screenedHealthy,
+                        currentTarget = event.results.lastOrNull()?.candidate?.edge?.let { "${it.address}:${it.port}" }.orEmpty(),
+                        detail = "Fast Xray route screening",
+                    ),
+                )
+            }
+        }
+        val screenedByEndpoint = results.values
+            .filter(RouteSpeedProbeResult::accepted)
+            .groupBy { result -> "${result.candidate.edge.address}:${result.candidate.edge.port}" }
+            .mapValues { (_, values) ->
+                values.sortedWith(
+                    compareByDescending<RouteSpeedProbeResult> { it.score }
+                        .thenBy { it.latencyMs ?: Long.MAX_VALUE },
+                ).firstOrNull()
+            }
+        val candidatesForIsolatedGate = eligible.mapNotNull { edge ->
+            screenedByEndpoint["${edge.address}:${edge.port}"]
+        }
+        val isolatedCompleted = AtomicInteger(0)
+        val isolatedHealthy = AtomicInteger(0)
+        onProgress(
+            RoutePreparationProgress(
+                step = RoutePreparationStep.CONNECTIVITY_VALIDATION,
+                total = candidatesForIsolatedGate.size,
+                detail = "Starting isolated HTTP and DNS validation",
+            ),
+        )
+        val isolatedByEndpoint = coroutineScope {
+            val slots = Semaphore(EDGE_XRAY_VALIDATION_WORKERS)
+            candidatesForIsolatedGate.map { screened ->
+                async {
+                    slots.withPermit {
+                        val result = measureRouteSpeedCandidate(
+                            plan = provisionalPlan,
+                            candidate = screened.candidate,
+                            transferConfig = null,
+                        )
+                        val finished = isolatedCompleted.incrementAndGet()
+                        if (result.accepted) isolatedHealthy.incrementAndGet()
+                        onProgress(
+                            RoutePreparationProgress(
+                                step = RoutePreparationStep.CONNECTIVITY_VALIDATION,
+                                completed = finished,
+                                total = candidatesForIsolatedGate.size,
+                                healthy = isolatedHealthy.get(),
+                                currentTarget = "${result.candidate.edge.address}:${result.candidate.edge.port}",
+                                detail = "Isolated HTTP + DNS validation",
+                            ),
+                        )
+                        "${result.candidate.edge.address}:${result.candidate.edge.port}" to result
+                    }
+                }
+            }.awaitAll().toMap()
+        }
+        val xrayAccepted = eligible.mapNotNull { edge ->
+            val result = isolatedByEndpoint["${edge.address}:${edge.port}"]
+                ?.takeIf(RouteSpeedProbeResult::accepted)
+                ?: return@mapNotNull null
+            edge.copy(score = edge.score + result.score * 10)
+        }
+        if (xrayAccepted.isEmpty()) {
+            AppLogRepository.warning(
+                LogSource.APP,
+                "Edge Discovery Xray validation had no accepted edge; keeping reserved fail-open shortlist",
+            )
+            val (primary, backups) = selectSubnetDiverseEdges(eligible)
+            return discovery.copy(primary = primary, backups = backups)
+        }
+        val (primary, backups) = selectSubnetDiverseEdges(xrayAccepted)
+        return discovery.copy(primary = primary, backups = backups)
+    }
+
+    private fun CloudflareDiscoveryProgress.toRoutePreparationProgress(): RoutePreparationProgress =
+        RoutePreparationProgress(
+            step = when (phase) {
+                CloudflareDiscoveryPhase.COLLECTING -> RoutePreparationStep.EDGE_POOL
+                CloudflareDiscoveryPhase.PREFLIGHT -> RoutePreparationStep.TCP_TLS_PREFLIGHT
+            },
+            completed = completed,
+            total = total,
+            healthy = healthy,
+            currentTarget = currentTarget,
+            detail = detail,
+        )
 
     suspend fun measureRouteSpeedCandidate(
         plan: RouteSpeedTestPlan,
         candidate: AdaptiveCandidate,
+        transferConfig: RouteTransferProbeConfig? = RouteTransferProbeConfig(),
         onStage: suspend (RouteSpeedProbeStage) -> Unit = {},
     ): RouteSpeedProbeResult = withContext(Dispatchers.IO) {
         val reservedPort = reservePort()
@@ -201,33 +565,73 @@ class ProfileLatencyTester(context: Context) {
         try {
             onStage(RouteSpeedProbeStage.STARTING)
             val report = withTimeoutOrNull(ROUTE_SPEED_CANDIDATE_TIMEOUT_MS) {
-                core.start(candidate.edge, probeSettings, plan.profile, candidate.runtimeOptions)
-                delay(ROUTE_SPEED_WARMUP_MS)
+                core.start(
+                    candidate.edge,
+                    probeSettings,
+                    plan.profile,
+                    candidate.runtimeOptions.copy(quietLogging = true),
+                )
                 onStage(RouteSpeedProbeStage.PROBING)
                 adaptiveProbe.verifyForRouteSpeed(probeCandidate)
             } ?: throw SocketTimeoutException(
                 "Route ${candidate.id} timed out after ${ROUTE_SPEED_CANDIDATE_TIMEOUT_MS}ms",
             )
+            val transfer = if (report.accepted && transferConfig != null) {
+                transferProbe.measure(
+                    measurementMode = RouteTransferMeasurementMode.SOCKS_PROXY,
+                    socksProxy = RouteSocksProxy(probeSettings.socksAddress, probeSettings.socksPort),
+                    config = transferConfig,
+                )
+            } else {
+                null
+            }
             val transferMs = report.http.durationMs.coerceAtLeast(1L)
-            val throughputKbps = (report.http.totalBytes.toLong() * 8L / transferMs).coerceAtLeast(0L)
+            val legacyThroughput = (report.http.totalBytes.toLong() * 8L / transferMs).coerceAtLeast(0L)
+            val throughputKbps = transfer?.takeIf(RouteTransferProbeResult::success)?.let {
+                minOf(it.uploadKbps, it.downloadKbps)
+            }?.takeIf { it > 0L } ?: transfer?.downloadKbps?.takeIf { it > 0L } ?: legacyThroughput
+            val transferAccepted = when {
+                transfer == null -> report.accepted
+                transfer.success -> true
+                transfer.endpointUnavailable -> true
+                else -> false
+            }
+            val accepted = report.accepted && transferAccepted
+            val adjustedScore = when {
+                !accepted -> 0
+                transfer?.success == true -> (report.score + transferQualityBonus(transfer)).coerceAtMost(100)
+                transfer?.endpointUnavailable == true -> report.score.coerceAtMost(75)
+                else -> report.score
+            }
+            val transferDetail = transfer?.let(::transferDetail).orEmpty()
             AppLogRepository.info(
                 LogSource.APP,
                 "Route Speed Test candidate=${candidate.id} profile=${plan.profile.name} " +
-                    "throughputKbps=$throughputKbps ${report.detail()}",
+                    "downloadKbps=$throughputKbps uploadKbps=${transfer?.uploadKbps ?: 0L} " +
+                    "${report.detail()}$transferDetail",
             )
             RouteSpeedProbeResult(
                 candidate = candidate,
-                accepted = report.accepted,
-                score = report.score,
-                latencyMs = report.http.latencyMs,
+                accepted = accepted,
+                score = adjustedScore,
+                latencyMs = transfer?.latencyMedianMs ?: report.http.latencyMs,
                 dnsLatencyMs = report.dns.latencyMs,
-                payloadBytes = report.http.totalBytes,
+                payloadBytes = report.http.totalBytes + (transfer?.uploadBytes ?: 0) + (transfer?.downloadBytes ?: 0),
                 durationMs = report.durationMs,
                 throughputKbps = throughputKbps,
                 httpSucceeded = report.http.succeededTargets,
                 httpAttempted = report.http.attemptedTargets,
                 dnsSucceeded = report.dns.success,
-                detail = report.detail(),
+                detail = report.detail() + transferDetail,
+                error = transfer?.candidateFailure,
+                uploadBytes = transfer?.uploadBytes ?: 0,
+                downloadBytes = transfer?.downloadBytes ?: report.http.totalBytes,
+                uploadKbps = transfer?.uploadKbps ?: 0L,
+                downloadKbps = transfer?.downloadKbps ?: legacyThroughput,
+                jitterMs = transfer?.jitterMs,
+                transferMode = transfer?.measurementMode ?: RouteTransferMeasurementMode.SOCKS_PROXY,
+                transferValidated = transfer?.byteValidationPassed == true,
+                endpointFailure = transfer?.endpointFailure,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -260,12 +664,369 @@ class ProfileLatencyTester(context: Context) {
         }
     }
 
+    suspend fun measureRouteSpeedNativeCandidate(
+        plan: RouteSpeedTestPlan,
+        candidate: AdaptiveCandidate,
+        transferConfig: RouteTransferProbeConfig,
+        onStage: suspend (RouteSpeedProbeStage) -> Unit = {},
+    ): RouteSpeedProbeResult = withContext(Dispatchers.IO) {
+        try {
+            onStage(RouteSpeedProbeStage.STARTING)
+            onStage(RouteSpeedProbeStage.PROBING)
+            val native = RouteMtuProbeCoordinator.measure(
+                context = appContext,
+                request = RouteNativeMtuProbeRequest(
+                    candidate = candidate,
+                    profile = plan.profile,
+                    transferConfig = transferConfig,
+                    expectedNetworkKey = plan.session.network.exactStorageKey(),
+                    underlyingNetwork = plan.underlyingNetwork,
+                ),
+            )
+            val transfer = native.transfer
+            val bidirectionalKbps = if (transfer.success) {
+                minOf(transfer.uploadKbps, transfer.downloadKbps)
+            } else {
+                transfer.downloadKbps
+            }
+            val score = nativeMtuScore(native)
+            RouteSpeedProbeResult(
+                candidate = candidate,
+                accepted = native.accepted,
+                score = score,
+                latencyMs = transfer.latencyMedianMs,
+                dnsLatencyMs = native.dnsLatencyMs,
+                payloadBytes = transfer.uploadBytes + transfer.downloadBytes,
+                durationMs = transfer.uploadDurationMs + transfer.downloadDurationMs,
+                throughputKbps = bidirectionalKbps,
+                httpSucceeded = native.httpSucceeded,
+                httpAttempted = native.httpAttempted,
+                dnsSucceeded = native.dnsSucceeded,
+                detail = native.detail,
+                error = if (native.accepted) null else transfer.candidateFailure ?: native.detail,
+                uploadBytes = transfer.uploadBytes,
+                downloadBytes = transfer.downloadBytes,
+                uploadKbps = transfer.uploadKbps,
+                downloadKbps = transfer.downloadKbps,
+                jitterMs = transfer.jitterMs,
+                transferMode = RouteTransferMeasurementMode.NATIVE_TUN,
+                transferValidated = transfer.byteValidationPassed,
+                endpointFailure = transfer.endpointFailure,
+                txDelta = native.txDelta,
+                rxDelta = native.rxDelta,
+                mtuValidated = native.accepted,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (permission: RouteProbePermissionRequiredException) {
+            throw permission
+        } catch (busy: RouteProbeBusyException) {
+            throw busy
+        } catch (error: Throwable) {
+            val detail = error.uiMessage()
+            AppLogRepository.warning(LogSource.TUN, "Native MTU candidate=${candidate.id} failed", error)
+            RouteSpeedProbeResult(
+                candidate = candidate,
+                accepted = false,
+                score = 0,
+                latencyMs = null,
+                dnsLatencyMs = null,
+                payloadBytes = 0,
+                durationMs = 0L,
+                throughputKbps = 0L,
+                httpSucceeded = 0,
+                httpAttempted = 0,
+                dnsSucceeded = false,
+                detail = detail,
+                error = detail,
+                transferMode = RouteTransferMeasurementMode.NATIVE_TUN,
+            )
+        }
+    }
+
+    private fun nativeMtuScore(result: com.uacspoofer.mobile.vpn.RouteNativeMtuProbeResult): Int {
+        if (!result.accepted) return 0
+        var score = 35
+        score += (result.httpSucceeded.coerceAtMost(3) * 8)
+        if (result.dnsSucceeded) score += 15
+        if (result.transfer.success) score += 15 else if (result.transfer.endpointUnavailable) score += 5
+        if (result.txDelta > 0L && result.rxDelta > 0L) score += 10
+        score += when (result.transfer.latencyMedianMs) {
+            null -> 0
+            in 0L..500L -> 8
+            in 501L..1_200L -> 6
+            in 1_201L..2_500L -> 3
+            else -> 1
+        }
+        return score.coerceAtMost(100)
+    }
+
+    private fun transferQualityBonus(result: RouteTransferProbeResult): Int {
+        if (!result.success) return 0
+        val bidirectional = minOf(result.uploadKbps, result.downloadKbps)
+        return when {
+            bidirectional >= 8_000L -> 15
+            bidirectional >= 2_000L -> 12
+            bidirectional >= 512L -> 9
+            bidirectional >= 128L -> 6
+            else -> 3
+        }
+    }
+
+    private fun transferDetail(result: RouteTransferProbeResult): String = buildString {
+        append(" | transferMode=${result.measurementMode.name.lowercase()}")
+        append(" upload=${result.uploadBytes}/${result.requestedUploadBytes}@${result.uploadKbps}Kbps")
+        append(" download=${result.downloadBytes}/${result.requestedDownloadBytes}@${result.downloadKbps}Kbps")
+        append(" ping=${result.latencyMedianMs ?: -1}ms jitter=${result.jitterMs ?: -1}ms")
+        append(" bytesValid=${result.byteValidationPassed}")
+        result.endpointFailure?.let { append(" endpoint=${it.kind}:${it.statusCode}") }
+        result.candidateFailure?.let { append(" candidateFailure=[$it]") }
+    }
+
+    suspend fun measureRouteSpeedQualifier(
+        plan: RouteSpeedTestPlan,
+        candidates: List<AdaptiveCandidate>,
+        onEvent: suspend (RouteSpeedQualifierEvent) -> Unit = {},
+    ): Map<String, RouteSpeedProbeResult> = withContext(Dispatchers.IO) {
+        if (candidates.isEmpty()) return@withContext emptyMap()
+        val groups = candidates.groupBy(::routeScreeningKey)
+        val representatives = groups.values.map(List<AdaptiveCandidate>::first)
+        val representativesById = representatives.associateBy(AdaptiveCandidate::id)
+        val finalResults = LinkedHashMap<String, RouteSpeedProbeResult>()
+        val completedGroupKeys = HashSet<String>()
+        AppLogRepository.info(
+            LogSource.APP,
+            "Route Speed fast qualifier logical=${candidates.size} runtime=${representatives.size} " +
+                "batches=${(representatives.size + ROUTE_SCREEN_BATCH_SIZE - 1) / ROUTE_SCREEN_BATCH_SIZE}",
+        )
+
+        suspend fun runBatch(batch: List<AdaptiveCandidate>): List<RouteSpeedProbeResult> =
+            measureScreeningBatchResilient(plan, batch) { representativeId, stage ->
+                val representative = checkNotNull(representativesById[representativeId]) {
+                    "Unknown qualifier representative $representativeId"
+                }
+                val logicalIds = groups[routeScreeningKey(representative)]
+                    .orEmpty()
+                    .map(AdaptiveCandidate::id)
+                if (logicalIds.isNotEmpty()) {
+                    onEvent(RouteSpeedQualifierEvent.Running(logicalIds, stage))
+                }
+            }
+
+        suspend fun emitSharedGroup(representative: RouteSpeedProbeResult) {
+            val key = routeScreeningKey(representative.candidate)
+            if (!completedGroupKeys.add(key)) return
+            val results = groups[key].orEmpty().map { candidate ->
+                representative.copy(
+                    candidate = candidate,
+                    detail = representative.detail +
+                        " | shared HTTP preflight; isolated HTTP/DNS verification follows",
+                )
+            }
+            results.forEach { finalResults[it.candidate.id] = it }
+            if (results.isNotEmpty()) onEvent(RouteSpeedQualifierEvent.Completed(results))
+        }
+
+        suspend fun emitIsolatedFallbackGroup(representative: RouteSpeedProbeResult) {
+            val key = routeScreeningKey(representative.candidate)
+            if (key in completedGroupKeys) return
+            val results = groups[key].orEmpty().map { candidate ->
+                if (candidate.id == representative.candidate.id) {
+                    representative
+                } else {
+                    measureRouteSpeedCandidate(plan, candidate, transferConfig = null) { stage ->
+                        onEvent(RouteSpeedQualifierEvent.Running(listOf(candidate.id), stage))
+                    }
+                }
+            }
+            completedGroupKeys += key
+            results.forEach { finalResults[it.candidate.id] = it }
+            if (results.isNotEmpty()) onEvent(RouteSpeedQualifierEvent.Completed(results))
+        }
+
+        val firstPass = LinkedHashMap<String, RouteSpeedProbeResult>()
+        for (batch in representatives.chunked(ROUTE_SCREEN_BATCH_SIZE)) {
+            val batchKeys = batch.mapTo(LinkedHashSet()) { routeScreeningKey(it) }
+            runBatch(batch).forEach { result ->
+                val key = routeScreeningKey(result.candidate)
+                firstPass[key] = result
+                if (result.accepted && !result.detail.startsWith(ISOLATED_QUALIFIER_FALLBACK)) {
+                    emitSharedGroup(result)
+                }
+            }
+
+            val failed = batch.filter { candidate ->
+                val result = firstPass[routeScreeningKey(candidate)]
+                result?.accepted != true && result?.detail?.startsWith(ISOLATED_QUALIFIER_FALLBACK) != true
+            }
+            if (failed.isNotEmpty()) {
+                AppLogRepository.info(
+                    LogSource.APP,
+                    "Route Speed fast qualifier retrying ${failed.size} runtime failures in the current batch",
+                )
+                runBatch(failed).forEach { result ->
+                    val key = routeScreeningKey(result.candidate)
+                    val previous = firstPass[key]
+                    if (result.accepted || previous == null || result.score > previous.score) {
+                        firstPass[key] = result
+                    }
+                }
+            }
+
+            batchKeys.forEach { key ->
+                val representative = checkNotNull(firstPass[key]) {
+                    "Missing qualifier result for runtime group $key"
+                }
+                if (representative.detail.startsWith(ISOLATED_QUALIFIER_FALLBACK)) {
+                    emitIsolatedFallbackGroup(representative)
+                } else {
+                    emitSharedGroup(representative)
+                }
+            }
+        }
+        candidates.associate { candidate ->
+            candidate.id to checkNotNull(finalResults[candidate.id]) {
+                "Missing qualifier result for ${candidate.id}"
+            }
+        }
+    }
+
+    private suspend fun measureScreeningBatchResilient(
+        plan: RouteSpeedTestPlan,
+        candidates: List<AdaptiveCandidate>,
+        onStage: suspend (String, RouteSpeedProbeStage) -> Unit,
+    ): List<RouteSpeedProbeResult> {
+        return try {
+            measureScreeningBatch(plan, candidates, onStage)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            AppLogRepository.warning(
+                LogSource.APP,
+                "Route Speed batch preflight failed size=${candidates.size}; isolating the batch",
+                error,
+            )
+            if (candidates.size == 1) {
+                val candidate = candidates.single()
+                listOf(
+                    measureRouteSpeedCandidate(plan, candidate, transferConfig = null) { stage ->
+                        onStage(candidate.id, stage)
+                    }.let { fallback ->
+                        fallback.copy(detail = "$ISOLATED_QUALIFIER_FALLBACK ${fallback.detail}")
+                    },
+                )
+            } else {
+                val split = (candidates.size + 1) / 2
+                measureScreeningBatchResilient(plan, candidates.take(split), onStage) +
+                    measureScreeningBatchResilient(plan, candidates.drop(split), onStage)
+            }
+        }
+    }
+
+    private suspend fun measureScreeningBatch(
+        plan: RouteSpeedTestPlan,
+        candidates: List<AdaptiveCandidate>,
+        onStage: suspend (String, RouteSpeedProbeStage) -> Unit,
+    ): List<RouteSpeedProbeResult> {
+        require(candidates.isNotEmpty()) { "Screening batch is empty" }
+        val ports = ArrayList<Int>(candidates.size)
+        try {
+            repeat(candidates.size) { ports += reservePort() }
+        } catch (error: Throwable) {
+            ports.forEach(::releasePort)
+            throw error
+        }
+        val probeCandidates = candidates.mapIndexed { index, candidate ->
+            candidate.copy(
+                settings = candidate.settings.copy(
+                    connectionMode = CONNECTION_MODE_PROXY,
+                    socksAddress = "127.0.0.1",
+                    socksPort = ports[index],
+                    socksUdp = false,
+                ).validated(),
+            )
+        }
+        val routes = probeCandidates.mapIndexed { index, candidate ->
+            MciXrayBatchRoute(
+                tag = "r$index",
+                edge = candidate.edge,
+                settings = candidate.settings,
+                runtimeOptions = candidate.runtimeOptions.copy(quietLogging = true),
+            )
+        }
+        val core = MciXrayCore(appContext)
+        try {
+            probeCandidates.forEach { onStage(it.id, RouteSpeedProbeStage.STARTING) }
+            core.startBatch(routes, plan.profile)
+            probeCandidates.forEach { onStage(it.id, RouteSpeedProbeStage.PROBING) }
+            return coroutineScope {
+                val probeSlots = Semaphore(ROUTE_SCREEN_PARALLEL_PROBES)
+                probeCandidates.mapIndexed { index, candidate ->
+                    async {
+                        probeSlots.withPermit {
+                            val http = routeConnectivityProbe.verifyScreening(candidate.settings)
+                            val duration = http.durationMs.coerceAtLeast(1L)
+                            val latencyBonus = when {
+                                http.latencyMs == null -> 0
+                                http.latencyMs <= 500L -> 20
+                                http.latencyMs <= 1_200L -> 15
+                                http.latencyMs <= 2_500L -> 10
+                                else -> 5
+                            }
+                            val score = if (http.success) 60 + latencyBonus else 0
+                            RouteSpeedProbeResult(
+                                candidate = candidates[index],
+                                accepted = http.success,
+                                score = score,
+                                latencyMs = http.latencyMs,
+                                dnsLatencyMs = null,
+                                payloadBytes = http.totalBytes,
+                                durationMs = duration,
+                                throughputKbps = 0L,
+                                httpSucceeded = http.succeededTargets,
+                                httpAttempted = http.attemptedTargets,
+                                dnsSucceeded = false,
+                                detail = "fast HTTP preflight ${if (http.success) "passed" else "failed"}: ${http.detail}",
+                                error = if (http.success) null else http.detail,
+                            )
+                        }
+                    }
+                }.awaitAll()
+            }
+        } finally {
+            runCatching { core.stop() }
+                .onFailure { AppLogRepository.warning(LogSource.XRAY, "Route batch cleanup failed", it) }
+            ports.forEach(::releasePort)
+        }
+    }
+
+    private fun routeScreeningKey(candidate: AdaptiveCandidate): String = listOf(
+        candidate.edge.address,
+        candidate.edge.port,
+        candidate.edge.finalmaskMaxSplit,
+        candidate.settings.finalmaskPacket,
+        candidate.settings.finalmaskLength,
+        candidate.settings.finalmaskDelayMs,
+        candidate.settings.domainStrategy,
+        candidate.settings.routingDomainStrategy,
+        candidate.settings.ipv4Only,
+        candidate.settings.keepAliveIdleSeconds,
+        candidate.settings.keepAliveIntervalSeconds,
+        candidate.runtimeOptions.identityOverride,
+        candidate.runtimeOptions.finalmaskEnabled,
+        candidate.runtimeOptions.preserveEmptyAlpn,
+        candidate.runtimeOptions.preserveTransportFields,
+        candidate.runtimeOptions.muxEnabledOverride,
+    ).joinToString("|")
+
     fun selectRouteWinner(
         plan: RouteSpeedTestPlan,
         candidateId: String,
         score: Int,
+        metrics: AdaptiveRouteMetrics = AdaptiveRouteMetrics(score),
         backupCandidateId: String? = null,
         backupScore: Int = 0,
+        backupMetrics: AdaptiveRouteMetrics = AdaptiveRouteMetrics(backupScore),
     ): Boolean {
         val candidate = plan.candidates.firstOrNull { it.id == candidateId } ?: return false
         adaptiveProfileStore.recordSavedRoute(
@@ -274,6 +1035,7 @@ class ProfileLatencyTester(context: Context) {
             signature = plan.signature,
             candidate = candidate,
             score = score,
+            metrics = metrics,
         )
         val backup = backupCandidateId
             ?.takeIf { it != candidateId }
@@ -285,12 +1047,19 @@ class ProfileLatencyTester(context: Context) {
                 signature = plan.signature,
                 candidate = backup,
                 score = backupScore,
+                metrics = backupMetrics,
+            )
+        } else {
+            adaptiveProfileStore.clearSavedBackupRoute(
+                network = plan.session.network,
+                profile = plan.profile,
+                signature = plan.signature,
             )
         }
         AppLogRepository.info(
             LogSource.APP,
             "Route Speed Test selected candidate=${candidate.id} profile=${plan.profile.name} " +
-                "network=${plan.session.network.learningKey()} score=$score " +
+                "network=${plan.session.network.exactStorageKey()} score=$score " +
                 "backup=${backup?.id ?: "none"} backupScore=$backupScore",
         )
         return true
@@ -870,7 +1639,10 @@ class ProfileLatencyTester(context: Context) {
         private const val MAX_ROUTE_BUDGET_MS = 7_500L
         private const val SNI_MAKER_WARMUP_MS = 100L
         private const val ROUTE_SPEED_CANDIDATE_TIMEOUT_MS = 12_000L
-        private const val ROUTE_SPEED_WARMUP_MS = 150L
+        private const val ROUTE_SCREEN_BATCH_SIZE = 16
+        private const val ROUTE_SCREEN_PARALLEL_PROBES = 4
+        private const val EDGE_XRAY_VALIDATION_WORKERS = 2
+        private const val ISOLATED_QUALIFIER_FALLBACK = "isolated qualifier fallback:"
         private const val COUNTRY_TIMEOUT_MS = 3_500
         private const val COUNTRY_PROVIDER_TIMEOUT_MS = 2_200
         private const val COUNTRY_TOTAL_TIMEOUT_MS = 2_750L

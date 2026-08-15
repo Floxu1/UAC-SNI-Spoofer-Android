@@ -98,6 +98,9 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uacspoofer.mobile.R
+import com.uacspoofer.mobile.profiles.RoutePreparationProgress
+import com.uacspoofer.mobile.profiles.RoutePreparationStep
+import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.ui.theme.UacColors
 import java.util.Locale
 import kotlinx.coroutines.delay
@@ -148,7 +151,8 @@ private fun RouteSortOption.localizedTitle(): String = when (this) {
 @Composable
 private fun localizedStageTitle(stage: RouteTournamentStage): String = when (stage) {
     RouteTournamentStage.QUALIFIER -> homeText(stage.title, "مرحله مقدماتی")
-    RouteTournamentStage.VERIFICATION -> homeText(stage.title, "بررسی دوباره")
+    RouteTournamentStage.VERIFICATION -> homeText(stage.title, "بررسی Resolverها")
+    RouteTournamentStage.MTU_VALIDATION -> homeText(stage.title, "اعتبارسنجی ${ltr("MTU")}")
     RouteTournamentStage.STABILITY -> homeText(stage.title, "پایداری")
     RouteTournamentStage.STRESS -> homeText(stage.title, "تست فشار")
     RouteTournamentStage.CHAMPIONSHIP -> homeText(stage.title, "مرحله نهایی ${ltr("A-B-B-A")}")
@@ -238,6 +242,7 @@ internal fun RouteSpeedTestScreen(
     var sortMenuVisible by remember { mutableStateOf(false) }
     var savedDetailsVisible by rememberSaveable { mutableStateOf(false) }
     var stageDetailsVisible by rememberSaveable { mutableStateOf(false) }
+    var profileMenuVisible by remember { mutableStateOf(false) }
     var userScrollHoldUntil by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
     val userScrollConnection = remember {
@@ -251,8 +256,9 @@ internal fun RouteSpeedTestScreen(
         }
     }
     BackHandler(onBack = onBackClick)
-    LaunchedEffect(controller) { controller.load(force = true) }
+    LaunchedEffect(controller) { controller.loadProfileLibrary() }
     val rows = sortRouteRows(controller.visibleRows(), sortOption)
+    val rankedOrderKey = rows.fold(1L) { hash, row -> hash * 31L + row.candidateId.hashCode() }
     val progress = if (controller.phaseTotalCount <= 0) 0f else {
         controller.phaseCompletedCount.toFloat() / controller.phaseTotalCount.toFloat()
     }
@@ -265,8 +271,21 @@ internal fun RouteSpeedTestScreen(
                 SystemClock.elapsedRealtime() >= userScrollHoldUntil &&
                 (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)
             ) {
-                listState.animateScrollToItem(0)
+                listState.scrollToItem(0)
             }
+        }
+    }
+    LaunchedEffect(sortOption) {
+        listState.scrollToItem(0)
+    }
+    LaunchedEffect(rankedOrderKey, controller.testing, controller.viewingFinalStageHistory) {
+        if (
+            controller.testing &&
+            !controller.viewingFinalStageHistory &&
+            SystemClock.elapsedRealtime() >= userScrollHoldUntil &&
+            (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)
+        ) {
+            listState.scrollToItem(0)
         }
     }
 
@@ -286,11 +305,26 @@ internal fun RouteSpeedTestScreen(
                 onBackClick = onBackClick,
                 onRefresh = controller::refresh,
             )
+            Spacer(Modifier.height(7.dp))
+            RouteTestProfileSelector(
+                profiles = controller.profileLibrary.allProfiles,
+                selectedId = controller.profileLibrary.selectedId,
+                saved = controller.savedRouteDetails?.profileId == controller.profileLibrary.selectedId,
+                expanded = profileMenuVisible,
+                enabled = !controller.loading && !controller.testing,
+                onExpand = { profileMenuVisible = true },
+                onDismiss = { profileMenuVisible = false },
+                onSelect = { profile ->
+                    profileMenuVisible = false
+                    controller.selectTestProfile(profile.id)
+                },
+            )
             Spacer(Modifier.height(8.dp))
             CompactRouteTestSummary(
                 profileName = controller.profileName,
                 networkLabel = controller.networkLabel,
                 savedChampionLabel = controller.savedChampionLabel,
+                preparation = controller.preparationProgress,
                 stage = controller.currentStage,
                 completed = controller.phaseCompletedCount,
                 total = controller.phaseTotalCount,
@@ -298,6 +332,7 @@ internal fun RouteSpeedTestScreen(
                 testing = controller.testing,
                 paused = controller.paused,
                 loading = controller.loading,
+                canStart = controller.canStartTest,
                 canAdvance = controller.canAdvanceNow,
                 advanceReadyCount = controller.advanceReadyCount,
                 onToggleTest = {
@@ -383,15 +418,19 @@ internal fun RouteSpeedTestScreen(
             }
             Spacer(Modifier.height(5.dp))
             if (controller.loading && rows.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = RouteAccent, strokeWidth = 2.5.dp)
-                        Spacer(Modifier.height(12.dp))
-                        Text(homeText("Building route list…", "در حال ساخت لیست مسیرها…"), color = UacColors.TextSecondary, fontSize = routeFontSize(11f, 12.5f))
-                    }
-                }
+                RoutePreparationLivePanel(
+                    progress = controller.preparationProgress,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                )
             } else if (rows.isEmpty()) {
-                EmptyRouteState(onRefresh = controller::refresh)
+                if (controller.hasPreparedPlan) {
+                    EmptyRouteState(onRefresh = controller::refresh)
+                } else {
+                    RouteTestReadyState(
+                        profileName = controller.profileLibrary.selectedProfile.name,
+                        onStart = { fullTestConfirmationVisible = true },
+                    )
+                }
             } else {
                 LazyColumn(
                     state = listState,
@@ -419,17 +458,25 @@ internal fun RouteSpeedTestScreen(
             onDismissRequest = { fullTestConfirmationVisible = false },
             containerColor = Color(0xFF101E2B),
             title = {
-                Text(homeText("Start Route Tournament?", "مسابقه مسیرها شروع بشه؟"), color = Color.White, fontWeight = FontWeight.SemiBold)
+                Text(homeText("Start Route Test?", "تست مسیر شروع بشه؟"), color = Color.White, fontWeight = FontWeight.SemiBold)
             },
             text = {
                 Text(
                     homeText(
-                        "All ${controller.rows.size} Edge × DNS × Fragment × MTU routes enter Qualifying. " +
-                            "The best 96, 24 and 6 routes advance to repeated stability and stress tests, then the final two are compared A-B-B-A. " +
-                            "This can take several minutes and use about 100 MB of data.",
-                            "هر ${controller.rows.size} ترکیب ${ltr("Edge × DNS × Fragment × MTU")} وارد مرحله مقدماتی می‌شه. " +
-                            "بهترین ۹۶، ۲۴ و ۶ مسیر به تست‌های تکراری پایداری و فشار می‌رن و در پایان دو مسیر با الگوی ${ltr("A-B-B-A")} مقایسه می‌شن. " +
-                            "این تست ممکنه چند دقیقه طول بکشه و حدود ۱۰۰ مگابایت اینترنت مصرف کنه.",
+                        if (controller.hasPreparedPlan) {
+                            "All ${controller.rows.size} Edge × DNS × Fragment routes enter a fast batched HTTP preflight. " +
+                            "Up to the best 96 then receive isolated HTTP and DNS verification; later stages remain repeated and isolated, and the final two are compared A-B-B-A. " +
+                            "This can take several minutes and use about 100 MB of data."
+                        } else {
+                            "The app first discovers healthy edges and builds the route list for the selected profile, then starts the tournament automatically. This can take several minutes."
+                        },
+                        if (controller.hasPreparedPlan) {
+                            "هر ${controller.rows.size} ترکیب ${ltr("Edge × DNS × Fragment")} وارد پیش‌آزمایش گروهی و سریع ${ltr("HTTP")} می‌شه. " +
+                            "بعد، تا ۹۶ مسیر برتر با تست مستقل ${ltr("HTTP + DNS")} بررسی می‌شن؛ مرحله‌های بعد هم مستقل و تکراری هستن و در پایان دو مسیر با الگوی ${ltr("A-B-B-A")} مقایسه می‌شن. " +
+                            "این تست ممکنه چند دقیقه طول بکشه و حدود ۱۰۰ مگابایت اینترنت مصرف کنه."
+                        } else {
+                            "اول ${ltr("Edge")}های سالم برای کانفیگ انتخاب‌شده پیدا می‌شن و لیست مسیرها ساخته می‌شه؛ بعد تست به‌صورت خودکار شروع می‌شه. این روند ممکنه چند دقیقه طول بکشه."
+                        },
                     ),
                     color = UacColors.TextSecondary,
                     fontSize = routeFontSize(11f, 12.5f),
@@ -443,7 +490,7 @@ internal fun RouteSpeedTestScreen(
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF168FD3)),
                 ) {
-                    Text(homeText("START TOURNAMENT", "شروع مسابقه"), fontWeight = FontWeight.Bold)
+                    Text(homeText("START", "شروع"), fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -533,10 +580,337 @@ private fun RouteSpeedHeader(
 }
 
 @Composable
+private fun RouteTestProfileSelector(
+    profiles: List<ProxyProfile>,
+    selectedId: String,
+    saved: Boolean,
+    expanded: Boolean,
+    enabled: Boolean,
+    onExpand: () -> Unit,
+    onDismiss: () -> Unit,
+    onSelect: (ProxyProfile) -> Unit,
+) {
+    val selected = profiles.firstOrNull { it.id == selectedId } ?: profiles.firstOrNull()
+    Box(Modifier.fillMaxWidth()) {
+        Surface(
+            color = Color(0xCC0D1B28),
+            shape = RoundedCornerShape(13.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, RouteAccent.copy(alpha = 0.2f), RoundedCornerShape(13.dp))
+                .clickable(enabled = enabled, onClick = onExpand),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(32.dp)
+                        .background(RouteAccent.copy(alpha = 0.1f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.Hub, null, tint = RouteAccent, modifier = Modifier.size(17.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        homeText("TEST PROFILE", "کانفیگ تست"),
+                        color = UacColors.TextSecondary,
+                        fontSize = routeFontSize(7.5f, 8.8f),
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        selected?.name ?: homeText("No profile", "بدون کانفیگ"),
+                        color = Color.White,
+                        fontSize = routeFontSize(10.5f, 12f),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                selected?.let { profile ->
+                    Text(
+                        profile.protocol.wireName.uppercase(Locale.US),
+                        color = RouteAccent,
+                        fontSize = routeFontSize(8f, 8.8f),
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                if (saved) {
+                    Spacer(Modifier.width(7.dp))
+                    Surface(color = RouteGreen.copy(alpha = 0.12f), shape = RoundedCornerShape(7.dp)) {
+                        Text(
+                            homeText("ROUTE SAVED", "مسیر ذخیره‌شده"),
+                            color = RouteGreen,
+                            fontSize = routeFontSize(6.8f, 7.8f),
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(5.dp))
+                Icon(Icons.Outlined.KeyboardArrowDown, null, tint = UacColors.TextSecondary, modifier = Modifier.size(18.dp))
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismiss,
+            containerColor = Color(0xFF112130),
+            modifier = Modifier.fillMaxWidth(0.94f).heightIn(max = 360.dp),
+        ) {
+            profiles.forEach { profile ->
+                val isSelected = profile.id == selectedId
+                DropdownMenuItem(
+                    leadingIcon = {
+                        Icon(
+                            if (isSelected) Icons.Outlined.CheckCircle else Icons.Outlined.Hub,
+                            null,
+                            tint = if (isSelected) RouteGreen else UacColors.TextSecondary,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    text = {
+                        Column {
+                            Text(
+                                profile.name,
+                                color = if (isSelected) RouteGreen else Color.White,
+                                fontSize = routeFontSize(10.5f, 12f),
+                                fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "${profile.protocol.wireName.uppercase(Locale.US)} • ${profile.network.uppercase(Locale.US)}",
+                                color = UacColors.TextSecondary,
+                                fontSize = routeFontSize(7.5f, 8.3f),
+                            )
+                        }
+                    },
+                    onClick = { onSelect(profile) },
+                )
+            }
+        }
+    }
+}
+
+private fun RoutePreparationProgress.overallProgress(): Float {
+    val itemProgress = when {
+        total > 0 -> completed.toFloat().div(total.toFloat()).coerceIn(0f, 1f)
+        else -> 0f
+    }
+    return ((step.number - 1) + itemProgress).div(RoutePreparationStep.TOTAL.toFloat()).coerceIn(0f, 1f)
+}
+
+@Composable
+private fun RoutePreparationStep.localizedTitle(): String = when (this) {
+    RoutePreparationStep.PROFILE_SNAPSHOT -> homeText("Profile snapshot", "ثبت کانفیگ")
+    RoutePreparationStep.NETWORK_DETECTION -> homeText("Network detection", "شناسایی شبکه")
+    RoutePreparationStep.EDGE_POOL -> homeText("Edge collection", "جمع‌آوری ${ltr("Edge")}")
+    RoutePreparationStep.TCP_TLS_PREFLIGHT -> homeText("TCP/TLS preflight", "پیش‌آزمایش ${ltr("TCP/TLS")}")
+    RoutePreparationStep.XRAY_SCREENING -> homeText("Xray screening", "غربال با ${ltr("Xray")}")
+    RoutePreparationStep.CONNECTIVITY_VALIDATION -> homeText("HTTP + DNS validation", "بررسی ${ltr("HTTP + DNS")}")
+    RoutePreparationStep.ROUTE_MATRIX -> homeText("Route matrix", "ساخت مسیرها")
+}
+
+@Composable
+private fun preparationLiveDetail(progress: RoutePreparationProgress): String = when (progress.step) {
+    RoutePreparationStep.PROFILE_SNAPSHOT -> homeText(
+        "Freezing the selected profile without changing its transport fields",
+        "تنظیمات کانفیگ انتخاب‌شده بدون تغییر برای تست ثبت می‌شن",
+    )
+    RoutePreparationStep.NETWORK_DETECTION -> homeText(
+        "Reading the active network, carrier and fingerprint",
+        "شبکه فعال، اپراتور و اثرانگشت شبکه در حال شناساییه",
+    )
+    RoutePreparationStep.EDGE_POOL -> homeText(
+        "Collecting current, original, saved, DNS and official Cloudflare edges",
+        "${ltr("Edge")}های فعلی، اصلی، ذخیره‌شده، ${ltr("DNS")} و محدوده‌های رسمی ${ltr("Cloudflare")} جمع‌آوری می‌شن",
+    )
+    RoutePreparationStep.TCP_TLS_PREFLIGHT -> homeText(
+        "Testing TCP/TLS on ${progress.currentTarget.ifBlank { "the next edge" }}",
+        "در حال بررسی ${ltr("TCP/TLS")} روی ${ltr(progress.currentTarget.ifBlank { "Edge بعدی" })}",
+    )
+    RoutePreparationStep.XRAY_SCREENING -> homeText(
+        "Screening ${progress.currentTarget.ifBlank { "edge routes" }} with isolated Xray starts",
+        "مسیر ${ltr(progress.currentTarget.ifBlank { "Edge" })} با اجرای مستقل ${ltr("Xray")} غربال می‌شه",
+    )
+    RoutePreparationStep.CONNECTIVITY_VALIDATION -> homeText(
+        "Checking HTTP and DNS on ${progress.currentTarget.ifBlank { "healthy edges" }}",
+        "${ltr("HTTP و DNS")} روی ${ltr(progress.currentTarget.ifBlank { "Edgeهای سالم" })} بررسی می‌شن",
+    )
+    RoutePreparationStep.ROUTE_MATRIX -> homeText(
+        "Building Edge × DNS × tuning × MTU candidates",
+        "ترکیب‌های ${ltr("Edge × DNS × Tuning × MTU")} در حال ساخته‌شدنه",
+    )
+}
+
+@Composable
+private fun RoutePreparationLivePanel(
+    progress: RoutePreparationProgress,
+    modifier: Modifier = Modifier,
+) {
+    var elapsedSeconds by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000L)
+            elapsedSeconds++
+        }
+    }
+    val overall = progress.overallProgress()
+    val elapsed = String.format(Locale.US, "%02d:%02d", elapsedSeconds / 60L, elapsedSeconds % 60L)
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Surface(
+            color = Color(0xD90A1926),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+                .border(1.dp, RouteAccent.copy(alpha = 0.24f), RoundedCornerShape(16.dp)),
+        ) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 13.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            homeText(
+                                "Step ${progress.step.number} of ${RoutePreparationStep.TOTAL}",
+                                "مرحله ${progress.step.number} از ${RoutePreparationStep.TOTAL}",
+                            ),
+                            color = RouteAccent,
+                            fontSize = routeFontSize(9f, 10.5f),
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            progress.step.localizedTitle(),
+                            color = Color.White,
+                            fontSize = routeFontSize(14f, 16f),
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    Surface(color = RouteGreen.copy(alpha = 0.11f), shape = RoundedCornerShape(9.dp)) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(Modifier.size(7.dp).background(RouteGreen, CircleShape))
+                            Spacer(Modifier.width(5.dp))
+                            Text(homeText("LIVE", "زنده"), color = RouteGreen, fontSize = routeFontSize(8f, 9f), fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.width(7.dp))
+                            Text(ltr(elapsed), color = Color(0xFFBED0DD), fontSize = routeFontSize(8f, 9f))
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RoutePreparationStep.entries.forEachIndexed { index, item ->
+                        if (index > 0) {
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .height(1.dp)
+                                    .background(if (item.number <= progress.step.number) RouteAccent.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.09f)),
+                            )
+                        }
+                        val completedStep = item.number < progress.step.number
+                        val activeStep = item == progress.step
+                        Box(
+                            modifier = Modifier
+                                .size(if (activeStep) 25.dp else 22.dp)
+                                .background(
+                                    when {
+                                        completedStep -> RouteGreen.copy(alpha = 0.16f)
+                                        activeStep -> RouteAccent.copy(alpha = 0.18f)
+                                        else -> Color.White.copy(alpha = 0.035f)
+                                    },
+                                    CircleShape,
+                                )
+                                .border(
+                                    1.dp,
+                                    when {
+                                        completedStep -> RouteGreen
+                                        activeStep -> RouteAccent
+                                        else -> Color.White.copy(alpha = 0.13f)
+                                    },
+                                    CircleShape,
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                item.number.toString(),
+                                color = when {
+                                    completedStep -> RouteGreen
+                                    activeStep -> RouteAccent
+                                    else -> UacColors.TextSecondary
+                                },
+                                fontSize = routeFontSize(8f, 8.8f),
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(13.dp))
+                Text(
+                    preparationLiveDetail(progress),
+                    color = Color(0xFFD7E5ED),
+                    fontSize = routeFontSize(10.5f, 12.5f),
+                    lineHeight = routeFontSize(14f, 17f),
+                    maxLines = 3,
+                    overflow = TextOverflow.Clip,
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (progress.total > 0) {
+                            homeText(
+                                "${progress.completed} of ${progress.total} checked",
+                                "${progress.completed} از ${progress.total} بررسی شده",
+                            )
+                        } else {
+                            homeText("Preparing candidates…", "در حال آماده‌سازی گزینه‌ها…")
+                        },
+                        color = UacColors.TextSecondary,
+                        fontSize = routeFontSize(9f, 10.5f),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    if (progress.healthy > 0) {
+                        Text(
+                            homeText("${progress.healthy} healthy", "${progress.healthy} سالم"),
+                            color = RouteGreen,
+                            fontSize = routeFontSize(9f, 10.5f),
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(5.dp))
+                LinearProgressIndicator(
+                    progress = { overall },
+                    color = RouteAccent,
+                    trackColor = Color.White.copy(alpha = 0.07f),
+                    modifier = Modifier.fillMaxWidth().height(4.dp),
+                )
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    homeText(
+                        "Progress is updated after every real network result",
+                        "پیشرفت بعد از دریافت هر نتیجه واقعی شبکه به‌روز می‌شه",
+                    ),
+                    color = UacColors.TextSecondary.copy(alpha = 0.78f),
+                    fontSize = routeFontSize(8f, 9.5f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun CompactRouteTestSummary(
     profileName: String,
     networkLabel: String,
     savedChampionLabel: String?,
+    preparation: RoutePreparationProgress,
     stage: RouteTournamentStage,
     completed: Int,
     total: Int,
@@ -544,6 +918,7 @@ private fun CompactRouteTestSummary(
     testing: Boolean,
     paused: Boolean,
     loading: Boolean,
+    canStart: Boolean,
     canAdvance: Boolean,
     advanceReadyCount: Int,
     onToggleTest: () -> Unit,
@@ -552,11 +927,19 @@ private fun CompactRouteTestSummary(
     onSavedRouteClick: () -> Unit,
     onStageClick: () -> Unit,
 ) {
-    val statusColor = if (paused) RouteAmber else RouteGreen
+    val displayCompleted = if (loading) preparation.completed else completed
+    val displayTotal = if (loading) preparation.total else total
+    val displayProgress = if (loading) preparation.overallProgress() else progress
+    val statusColor = when {
+        loading || total <= 0 -> RouteAccent
+        paused -> RouteAmber
+        else -> RouteGreen
+    }
     val statusText = when {
         loading -> homeText("Loading", "در حال بارگذاری")
         testing -> homeText("Testing", "در حال تست")
         paused -> homeText("Paused", "متوقف‌شده")
+        total <= 0 -> homeText("Ready", "آماده")
         else -> homeText("Healthy", "سالم")
     }
     Surface(
@@ -601,7 +984,12 @@ private fun CompactRouteTestSummary(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Outlined.CheckCircle, null, tint = statusColor, modifier = Modifier.size(12.dp))
+                        Icon(
+                            if (loading || total <= 0) Icons.Outlined.PlayArrow else Icons.Outlined.CheckCircle,
+                            null,
+                            tint = statusColor,
+                            modifier = Modifier.size(12.dp),
+                        )
                         Spacer(Modifier.width(4.dp))
                         Text(
                             statusText,
@@ -616,7 +1004,14 @@ private fun CompactRouteTestSummary(
             Spacer(Modifier.height(5.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    homeText("$completed / $total samples", "$completed از $total تست"),
+                    if (loading) {
+                        homeText(
+                            "Step ${preparation.step.number} of ${RoutePreparationStep.TOTAL}",
+                            "مرحله ${preparation.step.number} از ${RoutePreparationStep.TOTAL}",
+                        )
+                    } else {
+                        homeText("$displayCompleted / $displayTotal samples", "$displayCompleted از $displayTotal تست")
+                    },
                     color = Color(0xFFBED0DD),
                     fontSize = routeFontSize(8.8f, 9.8f),
                     fontWeight = FontWeight.Medium,
@@ -626,7 +1021,7 @@ private fun CompactRouteTestSummary(
                 )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    if (LocalHomePersian.current) ltr("${(progress * 100).toInt()}%") else "${(progress * 100).toInt()}%",
+                    if (LocalHomePersian.current) ltr("${(displayProgress * 100).toInt()}%") else "${(displayProgress * 100).toInt()}%",
                     color = RouteAccent,
                     fontSize = routeFontSize(8.8f, 9.8f),
                     fontWeight = FontWeight.SemiBold,
@@ -634,8 +1029,8 @@ private fun CompactRouteTestSummary(
             }
             Spacer(Modifier.height(2.dp))
             LinearProgressIndicator(
-                progress = { progress.coerceIn(0f, 1f) },
-                color = if (testing) RouteAccent else RouteGreen,
+                progress = { displayProgress.coerceIn(0f, 1f) },
+                color = if (testing || loading) RouteAccent else RouteGreen,
                 trackColor = Color.White.copy(alpha = 0.07f),
                 modifier = Modifier.fillMaxWidth().height(2.dp),
             )
@@ -648,7 +1043,11 @@ private fun CompactRouteTestSummary(
             ) {
                 MiniSummaryAction(
                     icon = Icons.Outlined.Shield,
-                    text = localizedStageTitle(stage),
+                    text = when {
+                        loading -> preparation.step.localizedTitle()
+                        total <= 0 -> homeText("Manual start", "شروع دستی")
+                        else -> localizedStageTitle(stage)
+                    },
                     color = RouteGreen,
                     onClick = onStageClick,
                     modifier = Modifier.weight(0.9f),
@@ -656,7 +1055,11 @@ private fun CompactRouteTestSummary(
                 MiniSummaryDivider()
                 MiniSummaryAction(
                     icon = Icons.Outlined.Folder,
-                    text = homeText("Saved profile", "پروفایل ذخیره‌شده"),
+                    text = if (savedChampionLabel != null) {
+                        homeText("Route saved", "مسیر ذخیره شد")
+                    } else {
+                        homeText("Saved profile", "پروفایل ذخیره‌شده")
+                    },
                     color = if (savedChampionLabel != null) RouteGreen else RouteAccent,
                     onClick = onSavedRouteClick,
                     modifier = Modifier.weight(1f),
@@ -664,7 +1067,7 @@ private fun CompactRouteTestSummary(
                 MiniSummaryDivider()
                 Button(
                     onClick = onToggleTest,
-                    enabled = total > 0 && !loading,
+                    enabled = canStart && !loading,
                     modifier = Modifier.weight(1.05f).height(34.dp),
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -1367,20 +1770,25 @@ private data class StageExplanation(val purpose: String, val tests: String, val 
 @Composable
 private fun stageExplanation(stage: RouteTournamentStage): StageExplanation = when (stage) {
     RouteTournamentStage.QUALIFIER -> StageExplanation(
-        homeText("Give every route genome one fair cold-start opportunity.", "به هر ترکیب مسیر، یک فرصت برابر برای اتصال از صفر داده می‌شه."),
+        homeText("Quickly eliminate unreachable Edge and Fragment paths without changing the isolated final tests.", "مسیرهای Edge و Fragment که در دسترس نیستن، سریع کنار گذاشته می‌شن؛ تست‌های نهایی همچنان مستقل انجام می‌شن."),
         homeText(
-            "Fresh Xray startup, HTTP targets, DNS resolution, payload transfer, latency and throughput.",
-            "اجرای تازه ${ltr("Xray")}، مقصدهای ${ltr("HTTP")}، پاسخ ${ltr("DNS")}، انتقال داده، تأخیر و سرعت بررسی می‌شن.",
+            "Equivalent routes share a batched Xray HTTP preflight. Failures are retried once; DNS and speed are not finalized here.",
+            "مسیرهای هم‌ارز، پیش‌آزمایش ${ltr("HTTP")} رو با یک اجرای گروهی ${ltr("Xray")} انجام می‌دن. خطاها یک بار دوباره بررسی می‌شن و نتیجه ${ltr("DNS")} یا سرعت در این مرحله نهایی نیست.",
         ),
         homeText(
-            "The best 96 healthy and diverse Edge / DNS / Fragment / MTU combinations move to Verification.",
-            "بهترین ۹۶ ترکیب سالم و متنوع ${ltr("Edge / DNS / Fragment / MTU")} به مرحله بررسی دوباره می‌رن.",
+            "Up to 250 Edge, DNS and tuning families move to isolated HTTP, DNS, upload and download verification.",
+            "تا ۲۵۰ خانواده سالم ${ltr("Edge / DNS / Tuning")} وارد بررسی مستقل ${ltr("HTTP")}، ${ltr("DNS")}، آپلود و دانلود می‌شن.",
         ),
     )
     RouteTournamentStage.VERIFICATION -> StageExplanation(
-        homeText("Remove routes that passed once only by luck or temporary network conditions.", "مسیرهایی که فقط یک بار و به‌خاطر شرایط موقت شبکه سالم بودن حذف می‌شن."),
-        homeText("A second fresh connectivity pass with HTTP, DNS, payload and timing measurements.", "یک اتصال تازه دیگه با سنجش ${ltr("HTTP")}، ${ltr("DNS")}، انتقال داده و زمان‌بندی انجام می‌شه."),
-        homeText("Up to 24 high-scoring routes are selected while preserving route diversity.", "تا ۲۴ مسیر با امتیاز بالا و ترکیب‌های متنوع انتخاب می‌شن."),
+        homeText("Compare every resolver independently without repeating MTUs that cannot affect proxy traffic.", "هر ${ltr("Resolver")} مستقل بررسی می‌شه، بدون تکرار ${ltr("MTU")}هایی که روی ترافیک Proxy اثری ندارن."),
+        homeText("A fresh isolated Xray route checks HTTP, DNS, real upload and download, latency and jitter.", "یک مسیر تازه و مستقل ${ltr("Xray")}، ${ltr("HTTP")}، ${ltr("DNS")}، آپلود و دانلود واقعی، تأخیر و نوسان رو می‌سنجه."),
+        homeText("The best 24 diverse route families are expanded into four real native MTUs.", "۲۴ خانواده برتر و متنوع، برای چهار ${ltr("MTU")} واقعی باز می‌شن."),
+    )
+    RouteTournamentStage.MTU_VALIDATION -> StageExplanation(
+        homeText("Measure MTU on the real Android TUN path instead of pretending proxy-only MTUs are different.", "${ltr("MTU")} روی مسیر واقعی ${ltr("TUN")} اندروید سنجیده می‌شه؛ نه روی مسیر Proxy که ${ltr("MTU")} در اون اثری نداره."),
+        homeText("An app-only native VPN checks HTTP, DNS, upload, download and actual Xray TX/RX growth for every MTU.", "یک ${ltr("VPN")} آزمایشی فقط برای خود برنامه، ${ltr("HTTP")}، ${ltr("DNS")}، آپلود، دانلود و رشد واقعی ${ltr("TX/RX")} در ${ltr("Xray")} رو بررسی می‌کنه."),
+        homeText("Only routes with bidirectional native traffic can enter stability testing.", "فقط مسیرهایی که ترافیک واقعی دوطرفه دارن وارد مرحله پایداری می‌شن."),
     )
     RouteTournamentStage.STABILITY -> StageExplanation(
         homeText("Measure repeatability, jitter and reliability over multiple samples.", "تکرارپذیری، نوسان تأخیر و قابل‌اعتماد بودن مسیر در چند تست سنجیده می‌شه."),
@@ -1398,7 +1806,7 @@ private fun stageExplanation(stage: RouteTournamentStage): StageExplanation = wh
         homeText("Winner is ranked by reliability, HTTP/DNS success, throughput, P95 latency, jitter and confidence.", "برنده با توجه به پایداری، موفقیت ${ltr("HTTP/DNS")}، سرعت، تأخیر ${ltr("P95")}، نوسان و میزان اطمینان رتبه‌بندی می‌شه."),
     )
     RouteTournamentStage.COMPLETE -> StageExplanation(
-        homeText("Present the final ranking and let you save the selected route profile.", "رتبه‌بندی نهایی نمایش داده می‌شه و می‌تونی پروفایل مسیر انتخابی رو ذخیره کنی."),
+        homeText("Present the final ranking and automatically save Champion and Backup for this profile and network.", "رتبه‌بندی نهایی نمایش داده می‌شه و برنده و پشتیبان برای همین کانفیگ و شبکه خودکار ذخیره می‌شن."),
         homeText("No background probe is running; all displayed measurements come from completed stages.", "دیگه تستی در پس‌زمینه اجرا نمی‌شه و همه عددها نتیجه مرحله‌های کامل‌شده هستن."),
         homeText("Use a healthy result to bind its Champion and Backup to this configuration and network fingerprint.", "یک نتیجه سالم رو انتخاب کن تا برنده و پشتیبان برای همین کانفیگ و اثرانگشت شبکه ذخیره بشن."),
     )
@@ -1662,6 +2070,13 @@ private fun ExpandedRoutePanel(
                 ExpandedMetric(homeText("Samples", "تست‌ها"), "${row.successfulSamples}/${row.sampleCount}", RouteGreen, Modifier.weight(1f))
                 ExpandedMetric(homeText("Jitter", "نوسان"), row.jitterMs?.let { "$it ms" } ?: "—", RouteGreen, Modifier.weight(1f))
             }
+            Spacer(Modifier.height(3.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                ExpandedMetric(homeText("Upload", "آپلود"), formatThroughput(row.uploadKbps), RouteGreen, Modifier.weight(1f))
+                ExpandedMetric(homeText("Download", "دانلود"), formatThroughput(row.downloadKbps), Color(0xFF4A91FF), Modifier.weight(1f))
+                ExpandedMetric("TX/RX", "${row.txDelta}/${row.rxDelta}", RouteGreen, Modifier.weight(1f))
+                ExpandedMetric("MTU", if (row.mtuValidated) "${row.mtu} ✓" else row.mtu.toString(), if (row.mtuValidated) RouteGreen else RouteAmber, Modifier.weight(1f))
+            }
             ExpandedDivider()
             ExpandedSectionHeader(Icons.Outlined.Shield, homeText("Health Summary", "خلاصه سلامت"))
             Spacer(Modifier.height(1.dp))
@@ -1810,6 +2225,12 @@ private fun routeDiagnostics(row: RouteSpeedRow): List<Pair<String, String>> {
         "p95" to (row.p95LatencyMs?.let { "${it}ms" } ?: "—"),
         "dnsLatency" to (row.dnsLatencyMs?.let { "${it}ms" } ?: "—"),
         "jitter" to (row.jitterMs?.let { "${it}ms" } ?: "—"),
+        "upload" to formatThroughput(row.uploadKbps),
+        "download" to formatThroughput(row.downloadKbps),
+        "txDelta" to row.txDelta.toString(),
+        "rxDelta" to row.rxDelta.toString(),
+        "transfer" to "${row.transferSuccessCount}/${row.sampleCount}",
+        "mtuValidated" to row.mtuValidated.toString(),
         "resolver" to friendlyResolver(row.resolverKey),
         "mtu" to row.mtu.toString(),
     )
@@ -1904,6 +2325,65 @@ private fun RowScope.DetailPill(label: String, value: String, success: Boolean) 
 }
 
 @Composable
+private fun RouteTestReadyState(
+    profileName: String,
+    onStart: () -> Unit,
+) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Surface(
+            color = Color(0x99101C29),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, RouteAccent.copy(alpha = 0.2f), RoundedCornerShape(16.dp)),
+        ) {
+            Column(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    Modifier
+                        .size(46.dp)
+                        .background(RouteAccent.copy(alpha = 0.1f), CircleShape)
+                        .border(1.dp, RouteAccent.copy(alpha = 0.35f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.Hub, null, tint = RouteAccent, modifier = Modifier.size(24.dp))
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    homeText("Ready when you are", "هر وقت آماده‌ای شروع کن"),
+                    color = Color.White,
+                    fontSize = routeFontSize(14f, 16f),
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    homeText(
+                        "$profileName is selected. Nothing starts until you tap the button.",
+                        "کانفیگ ${ltr(profileName)} انتخاب شده و تا وقتی دکمه رو نزنی، هیچ تستی شروع نمی‌شه.",
+                    ),
+                    color = UacColors.TextSecondary,
+                    fontSize = routeFontSize(10f, 12f),
+                    lineHeight = routeFontSize(14f, 17f),
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = onStart,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF238EE9)),
+                    shape = RoundedCornerShape(11.dp),
+                ) {
+                    Icon(Icons.Outlined.PlayArrow, null, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(homeText("START ROUTE TEST", "شروع تست مسیر"), fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun EmptyRouteState(onRefresh: () -> Unit) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1957,13 +2437,18 @@ private fun sortRouteRows(rows: List<RouteSpeedRow>, option: RouteSortOption): L
         RouteSortOption.OVERALL -> compareByDescending<RouteSpeedRow> { it.tournamentScore }
             .thenByDescending { it.confidence }
     }
-    return rows.sortedWith(compareBy<RouteSpeedRow>(::statusBucket).then(metricComparator))
+    return rows.sortedWith(
+        compareBy<RouteSpeedRow>(::statusBucket)
+            .then(metricComparator)
+            .thenBy { it.candidateId },
+    )
 }
 
 @Composable
 private fun stageCompactDescription(stage: RouteTournamentStage, total: Int): String = when (stage) {
-    RouteTournamentStage.QUALIFIER -> homeText("$total routes • cold connectivity test", "$total مسیر • تست اتصال تازه")
-    RouteTournamentStage.VERIFICATION -> homeText("Best 96 • connectivity recheck", "۹۶ مسیر برتر • بررسی دوباره اتصال")
+    RouteTournamentStage.QUALIFIER -> homeText("$total routes • batched HTTP preflight", "$total مسیر • پیش‌آزمایش گروهی ${ltr("HTTP")}")
+    RouteTournamentStage.VERIFICATION -> homeText("Up to 250 resolver families • isolated transfer", "تا ۲۵۰ خانواده ${ltr("Resolver")} • تست مستقل انتقال")
+    RouteTournamentStage.MTU_VALIDATION -> homeText("96 native routes • real MTU and TX/RX", "۹۶ مسیر واقعی • سنجش ${ltr("MTU و TX/RX")}")
     RouteTournamentStage.STABILITY -> homeText("24 routes • repeated stability", "۲۴ مسیر • تست تکراری پایداری")
     RouteTournamentStage.STRESS -> homeText("6 finalists • repeated tests", "۶ مسیر نهایی • تست‌های تکراری")
     RouteTournamentStage.CHAMPIONSHIP -> homeText("2 finalists • A-B-B-A comparison", "۲ مسیر نهایی • مقایسه ${ltr("A-B-B-A")}")

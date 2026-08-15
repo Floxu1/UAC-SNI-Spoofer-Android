@@ -1,5 +1,6 @@
 package com.uacspoofer.mobile.vpn
 
+import android.net.Network
 import com.uacspoofer.mobile.mci.MciConfig
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import java.net.InetSocketAddress
@@ -41,6 +42,7 @@ class VpnConnectivityProbe(
         requireTrafficGrowth = false,
         totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
+        network = null,
     )
 
     
@@ -55,6 +57,7 @@ class VpnConnectivityProbe(
         requireTrafficGrowth = false,
         totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
+        network = null,
     )
 
     suspend fun verifyCandidate(
@@ -69,6 +72,18 @@ class VpnConnectivityProbe(
         requireTrafficGrowth = false,
         totalTimeoutMs = totalTimeoutMs.coerceAtLeast(500L),
         readBytesPerTarget = readBytesPerTarget.coerceAtLeast(MciConfig.PROBE_MIN_BYTES_PER_TARGET),
+        network = null,
+    )
+
+    suspend fun verifyScreening(settings: AdvancedSettingsData): ProbeResult = verifyTargets(
+        requireAllTargets = false,
+        attemptAllTargets = false,
+        socksAddress = settings.socksAddress,
+        socksPort = settings.socksPort,
+        requireTrafficGrowth = false,
+        totalTimeoutMs = SCREENING_TOTAL_TIMEOUT_MS,
+        readBytesPerTarget = SCREENING_READ_BYTES_PER_TARGET,
+        network = null,
     )
 
     suspend fun verifyConfirmation(settings: AdvancedSettingsData): ProbeResult = verifyTargets(
@@ -79,9 +94,10 @@ class VpnConnectivityProbe(
         requireTrafficGrowth = false,
         totalTimeoutMs = CONFIRMATION_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = CONFIRMATION_READ_BYTES_PER_TARGET,
+        network = null,
     )
 
-    suspend fun verifyTunCandidate(): ProbeResult = verifyTargets(
+    suspend fun verifyTunCandidate(network: Network? = null): ProbeResult = verifyTargets(
         requireAllTargets = false,
         attemptAllTargets = false,
         socksAddress = null,
@@ -89,9 +105,10 @@ class VpnConnectivityProbe(
         requireTrafficGrowth = true,
         totalTimeoutMs = TUN_CANDIDATE_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = CONFIRMATION_READ_BYTES_PER_TARGET,
+        network = network,
     )
 
-    suspend fun verifyTunRuntime(): ProbeResult = verifyTargets(
+    suspend fun verifyTunRuntime(network: Network? = null): ProbeResult = verifyTargets(
         requireAllTargets = false,
         attemptAllTargets = false,
         socksAddress = null,
@@ -99,6 +116,7 @@ class VpnConnectivityProbe(
         requireTrafficGrowth = true,
         totalTimeoutMs = TUN_RUNTIME_TOTAL_TIMEOUT_MS,
         readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
+        network = network,
     )
 
     private suspend fun verifyTargets(
@@ -109,6 +127,7 @@ class VpnConnectivityProbe(
         requireTrafficGrowth: Boolean,
         totalTimeoutMs: Long,
         readBytesPerTarget: Int,
+        network: Network?,
     ): ProbeResult =
         withTimeoutOrNull(totalTimeoutMs) {
             val startedNs = System.nanoTime()
@@ -121,7 +140,15 @@ class VpnConnectivityProbe(
                 coroutineScope {
                     MciConfig.PROBE_TARGETS.map { target ->
                         async {
-                            probeTarget(target.name, target.url, nonce, socksAddress, socksPort, readBytesPerTarget)
+                            probeTarget(
+                                target.name,
+                                target.url,
+                                nonce,
+                                socksAddress,
+                                socksPort,
+                                readBytesPerTarget,
+                                network,
+                            )
                         }
                     }.awaitAll()
                 }
@@ -135,6 +162,7 @@ class VpnConnectivityProbe(
                         socksAddress,
                         socksPort,
                         readBytesPerTarget,
+                        network,
                     )
                     sequential += outcome
                     if (outcome.bytes >= MciConfig.PROBE_MIN_BYTES_PER_TARGET) break
@@ -151,7 +179,7 @@ class VpnConnectivityProbe(
             }
             val total = outcomes.sumOf(TargetOutcome::bytes)
 
-            delay(200L)
+            if (requireTrafficGrowth) delay(200L)
             val after = statsProvider()
             val crossedTun = after.hasBidirectionalGrowthSince(before)
             val txDelta = (after.txBytes - before.txBytes).coerceAtLeast(0L)
@@ -204,6 +232,7 @@ class VpnConnectivityProbe(
         socksAddress: String?,
         socksPort: Int,
         readBytes: Int,
+        network: Network?,
     ): TargetOutcome {
         val startedNs = System.nanoTime()
         return try {
@@ -213,6 +242,7 @@ class VpnConnectivityProbe(
                     socksAddress = socksAddress,
                     socksPort = socksPort,
                     readBytes = readBytes,
+                    network = network,
                 )
             }
             TargetOutcome(
@@ -238,15 +268,17 @@ class VpnConnectivityProbe(
         socksAddress: String?,
         socksPort: Int,
         readBytes: Int,
+        network: Network?,
     ): Int {
+        val target = URL(url)
         val connection = if (socksAddress == null) {
-            URL(url).openConnection() as HttpsURLConnection
+            (network?.openConnection(target) ?: target.openConnection()) as HttpsURLConnection
         } else {
             val socks = Proxy(
                 Proxy.Type.SOCKS,
                 InetSocketAddress.createUnresolved(socksAddress, socksPort),
             )
-            URL(url).openConnection(socks) as HttpsURLConnection
+            target.openConnection(socks) as HttpsURLConnection
         }
         try {
             connection.connectTimeout = 4_000
@@ -282,6 +314,8 @@ class VpnConnectivityProbe(
     companion object {
         private const val CANDIDATE_TOTAL_TIMEOUT_MS = 8_000L
         private const val CANDIDATE_READ_BYTES_PER_TARGET = 16_384
+        private const val SCREENING_TOTAL_TIMEOUT_MS = 3_500L
+        private const val SCREENING_READ_BYTES_PER_TARGET = 1_024
         private const val CONFIRMATION_TOTAL_TIMEOUT_MS = 9_000L
         private const val CONFIRMATION_READ_BYTES_PER_TARGET = 1_024
         private const val TUN_CANDIDATE_TOTAL_TIMEOUT_MS = 7_000L

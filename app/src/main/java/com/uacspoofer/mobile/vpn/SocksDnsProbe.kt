@@ -1,5 +1,6 @@
 package com.uacspoofer.mobile.vpn
 
+import android.net.Network
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -34,6 +35,37 @@ class SocksDnsProbe {
             try {
                 val response = runInterruptible(Dispatchers.IO) {
                     query(settings, socketTimeoutMs.coerceAtLeast(250))
+                }
+                response.copy(
+                    latencyMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                DnsProbeResult(
+                    success = false,
+                    server = settings.nativeDns,
+                    latencyMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L),
+                    detail = "${error.javaClass.simpleName}: ${error.message.orEmpty()}",
+                )
+            }
+        } ?: DnsProbeResult(
+            success = false,
+            server = settings.nativeDns,
+            detail = "DNS probe timed out after $totalTimeoutMs ms",
+        )
+
+    suspend fun verifyOnNetwork(
+        settings: AdvancedSettingsData,
+        network: Network,
+        totalTimeoutMs: Long = TOTAL_TIMEOUT_MS,
+        socketTimeoutMs: Int = SOCKET_TIMEOUT_MS,
+    ): DnsProbeResult =
+        withTimeoutOrNull(totalTimeoutMs.coerceAtLeast(500L)) {
+            val started = System.nanoTime()
+            try {
+                val response = runInterruptible(Dispatchers.IO) {
+                    queryOnNetwork(settings, network, socketTimeoutMs.coerceAtLeast(250))
                 }
                 response.copy(
                     latencyMs = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(1L),
@@ -101,6 +133,59 @@ class SocksDnsProbe {
                     "server=${settings.nativeDns} response=$response rcode=$rcode answers=$answers",
             )
         }
+    }
+
+    private fun queryOnNetwork(
+        settings: AdvancedSettingsData,
+        network: Network,
+        socketTimeoutMs: Int,
+    ): DnsProbeResult {
+        val dnsAddress = InetAddress.getByName(settings.nativeDns)
+        val transactionId = SecureRandom().nextInt(65_536)
+        val query = buildDnsQuery(transactionId)
+        network.socketFactory.createSocket().use { socket ->
+            socket.connect(InetSocketAddress(dnsAddress, 53), socketTimeoutMs)
+            socket.soTimeout = socketTimeoutMs
+            val input = DataInputStream(socket.getInputStream())
+            val output = DataOutputStream(socket.getOutputStream())
+            output.writeShort(query.size)
+            output.write(query)
+            output.flush()
+            val responseLength = input.readUnsignedShort()
+            check(responseLength in 12..4_096) { "invalid DNS TCP response length=$responseLength" }
+            val responseBytes = ByteArray(responseLength).also(input::readFully)
+            return parseResponse(
+                settings = settings,
+                transactionId = transactionId,
+                responseBytes = responseBytes,
+                transport = "tcp-vpn-network",
+            )
+        }
+    }
+
+    private fun parseResponse(
+        settings: AdvancedSettingsData,
+        transactionId: Int,
+        responseBytes: ByteArray,
+        transport: String,
+    ): DnsProbeResult {
+        val dns = ByteBuffer.wrap(responseBytes).order(ByteOrder.BIG_ENDIAN)
+        val responseId = dns.short.toInt() and 0xffff
+        val flags = dns.short.toInt() and 0xffff
+        dns.short
+        val answers = dns.short.toInt() and 0xffff
+        check(responseId == transactionId) { "DNS transaction mismatch" }
+        val rcode = flags and 0x0f
+        val response = flags and 0x8000 != 0
+        val success = response && rcode == 0 && answers > 0
+        return DnsProbeResult(
+            success = success,
+            server = settings.nativeDns,
+            answerCount = answers,
+            rcode = rcode,
+            detail = "transport=$transport resolver=${AdaptiveDnsResolvers.idFor(settings.dnsResolverUrl)} " +
+                "server=${settings.nativeDns} response=$response rcode=$rcode answers=$answers",
+        )
     }
 
     private fun buildDnsQuery(transactionId: Int): ByteArray {

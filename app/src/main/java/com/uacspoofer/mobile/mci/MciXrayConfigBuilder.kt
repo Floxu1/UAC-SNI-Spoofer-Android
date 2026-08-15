@@ -11,11 +11,20 @@ data class MciXrayRuntimeOptions(
     val finalmaskEnabled: Boolean = true,
     val preserveEmptyAlpn: Boolean = false,
     val preserveTransportFields: Boolean = false,
+    val quietLogging: Boolean = false,
+    val muxEnabledOverride: Boolean? = null,
 ) {
     companion object {
         val DEFAULT = MciXrayRuntimeOptions()
     }
 }
+
+data class MciXrayBatchRoute(
+    val tag: String,
+    val edge: MciEdge,
+    val settings: AdvancedSettingsData,
+    val runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
+)
 
 internal object MciXrayConfigBuilder {
     fun build(
@@ -29,25 +38,19 @@ internal object MciXrayConfigBuilder {
         val identity = runtimeOptions.identityOverride ?: profile.runtimeIdentity(s)
         validateIdentity(identity, runtimeOptions)
 
-        fun outbound(tag: String, address: String, port: Int, maxSplit: Int, muxEnabled: Boolean): String {
-            val protocolSettings = when (identity.protocol) {
-                ProxyProtocol.TROJAN ->
-                    """{"servers":[{"address":"${q(address)}","port":$port,"password":"${q(identity.credential)}"}]}"""
-                ProxyProtocol.VLESS -> {
-                    val flow = identity.flow.takeIf { it.isNotBlank() }
-                        ?.let { ",\"flow\":\"${q(it)}\"" }.orEmpty()
-                    """{"vnext":[{"address":"${q(address)}","port":$port,"users":[{"id":"${q(identity.credential)}","encryption":"${q(identity.encryption)}"$flow}]}]}"""
-                }
-                ProxyProtocol.VMESS ->
-                    """{"vnext":[{"address":"${q(address)}","port":$port,"users":[{"id":"${q(identity.credential)}","alterId":${identity.alterId},"security":"${q(identity.encryption.ifBlank { "auto" })}"}]}]}"""
-            }
-            val stream = streamSettings(identity, s, maxSplit, nativeTun, runtimeOptions)
-            return """{"tag":"${q(tag)}","protocol":"${identity.protocol.wireName}","settings":$protocolSettings,"streamSettings":$stream,"mux":{"enabled":$muxEnabled,"concurrency":${s.muxConcurrency}}}"""
-        }
-
         val outbounds = buildList {
-            add(outbound("proxy", edge.address, edge.port, edge.finalmaskMaxSplit, s.muxEnabled))
-            add(outbound("probe-proxy", edge.address, edge.port, edge.finalmaskMaxSplit, false))
+            add(
+                proxyOutbound(
+                    "proxy",
+                    identity,
+                    edge,
+                    s,
+                    nativeTun,
+                    runtimeOptions,
+                    runtimeOptions.muxEnabledOverride ?: s.muxEnabled,
+                ),
+            )
+            add(proxyOutbound("probe-proxy", identity, edge, s, nativeTun, runtimeOptions, false))
             add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp","rules":[{"action":"hijack"}]}}""")
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
         }.joinToString(",\n")
@@ -94,9 +97,11 @@ internal object MciXrayConfigBuilder {
         }
         val dns = """"dns":{"hosts":{$resolverHosts},"servers":[$resolverServers],"queryStrategy":"UseIPv4","disableCache":false,"serveStale":true,"serveExpiredTTL":3600,"enableParallelQuery":false,"tag":"dns-query"},"""
 
+        val logLevel = if (runtimeOptions.quietLogging) "warning" else "debug"
+        val dnsLog = !runtimeOptions.quietLogging
         return """
             {
-              "log":{"loglevel":"debug","dnsLog":true,"maskAddress":"quarter"},
+              "log":{"loglevel":"$logLevel","dnsLog":$dnsLog,"maskAddress":"quarter"},
               $rootExtras
               $dns
               "inbounds":[$inbounds],
@@ -104,6 +109,99 @@ internal object MciXrayConfigBuilder {
               "routing":{"domainStrategy":"${q(s.routingDomainStrategy)}","rules":[$routingRules]}
             }
         """.trimIndent()
+    }
+
+    fun buildBatch(
+        routes: List<MciXrayBatchRoute>,
+        profile: ProxyProfile,
+    ): String {
+        require(routes.isNotEmpty()) { "Batch route list is empty" }
+        require(routes.size <= 32) { "Batch route count exceeds 32" }
+        val normalized = routes.map { route -> route.copy(settings = route.settings.validated()) }
+        require(normalized.map { it.settings.socksPort }.distinct().size == normalized.size) {
+            "Batch SOCKS ports must be unique"
+        }
+        require(normalized.map { it.tag }.distinct().size == normalized.size) {
+            "Batch route tags must be unique"
+        }
+        require(normalized.map { it.settings.routingDomainStrategy }.distinct().size == 1) {
+            "Batch routes must use one routing domain strategy"
+        }
+
+        val sniffing = """"sniffing":{"enabled":true,"destOverride":["http","tls"],"metadataOnly":false}"""
+        val inbounds = normalized.joinToString(",\n") { route ->
+            val s = route.settings
+            """{"tag":"in-${q(route.tag)}","listen":"${q(s.socksAddress)}","port":${s.socksPort},"protocol":"socks","settings":{"auth":"noauth","udp":false,"ip":"${q(s.socksAddress)}","userLevel":8},$sniffing}"""
+        }
+        val outbounds = buildList {
+            normalized.forEach { route ->
+                val identity = route.runtimeOptions.identityOverride ?: profile.runtimeIdentity(route.settings)
+                validateIdentity(identity, route.runtimeOptions)
+                add(
+                    proxyOutbound(
+                        tag = "out-${route.tag}",
+                        identity = identity,
+                        edge = route.edge,
+                        settings = route.settings,
+                        nativeTun = false,
+                        runtimeOptions = route.runtimeOptions.copy(quietLogging = true),
+                        muxEnabled = route.runtimeOptions.muxEnabledOverride ?: false,
+                    ),
+                )
+            }
+            add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
+        }.joinToString(",\n")
+        val rules = buildList {
+            normalized.forEach { route ->
+                val inbound = "[\"in-${q(route.tag)}\"]"
+                if (route.settings.ipv4Only) {
+                    add("""{"type":"field","inboundTag":$inbound,"network":"tcp","ip":["::/0"],"outboundTag":"block"}""")
+                }
+                if (route.settings.blockUdp443) {
+                    add("""{"type":"field","inboundTag":$inbound,"network":"udp","port":"443","outboundTag":"block"}""")
+                }
+                add("""{"type":"field","inboundTag":$inbound,"network":"tcp,udp","outboundTag":"out-${q(route.tag)}"}""")
+            }
+        }.joinToString(",\n")
+        val routingStrategy = normalized.first().settings.routingDomainStrategy
+        return """
+            {
+              "log":{"loglevel":"warning","dnsLog":false,"maskAddress":"quarter"},
+              "inbounds":[$inbounds],
+              "outbounds":[$outbounds],
+              "routing":{"domainStrategy":"${q(routingStrategy)}","rules":[$rules]}
+            }
+        """.trimIndent()
+    }
+
+    private fun proxyOutbound(
+        tag: String,
+        identity: RuntimeProxyIdentity,
+        edge: MciEdge,
+        settings: AdvancedSettingsData,
+        nativeTun: Boolean,
+        runtimeOptions: MciXrayRuntimeOptions,
+        muxEnabled: Boolean,
+    ): String {
+        val protocolSettings = when (identity.protocol) {
+            ProxyProtocol.TROJAN ->
+                """{"servers":[{"address":"${q(edge.address)}","port":${edge.port},"password":"${q(identity.credential)}"}]}"""
+            ProxyProtocol.VLESS -> {
+                val flow = identity.flow.takeIf { it.isNotBlank() }
+                    ?.let { ",\"flow\":\"${q(it)}\"" }.orEmpty()
+                """{"vnext":[{"address":"${q(edge.address)}","port":${edge.port},"users":[{"id":"${q(identity.credential)}","encryption":"${q(identity.encryption)}"$flow}]}]}"""
+            }
+            ProxyProtocol.VMESS ->
+                """{"vnext":[{"address":"${q(edge.address)}","port":${edge.port},"users":[{"id":"${q(identity.credential)}","alterId":${identity.alterId},"security":"${q(identity.encryption.ifBlank { "auto" })}"}]}]}"""
+        }
+        val stream = streamSettings(
+            identity,
+            settings,
+            edge.finalmaskMaxSplit,
+            nativeTun,
+            runtimeOptions,
+        )
+        return """{"tag":"${q(tag)}","protocol":"${identity.protocol.wireName}","settings":$protocolSettings,"streamSettings":$stream,"mux":{"enabled":$muxEnabled,"concurrency":${settings.muxConcurrency}}}"""
     }
 
     private fun streamSettings(

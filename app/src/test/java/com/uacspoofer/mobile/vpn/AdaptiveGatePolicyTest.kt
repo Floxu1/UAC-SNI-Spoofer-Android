@@ -121,6 +121,21 @@ class AdaptiveGatePolicyTest {
     }
 
     @Test
+    fun exactStorageKeyUsesOnlyOfflineFingerprintIdentity() {
+        val offline = fingerprint(key = "offline-network", handle = 10L, asn = "unknown", carrier = "fixed")
+        val enriched = offline.copy(
+            networkAsn = "44244",
+            networkProvider = "Example Carrier",
+            carrier = "Example Carrier",
+            carrierClass = "irancell",
+        )
+        val differentOfflineNetwork = enriched.copy(key = "another-offline-network")
+
+        assertEquals(offline.exactStorageKey(), enriched.exactStorageKey())
+        assertFalse(enriched.exactStorageKey() == differentOfflineNetwork.exactStorageKey())
+    }
+
+    @Test
     fun resolverChainUsesOnlyPreferredAndOneControlledFallback() {
         val cloudflare = AdaptiveDnsResolvers.ordered(AdaptiveDnsResolvers.CLOUDFLARE.url)
         val google = AdaptiveDnsResolvers.ordered(AdaptiveDnsResolvers.GOOGLE.url)

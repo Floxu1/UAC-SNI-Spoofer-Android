@@ -65,6 +65,7 @@ class ConfigsSortTest {
     private fun profile(id: String): ProxyProfile = ProxyProfile.UAC_SNI_BUILT_IN.copy(
         id = id,
         name = id,
+        country = CountryMetadata.UNKNOWN,
         isBuiltIn = false,
     )
 }

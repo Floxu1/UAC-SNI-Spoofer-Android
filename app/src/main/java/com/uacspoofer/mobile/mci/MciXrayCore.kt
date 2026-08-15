@@ -40,7 +40,35 @@ class MciXrayCore(
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
     ): XrayStartupTiming = lifecycleMutex.withLock {
         stopLocked()
-        AppLogRepository.info(LogSource.XRAY, "Starting core for ${edge.role} route")
+        startLocked(
+            label = "${edge.role} route",
+            configName = "xray-mci-${settings.socksPort}.json",
+            configText = buildConfig(edge, settings, profile, runtimeOptions),
+            listeners = listOf(settings.socksAddress to settings.socksPort),
+        )
+    }
+
+    suspend fun startBatch(
+        routes: List<MciXrayBatchRoute>,
+        profile: ProxyProfile,
+    ): XrayStartupTiming = lifecycleMutex.withLock {
+        stopLocked()
+        require(routes.isNotEmpty()) { "Batch route list is empty" }
+        startLocked(
+            label = "route screening batch (${routes.size})",
+            configName = "xray-route-batch-${routes.first().settings.socksPort}-${routes.size}.json",
+            configText = MciXrayConfigBuilder.buildBatch(routes, profile),
+            listeners = routes.map { it.settings.socksAddress to it.settings.socksPort },
+        )
+    }
+
+    private suspend fun startLocked(
+        label: String,
+        configName: String,
+        configText: String,
+        listeners: List<Pair<String, Int>>,
+    ): XrayStartupTiming {
+        AppLogRepository.info(LogSource.XRAY, "Starting core for $label")
         val binary = File(context.applicationInfo.nativeLibraryDir, "libxray.so")
         check(binary.isFile && binary.length() > 0L) {
             "Xray binary missing for ${Build.SUPPORTED_ABIS.joinToString()}"
@@ -50,8 +78,8 @@ class MciXrayCore(
         }
 
         val configStarted = SystemClock.elapsedRealtime()
-        val config = File(context.filesDir, "xray-mci-${settings.socksPort}.json").apply {
-            writeText(buildConfig(edge, settings, profile, runtimeOptions), Charsets.UTF_8)
+        val config = File(context.filesDir, configName).apply {
+            writeText(configText, Charsets.UTF_8)
         }
         val configPrepareMs = SystemClock.elapsedRealtime() - configStarted
         val coreStarted = SystemClock.elapsedRealtime()
@@ -77,16 +105,17 @@ class MciXrayCore(
         }
 
         val readinessStarted = SystemClock.elapsedRealtime()
-        try {
+        return try {
             withTimeout(XRAY_START_TIMEOUT_MS) {
                 while (true) {
                     check(isAlive(started)) { "Xray exited with code ${started.exitValue()}" }
-                    if (isSocksReady(settings)) break
+                    if (listeners.all { (address, port) -> isSocksReady(address, port) }) break
                     delay(READY_POLL_MS)
                 }
             }
-            Log.i(TAG, "Xray SOCKS ready on ${settings.socksAddress}:${settings.socksPort}")
-            AppLogRepository.info(LogSource.XRAY, "SOCKS listener ready on ${settings.socksPort}")
+            val ports = listeners.joinToString(",") { it.second.toString() }
+            Log.i(TAG, "Xray SOCKS ready on $ports")
+            AppLogRepository.info(LogSource.XRAY, "SOCKS listeners ready on $ports")
             XrayStartupTiming(
                 configPrepareMs = configPrepareMs,
                 coreStartupMs = coreStartupMs,
@@ -148,10 +177,10 @@ class MciXrayCore(
             true
         } == true
 
-    private fun isSocksReady(settings: AdvancedSettingsData): Boolean = runCatching {
+    private fun isSocksReady(address: String, port: Int): Boolean = runCatching {
         Socket().use { socket ->
             socket.connect(
-                InetSocketAddress(settings.socksAddress, settings.socksPort),
+                InetSocketAddress(address, port),
                 120,
             )
         }

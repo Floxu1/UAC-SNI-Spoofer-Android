@@ -7,13 +7,26 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import com.uacspoofer.mobile.logging.AppLogRepository
+import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.profiles.ProfileLatencyTester
+import com.uacspoofer.mobile.profiles.ProfileLibrary
+import com.uacspoofer.mobile.profiles.ProfileStore
+import com.uacspoofer.mobile.profiles.ProxyProfile
+import com.uacspoofer.mobile.profiles.RoutePreparationProgress
+import com.uacspoofer.mobile.profiles.RoutePreparationStep
 import com.uacspoofer.mobile.profiles.RouteSpeedProbeResult
 import com.uacspoofer.mobile.profiles.RouteSpeedProbeStage
+import com.uacspoofer.mobile.profiles.RouteSpeedQualifierEvent
 import com.uacspoofer.mobile.profiles.RouteSpeedTestPlan
+import com.uacspoofer.mobile.profiles.RouteTransferProbeConfig
 import com.uacspoofer.mobile.vpn.AdaptiveCandidate
 import com.uacspoofer.mobile.vpn.AdaptiveDnsResolvers
 import com.uacspoofer.mobile.vpn.AdaptiveSavedRoute
+import com.uacspoofer.mobile.vpn.AdaptiveRouteMetrics
+import com.uacspoofer.mobile.vpn.IpAddress
+import com.uacspoofer.mobile.vpn.RouteProbeBusyException
+import com.uacspoofer.mobile.vpn.RouteProbePermissionRequiredException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +49,19 @@ import kotlin.random.Random
 
 internal enum class RouteSpeedStatus { QUEUED, STARTING, TESTING, PASSED, FAILED, STOPPED }
 
+internal class RouteQualifierCompletionTracker(initialCandidateIds: Iterable<String> = emptyList()) {
+    private val completedCandidateIds = LinkedHashSet<String>().apply { addAll(initialCandidateIds) }
+
+    val count: Int
+        get() = completedCandidateIds.size
+
+    fun claim(candidateIds: Iterable<String>): Set<String> = buildSet {
+        candidateIds.forEach { candidateId ->
+            if (completedCandidateIds.add(candidateId)) add(candidateId)
+        }
+    }
+}
+
 internal enum class RouteTournamentStage(
     val title: String,
     val subtitle: String,
@@ -43,9 +69,10 @@ internal enum class RouteTournamentStage(
     val samplesPerCandidate: Int,
     val workers: Int,
 ) {
-    QUALIFIER("Qualifying", "Every route gets one cold connectivity test", Int.MAX_VALUE, 1, 3),
-    VERIFICATION("Verification", "The best 96 routes are checked again", 96, 1, 3),
-    STABILITY("Stability", "24 diverse routes get repeated stability samples", 24, 2, 2),
+    QUALIFIER("Qualifying", "Fast batched HTTP preflight; isolated verification follows", Int.MAX_VALUE, 1, 3),
+    VERIFICATION("Resolver verification", "96 Edge, tuning and DNS families are checked in isolation", 96, 1, 1),
+    MTU_VALIDATION("MTU validation", "Four real MTUs are opened for the best 24 route families", 96, 1, 1),
+    STABILITY("Stability", "24 diverse routes get repeated stability samples", 24, 2, 1),
     STRESS("Stress test", "6 finalists face repeated cold-start tests", 6, 3, 1),
     CHAMPIONSHIP("ABBA final", "Champion and backup are compared A-B-B-A", 2, 2, 1),
     COMPLETE("Complete", "Champion and backup are ready", 0, 0, 0),
@@ -64,6 +91,16 @@ internal data class RouteObservation(
     val dnsSucceeded: Boolean,
     val detail: String,
     val failureFingerprint: String,
+    val uploadBytes: Int = 0,
+    val downloadBytes: Int = payloadBytes,
+    val uploadKbps: Long = 0L,
+    val downloadKbps: Long = throughputKbps,
+    val jitterMs: Long? = null,
+    val transferValidated: Boolean = false,
+    val endpointFailure: Boolean = false,
+    val txDelta: Long = 0L,
+    val rxDelta: Long = 0L,
+    val mtuValidated: Boolean = false,
 )
 
 internal data class RouteSpeedRow(
@@ -93,9 +130,80 @@ internal data class RouteSpeedRow(
     val observations: List<RouteObservation> = emptyList(),
     val failureFingerprint: String = "Not tested",
     val detail: String = "Waiting to test",
+    val uploadBytes: Int = 0,
+    val downloadBytes: Int = 0,
+    val uploadKbps: Long = 0L,
+    val downloadKbps: Long = 0L,
+    val transferSuccessCount: Int = 0,
+    val endpointFailureCount: Int = 0,
+    val txDelta: Long = 0L,
+    val rxDelta: Long = 0L,
+    val nativeSampleCount: Int = 0,
+    val mtuValidated: Boolean = false,
 ) {
     val sampleCount: Int get() = observations.size
     val usable: Boolean get() = successfulSamples > 0
+}
+
+internal fun recommendationRowsForStage(
+    rows: List<RouteSpeedRow>,
+    currentStage: RouteTournamentStage,
+    stageCandidateIds: (RouteTournamentStage) -> Collection<String>?,
+): List<RouteSpeedRow> {
+    val stages = if (currentStage == RouteTournamentStage.COMPLETE) {
+        listOf(RouteTournamentStage.CHAMPIONSHIP)
+    } else {
+        RouteTournamentStage.entries
+            .asSequence()
+            .filter { it != RouteTournamentStage.COMPLETE && it.ordinal <= currentStage.ordinal }
+            .sortedByDescending { it.ordinal }
+            .toList()
+    }
+    stages.forEach { stage ->
+        val ids = stageCandidateIds(stage)?.toHashSet()
+        val accepted = rows.filter { row ->
+            (ids == null || row.candidateId in ids) &&
+                row.observations.any { observation -> observation.stage == stage && observation.accepted }
+        }
+        if (accepted.isNotEmpty()) return accepted
+    }
+    return emptyList()
+}
+
+internal fun preferredBackupRow(
+    champion: RouteSpeedRow,
+    rankedRows: List<RouteSpeedRow>,
+): RouteSpeedRow? {
+    val championSubnet = routeEndpointSubnet(champion.edgeKey)
+    fun diversityTier(row: RouteSpeedRow): Int {
+        val subnet = routeEndpointSubnet(row.edgeKey)
+        return when {
+            row.edgeKey != champion.edgeKey && championSubnet != null && subnet != null && subnet != championSubnet -> 0
+            row.edgeKey != champion.edgeKey -> 1
+            else -> 2
+        }
+    }
+    val candidates = rankedRows.filter { it.candidateId != champion.candidateId }
+    val preferredTier = candidates.minOfOrNull { diversityTier(it) } ?: return null
+    return candidates.firstOrNull { diversityTier(it) == preferredTier }
+}
+
+internal fun filterRestorableFinalRows(
+    rows: List<RouteSpeedRow>,
+    validCandidateIds: Collection<String>,
+): List<RouteSpeedRow> {
+    if (rows.isEmpty() || validCandidateIds.isEmpty()) return emptyList()
+    val valid = validCandidateIds.toHashSet()
+    return rows.filter { it.candidateId in valid }
+}
+
+private fun routeEndpointSubnet(endpoint: String): String? {
+    val address = if (endpoint.startsWith('[')) {
+        endpoint.substringAfter('[').substringBefore(']')
+    } else {
+        endpoint.substringBeforeLast(':', endpoint)
+    }
+    return IpAddress.parse(address)?.subnetKey()
 }
 
 internal data class SavedRouteDetails(
@@ -139,6 +247,7 @@ internal data class SavedRouteProfileDetails(
 internal class RouteSpeedTestController private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val tester = ProfileLatencyTester(appContext)
+    private val profileStore = ProfileStore(appContext)
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var plan: RouteSpeedTestPlan? = null
@@ -148,9 +257,12 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     private var pauseRequested = false
     private var manualAdvanceRequested = false
     private var manualAdvanceCandidateIds: List<String>? = null
+    private var forcedPauseReason: String? = null
 
     val rows = mutableStateListOf<RouteSpeedRow>()
     private val finalStageRows = mutableStateListOf<RouteSpeedRow>()
+    var profileLibrary by mutableStateOf(selectedTestProfileLibrary(profileStore.snapshot()))
+        private set
     var loading by mutableStateOf(false)
         private set
     var testing by mutableStateOf(false)
@@ -162,6 +274,13 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     var networkLabel by mutableStateOf("Detecting network…")
         private set
     var notice by mutableStateOf("Preparing the Route Tournament…")
+        private set
+    var preparationProgress by mutableStateOf(
+        RoutePreparationProgress(
+            step = RoutePreparationStep.PROFILE_SNAPSHOT,
+            detail = "Waiting to prepare the route list",
+        ),
+    )
         private set
     var activeCandidateId by mutableStateOf<String?>(null)
         private set
@@ -215,14 +334,43 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             advanceReadyCount > 0 &&
             (testing || paused)
 
+    val hasPreparedPlan: Boolean
+        get() = plan?.candidates?.isNotEmpty() == true
+
+    val canStartTest: Boolean
+        get() = !loading && !testing && profileLibrary.allProfiles.isNotEmpty()
+
+    fun loadProfileLibrary() {
+        if (testing || loading) return
+        val latest = selectedTestProfileLibrary(profileStore.snapshot())
+        profileLibrary = latest
+        val prepared = plan
+        if (prepared == null || prepared.profile.id != latest.selectedId) {
+            resetForProfileSelection(latest.selectedProfile, clearRunRequest = false)
+        }
+    }
+
+    fun selectTestProfile(profileId: String) {
+        if (testing || loading || profileId == profileLibrary.selectedId) return
+        val profile = profileLibrary.allProfiles.firstOrNull { it.id == profileId } ?: return
+        preferences.edit().putString(KEY_TEST_PROFILE_ID, profileId).apply()
+        profileLibrary = profileLibrary.copy(selectedId = profileId)
+        resetForProfileSelection(profile, clearRunRequest = true)
+        notice = "${profile.name} selected • tap START when you are ready"
+    }
+
     fun load(force: Boolean = false) {
-        if (testing || loading || (!force && plan != null)) return
-        preparePlan(resumeIfRequested = false)
+        if (force || plan == null) loadProfileLibrary()
     }
 
     fun refresh() {
         if (testing) {
             notice = "Pause the Tournament before reloading the profile and network"
+            return
+        }
+        if (plan == null) {
+            loadProfileLibrary()
+            notice = "Profiles refreshed • tap START when you are ready"
             return
         }
         viewingFinalStageHistory = false
@@ -232,7 +380,10 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     fun startTest() {
-        val prepared = plan ?: return preparePlan(resumeIfRequested = false)
+        val prepared = plan ?: return preparePlan(
+            resumeIfRequested = false,
+            startAfterPreparation = true,
+        )
         if (testing || loading || prepared.candidates.isEmpty()) return
         beginRun(prepared, reset = true)
     }
@@ -282,16 +433,24 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         val prepared = plan ?: return
         val row = rows.firstOrNull { it.candidateId == candidateId } ?: return
         if (!row.usable) return
-        val backup = rankedRows().firstOrNull { it.candidateId != candidateId && it.usable }
+        val backup = preferredBackupRow(
+            champion = row,
+            rankedRows = rankedRows().filter(RouteSpeedRow::usable),
+        )
         if (
             tester.selectRouteWinner(
                 plan = prepared,
                 candidateId = candidateId,
                 score = row.score,
+                metrics = row.toAdaptiveRouteMetrics(),
                 backupCandidateId = backup?.candidateId,
                 backupScore = backup?.score ?: 0,
+                backupMetrics = backup?.toAdaptiveRouteMetrics() ?: AdaptiveRouteMetrics(0),
             )
         ) {
+            preferences.edit().putString(KEY_TEST_PROFILE_ID, prepared.profile.id).apply()
+            profileLibrary = runCatching { selectedTestProfileLibrary(profileStore.select(prepared.profile.id)) }
+                .getOrDefault(profileLibrary.copy(selectedId = prepared.profile.id))
             selectedCandidateId = candidateId
             backupCandidateId = backup?.candidateId
             savedRouteProfileName = prepared.profile.name
@@ -365,7 +524,11 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             .thenBy { it.p95LatencyMs ?: Long.MAX_VALUE },
     )
 
-    private fun preparePlan(resumeIfRequested: Boolean) {
+    private fun preparePlan(
+        resumeIfRequested: Boolean,
+        startAfterPreparation: Boolean = false,
+    ) {
+        val selectedProfile = profileLibrary.selectedProfile.copy()
         loadJob?.cancel()
         viewingFinalStageHistory = false
         finalStageRows.clear()
@@ -373,9 +536,18 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         loadJob = scope.launch {
             loading = true
             notice = "Detecting network and restoring the Route Tournament…"
+            preparationProgress = RoutePreparationProgress(
+                step = RoutePreparationStep.PROFILE_SNAPSHOT,
+                detail = "Starting route preparation",
+            )
             try {
-                val prepared = tester.prepareRouteSpeedTest()
+                val prepared = tester.prepareRouteSpeedTest(profileOverride = selectedProfile) { progress ->
+                    withContext(Dispatchers.Main.immediate) {
+                        applyPreparationProgress(progress)
+                    }
+                }
                 plan = prepared
+                profileLibrary = selectedTestProfileLibrary(profileStore.snapshot())
                 profileName = prepared.profile.name
                 networkLabel = buildNetworkLabel(prepared)
                 viewingFinalStageHistory = false
@@ -403,7 +575,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                     paused ->
                         "${currentStage.title} restored • tap RESUME to continue"
                     rows.isNotEmpty() ->
-                        "${rows.size} route genomes ready for ${prepared.profile.name}"
+                        "${prepared.discoverySummary} • ${rows.size} route genomes ready"
                     else -> "No routes available"
                 }
             } catch (cancelled: CancellationException) {
@@ -425,10 +597,73 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             } finally {
                 loading = false
             }
-            if (resumeIfRequested && preferences.getBoolean(KEY_RUN_REQUESTED, false)) {
-                plan?.let { beginRun(it, reset = false) }
+            when {
+                startAfterPreparation -> plan?.let { beginRun(it, reset = true) }
+                resumeIfRequested && preferences.getBoolean(KEY_RUN_REQUESTED, false) ->
+                    plan?.let { beginRun(it, reset = false) }
             }
         }
+    }
+
+    private fun resetForProfileSelection(
+        profile: ProxyProfile,
+        clearRunRequest: Boolean,
+    ) {
+        loadJob?.cancel()
+        plan = null
+        rows.clear()
+        finalStageRows.clear()
+        viewingFinalStageHistory = false
+        finalStageHistoryAvailable = false
+        paused = false
+        currentStage = RouteTournamentStage.QUALIFIER
+        phaseCompletedCount = 0
+        phaseTotalCount = 0
+        activeCandidateId = null
+        activeCount = 0
+        recommendedCandidateId = null
+        backupCandidateId = null
+        selectedCandidateId = null
+        savedRouteProfileName = null
+        savedChampionLabel = null
+        savedBackupLabel = null
+        savedRouteDetails = null
+        profileName = profile.name
+        networkLabel = "Tap Start to detect the network"
+        preparationProgress = RoutePreparationProgress(
+            step = RoutePreparationStep.PROFILE_SNAPSHOT,
+            detail = "Ready when you are",
+        )
+        notice = "Choose a profile, then tap START"
+        if (clearRunRequest) {
+            preferences.edit().putBoolean(KEY_RUN_REQUESTED, false).apply()
+        }
+    }
+
+    private fun selectedTestProfileLibrary(library: ProfileLibrary): ProfileLibrary {
+        val storedId = preferences.getString(KEY_TEST_PROFILE_ID, null)
+        val selectedId = storedId
+            ?.takeIf { id -> library.allProfiles.any { it.id == id } }
+            ?: library.selectedId
+        return library.copy(selectedId = selectedId)
+    }
+
+    private fun applyPreparationProgress(progress: RoutePreparationProgress) {
+        val current = preparationProgress
+        if (progress.step.number < current.step.number) return
+        if (progress.step == current.step && progress.completed < current.completed) return
+        preparationProgress = progress
+        if (progress.step == RoutePreparationStep.PROFILE_SNAPSHOT && progress.currentTarget.isNotBlank()) {
+            profileName = progress.currentTarget
+        }
+        if (
+            progress.step == RoutePreparationStep.NETWORK_DETECTION &&
+            progress.completed > 0 &&
+            progress.currentTarget.isNotBlank()
+        ) {
+            networkLabel = progress.currentTarget.replaceFirstChar(Char::uppercase)
+        }
+        notice = progress.detail
     }
 
     private fun beginRun(prepared: RouteSpeedTestPlan, reset: Boolean) {
@@ -445,6 +680,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             backupCandidateId = null
             championConfidence = 0
         } else {
+            currentStage = restoreCurrentStage()
             rows.indices.forEach { index ->
                 if (rows[index].status in setOf(
                         RouteSpeedStatus.STARTING,
@@ -452,13 +688,15 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                         RouteSpeedStatus.STOPPED,
                     )
                 ) {
+                    val acceptedInCurrentStage = rows[index].observations.any { observation ->
+                        observation.stage == currentStage && observation.accepted
+                    }
                     rows[index] = rows[index].copy(
-                        status = if (rows[index].usable) RouteSpeedStatus.PASSED else RouteSpeedStatus.QUEUED,
-                        detail = if (rows[index].usable) rows[index].detail else "Waiting to resume",
+                        status = if (acceptedInCurrentStage) RouteSpeedStatus.PASSED else RouteSpeedStatus.QUEUED,
+                        detail = if (acceptedInCurrentStage) rows[index].detail else "Waiting to resume",
                     )
                 }
             }
-            currentStage = restoreCurrentStage()
         }
         if (currentStage == RouteTournamentStage.COMPLETE) {
             paused = false
@@ -468,6 +706,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             return
         }
         pauseRequested = false
+        forcedPauseReason = null
         manualAdvanceRequested = false
         manualAdvanceCandidateIds = null
         paused = false
@@ -492,12 +731,31 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 persistAllRows()
                 updateRecommendedCandidates()
                 paused = currentStage != RouteTournamentStage.COMPLETE
-                notice = if (recommendedCandidateId == null) {
+                notice = forcedPauseReason ?: if (recommendedCandidateId == null) {
                     "Route Tournament paused • tap RESUME to continue"
                 } else {
                     "Tournament paused • current Champion can be used now"
                 }
                 if (!pauseRequested) preferences.edit().putBoolean(KEY_RUN_REQUESTED, true).apply()
+            } catch (error: Throwable) {
+                rows.indices.forEach { index ->
+                    if (rows[index].status == RouteSpeedStatus.STARTING || rows[index].status == RouteSpeedStatus.TESTING) {
+                        rows[index] = rows[index].copy(
+                            status = RouteSpeedStatus.STOPPED,
+                            detail = "Interrupted by an unexpected test error",
+                        )
+                    }
+                }
+                persistAllRows()
+                updateRecommendedCandidates()
+                paused = currentStage != RouteTournamentStage.COMPLETE
+                preferences.edit().putBoolean(KEY_RUN_REQUESTED, false).apply()
+                notice = "Route Tournament paused after an unexpected error • tap RESUME to retry"
+                AppLogRepository.error(
+                    LogSource.APP,
+                    "Route Tournament failed stage=${currentStage.name}",
+                    error,
+                )
             } finally {
                 activeCandidateId = null
                 activeCount = 0
@@ -545,6 +803,77 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         if (remaining.isEmpty()) return
 
         try {
+            if (stage == RouteTournamentStage.QUALIFIER) {
+                val phaseCandidateIds = candidateIds.toHashSet()
+                val completionTracker = RouteQualifierCompletionTracker(
+                    rows.asSequence()
+                        .filter { it.candidateId in phaseCandidateIds }
+                        .filter { row -> row.observations.any { it.stage == stage } }
+                        .map(RouteSpeedRow::candidateId)
+                        .asIterable(),
+                )
+                phaseCompletedCount = completionTracker.count.coerceAtMost(phaseTotalCount)
+                coroutineScope {
+                    stageJob = currentCoroutineContext()[Job]
+                    val candidates = remaining.mapNotNull { candidateId ->
+                        prepared.candidates.firstOrNull { it.id == candidateId }
+                    }
+                    tester.measureRouteSpeedQualifier(prepared, candidates) { event ->
+                        withContext(Dispatchers.Main.immediate) {
+                            when (event) {
+                                is RouteSpeedQualifierEvent.Running -> {
+                                    val logicalIds = event.candidateIds.filter { it in phaseCandidateIds }
+                                    activeCandidateId = logicalIds.firstOrNull()
+                                    logicalIds.forEach { candidateId ->
+                                        updateRow(candidateId) { current ->
+                                            current.copy(
+                                                status = when (event.stage) {
+                                                    RouteSpeedProbeStage.STARTING -> RouteSpeedStatus.STARTING
+                                                    RouteSpeedProbeStage.PROBING -> RouteSpeedStatus.TESTING
+                                                },
+                                                detail = when (event.stage) {
+                                                    RouteSpeedProbeStage.STARTING ->
+                                                        "${stage.title}: starting fast route batch"
+                                                    RouteSpeedProbeStage.PROBING ->
+                                                        "${stage.title}: fast HTTP preflight"
+                                                },
+                                            )
+                                        }
+                                    }
+                                }
+
+                                is RouteSpeedQualifierEvent.Completed -> {
+                                    val newlyCompleted = completionTracker.claim(
+                                        event.results.asSequence()
+                                            .map { it.candidate.id }
+                                            .filter { it in phaseCandidateIds }
+                                            .asIterable(),
+                                    )
+                                    if (newlyCompleted.isNotEmpty()) {
+                                        event.results
+                                            .filter { it.candidate.id in newlyCompleted }
+                                            .forEach { result ->
+                                                updateRow(result.candidate.id) {
+                                                    aggregateResult(it, result, stage)
+                                                }
+                                            }
+                                        persistRows(newlyCompleted)
+                                        phaseCompletedCount = completionTracker.count.coerceAtMost(phaseTotalCount)
+                                        updateRecommendedCandidates()
+                                        notice =
+                                            "${stage.title} • $phaseCompletedCount/$phaseTotalCount • $healthyCount healthy"
+                                    }
+                                    if (activeCandidateId in event.results.map { it.candidate.id }.toSet()) {
+                                        activeCandidateId = null
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                activeCandidateId = null
+                return
+            }
             coroutineScope {
                 stageJob = currentCoroutineContext()[Job]
                 val queue = Channel<String>(Channel.UNLIMITED)
@@ -565,21 +894,31 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                             )
                         }
                         try {
-                            val result = tester.measureRouteSpeedCandidate(prepared, candidate) { probeStage ->
-                                withContext(Dispatchers.Main.immediate) {
-                                    updateRow(candidate.id) { current ->
-                                        current.copy(
-                                            status = when (probeStage) {
-                                                RouteSpeedProbeStage.STARTING -> RouteSpeedStatus.STARTING
-                                                RouteSpeedProbeStage.PROBING -> RouteSpeedStatus.TESTING
-                                            },
-                                            detail = when (probeStage) {
-                                                RouteSpeedProbeStage.STARTING -> "${stage.title}: cold-starting Xray"
-                                                RouteSpeedProbeStage.PROBING -> "${stage.title}: testing HTTP, DNS and payload"
-                                            },
-                                        )
-                                    }
+                            val stageTransferConfig = checkNotNull(transferConfigFor(stage))
+                            val result = try {
+                                if (stage >= RouteTournamentStage.MTU_VALIDATION) {
+                                    tester.measureRouteSpeedNativeCandidate(
+                                        plan = prepared,
+                                        candidate = candidate,
+                                        transferConfig = stageTransferConfig,
+                                    ) { probeStage -> updateProbeStage(candidate.id, stage, probeStage) }
+                                } else {
+                                    tester.measureRouteSpeedCandidate(
+                                        plan = prepared,
+                                        candidate = candidate,
+                                        transferConfig = stageTransferConfig,
+                                    ) { probeStage -> updateProbeStage(candidate.id, stage, probeStage) }
                                 }
+                            } catch (permission: RouteProbePermissionRequiredException) {
+                                forcedPauseReason = "Native MTU validation paused • connect once to grant VPN permission, then resume"
+                                pauseRequested = true
+                                preferences.edit().putBoolean(KEY_RUN_REQUESTED, false).apply()
+                                throw CancellationException(forcedPauseReason).also { it.initCause(permission) }
+                            } catch (busy: RouteProbeBusyException) {
+                                forcedPauseReason = "Native MTU validation paused • disconnect the active VPN, then resume"
+                                pauseRequested = true
+                                preferences.edit().putBoolean(KEY_RUN_REQUESTED, false).apply()
+                                throw CancellationException(forcedPauseReason).also { it.initCause(busy) }
                             }
                             updateRow(candidate.id) { aggregateResult(it, result, stage) }
                             persistRow(rows.first { it.candidateId == candidate.id })
@@ -610,6 +949,29 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         }
     }
 
+    private suspend fun updateProbeStage(
+        candidateId: String,
+        stage: RouteTournamentStage,
+        probeStage: RouteSpeedProbeStage,
+    ) = withContext(Dispatchers.Main.immediate) {
+        updateRow(candidateId) { current ->
+            current.copy(
+                status = when (probeStage) {
+                    RouteSpeedProbeStage.STARTING -> RouteSpeedStatus.STARTING
+                    RouteSpeedProbeStage.PROBING -> RouteSpeedStatus.TESTING
+                },
+                detail = when (probeStage) {
+                    RouteSpeedProbeStage.STARTING -> "${stage.title}: starting a fresh Xray route"
+                    RouteSpeedProbeStage.PROBING -> if (stage >= RouteTournamentStage.MTU_VALIDATION) {
+                        "${stage.title}: validating native TUN, HTTP, DNS, upload and download"
+                    } else {
+                        "${stage.title}: testing HTTP, DNS, upload and download"
+                    }
+                },
+            )
+        }
+    }
+
     private fun manualAdvanceShortlist(stage: RouteTournamentStage): List<String> {
         val next = stage.next()
         val passedThisStage = rows.filter { row ->
@@ -623,7 +985,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         }
         val limit = minOf(next.shortlistSize, passedThisStage.size)
         return when (next) {
-            RouteTournamentStage.VERIFICATION,
+            RouteTournamentStage.VERIFICATION -> resolverRepresentatives(passedThisStage, limit)
+            RouteTournamentStage.MTU_VALIDATION -> expandMtuFamilies(passedThisStage, limit)
             RouteTournamentStage.STABILITY -> diverseShortlist(passedThisStage, limit)
             RouteTournamentStage.STRESS,
             RouteTournamentStage.CHAMPIONSHIP -> rankedRows(passedThisStage).take(limit).map(RouteSpeedRow::candidateId)
@@ -651,17 +1014,23 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     private fun stageCandidateIds(stage: RouteTournamentStage): List<String> {
-        restoreStageIds(stage)?.let { restored ->
+        val validIds = rows.mapTo(HashSet()) { it.candidateId }
+        restoreStageIds(stage)?.filter { it in validIds }?.distinct()?.let { restored ->
             if (restored.isNotEmpty()) return restored
         }
         if (stage == RouteTournamentStage.QUALIFIER) return rows.map(RouteSpeedRow::candidateId)
         val previous = stage.previous() ?: return emptyList()
         val sourceIds = restoreStageIds(previous).orEmpty().ifEmpty { rows.map(RouteSpeedRow::candidateId) }
-        val sourceRows = rows.filter { it.candidateId in sourceIds && it.sampleCount > 0 }
+        val sourceRows = rows.filter { row ->
+            row.candidateId in sourceIds && row.observations.any { observation ->
+                observation.stage == previous && observation.accepted
+            }
+        }
         val limit = minOf(stage.shortlistSize, sourceRows.size)
         if (limit <= 0) return emptyList()
         return when (stage) {
-            RouteTournamentStage.VERIFICATION,
+            RouteTournamentStage.VERIFICATION -> resolverRepresentatives(sourceRows, limit)
+            RouteTournamentStage.MTU_VALIDATION -> expandMtuFamilies(sourceRows, limit)
             RouteTournamentStage.STABILITY -> diverseShortlist(sourceRows, limit)
             RouteTournamentStage.STRESS,
             RouteTournamentStage.CHAMPIONSHIP -> rankedRows(sourceRows).take(limit).map(RouteSpeedRow::candidateId)
@@ -687,6 +1056,48 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         return selected.take(limit)
     }
 
+    private fun resolverRepresentatives(source: List<RouteSpeedRow>, limit: Int): List<String> {
+        val preferredMtu = plan?.session?.settings?.tunMtu ?: 1_280
+        val representatives = source
+            .groupBy { it.resolverFamilyKey() }
+            .values
+            .mapNotNull { family ->
+                family.sortedWith(
+                    compareByDescending<RouteSpeedRow> { it.tournamentScore }
+                        .thenByDescending { it.confidence }
+                        .thenBy { kotlin.math.abs(it.mtu - preferredMtu) }
+                        .thenBy { it.candidateId },
+                ).firstOrNull()
+            }
+        return diverseShortlist(representatives, minOf(limit, representatives.size))
+    }
+
+    private fun expandMtuFamilies(source: List<RouteSpeedRow>, limit: Int): List<String> {
+        if (source.isEmpty() || limit <= 0) return emptyList()
+        val familyLimit = minOf(24, source.map { it.resolverFamilyKey() }.distinct().size)
+        val familyWinners = diverseShortlist(source, familyLimit)
+            .mapNotNull { id -> rows.firstOrNull { it.candidateId == id } }
+            .map { it.resolverFamilyKey() }
+            .toSet()
+        val rankedFamilies = rankedRows(source)
+            .map { it.resolverFamilyKey() }
+            .distinct()
+        val selectedFamilies = (familyWinners + rankedFamilies).distinct().take(familyLimit).toSet()
+        return rows
+            .filter { it.resolverFamilyKey() in selectedFamilies }
+            .sortedWith(
+                compareBy<RouteSpeedRow> { rankedFamilies.indexOf(it.resolverFamilyKey()).let { rank ->
+                    if (rank < 0) Int.MAX_VALUE else rank
+                } }.thenBy { it.mtu },
+            )
+            .map(RouteSpeedRow::candidateId)
+            .distinct()
+            .take(limit)
+    }
+
+    private fun RouteSpeedRow.resolverFamilyKey(): String =
+        "$edgeKey|$resolverKey|$fragmentKey"
+
     private fun buildSchedule(
         prepared: RouteSpeedTestPlan,
         stage: RouteTournamentStage,
@@ -697,12 +1108,36 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             val b = candidateIds[1]
             return listOf(a, b, b, a)
         }
-        val seedBase = "${prepared.signature}|${prepared.session.network.learningKey()}|${stage.name}".hashCode()
+        val seedBase = "${prepared.signature}|${prepared.session.network.exactStorageKey()}|${stage.name}".hashCode()
         return buildList {
             repeat(stage.samplesPerCandidate) { round ->
                 addAll(candidateIds.shuffled(Random(seedBase + round * 7_919)))
             }
         }
+    }
+
+    private fun transferConfigFor(stage: RouteTournamentStage): RouteTransferProbeConfig? = when (stage) {
+        RouteTournamentStage.QUALIFIER -> null
+        RouteTournamentStage.VERIFICATION,
+        RouteTournamentStage.MTU_VALIDATION -> RouteTransferProbeConfig(
+            uploadBytes = 64 * 1_024,
+            downloadBytes = 64 * 1_024,
+        )
+        RouteTournamentStage.STABILITY -> RouteTransferProbeConfig(
+            uploadBytes = 128 * 1_024,
+            downloadBytes = 128 * 1_024,
+        )
+        RouteTournamentStage.STRESS -> RouteTransferProbeConfig(
+            uploadBytes = 512 * 1_024,
+            downloadBytes = 512 * 1_024,
+            readTimeoutMs = 20_000,
+        )
+        RouteTournamentStage.CHAMPIONSHIP -> RouteTransferProbeConfig(
+            uploadBytes = 1 * 1_024 * 1_024,
+            downloadBytes = 1 * 1_024 * 1_024,
+            readTimeoutMs = 30_000,
+        )
+        RouteTournamentStage.COMPLETE -> null
     }
 
     private fun remainingSchedule(stage: RouteTournamentStage, schedule: List<String>): List<String> {
@@ -730,14 +1165,21 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             .mapNotNull(RouteObservation::dnsLatencyMs)
             .sorted()
         val throughputs = observations.map(RouteObservation::throughputKbps).filter { it > 0L }.sorted()
+        val uploads = observations.map(RouteObservation::uploadKbps).filter { it > 0L }.sorted()
+        val downloads = observations.map(RouteObservation::downloadKbps).filter { it > 0L }.sorted()
+        val measuredJitter = observations.mapNotNull(RouteObservation::jitterMs).sorted()
         val dnsSuccesses = observations.count(RouteObservation::dnsSucceeded)
+        val currentStageSucceeded = observations.any { observation ->
+            observation.stage == stage && observation.accepted
+        }
         val base = previous.copy(
-            status = if (successful > 0) RouteSpeedStatus.PASSED else RouteSpeedStatus.FAILED,
+            status = if (currentStageSucceeded) RouteSpeedStatus.PASSED else RouteSpeedStatus.FAILED,
             stageReached = stage,
             score = observations.map(RouteObservation::score).average().roundToInt(),
             latencyMs = median(latencies),
             p95LatencyMs = percentile95(latencies),
-            jitterMs = if (latencies.size >= 2) (percentile95(latencies) ?: 0L) - latencies.first() else null,
+            jitterMs = median(measuredJitter)
+                ?: if (latencies.size >= 2) (percentile95(latencies) ?: 0L) - latencies.first() else null,
             dnsLatencyMs = median(dnsLatencies),
             payloadBytes = observations.sumOf(RouteObservation::payloadBytes),
             throughputKbps = median(throughputs) ?: 0L,
@@ -753,6 +1195,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 else -> failure
             },
             detail = result.error ?: result.detail,
+            uploadBytes = observations.sumOf(RouteObservation::uploadBytes),
+            downloadBytes = observations.sumOf(RouteObservation::downloadBytes),
+            uploadKbps = median(uploads) ?: 0L,
+            downloadKbps = median(downloads) ?: 0L,
+            transferSuccessCount = observations.count(RouteObservation::transferValidated),
+            endpointFailureCount = observations.count(RouteObservation::endpointFailure),
+            txDelta = observations.sumOf(RouteObservation::txDelta),
+            rxDelta = observations.sumOf(RouteObservation::rxDelta),
+            nativeSampleCount = observations.count(RouteObservation::mtuValidated),
+            mtuValidated = observations.any(RouteObservation::mtuValidated),
         )
         return base.copy(
             tournamentScore = calculateTournamentScore(base),
@@ -786,12 +1238,23 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         val dnsRate = row.dnsSuccessCount.toDouble() / row.sampleCount
         val httpRate = if (row.httpAttempted > 0) row.httpSucceeded.toDouble() / row.httpAttempted else 0.0
         val jitterQuality = 1.0 - ((row.jitterMs ?: 0L) / 2_500.0).coerceIn(0.0, 1.0)
+        val measurableTransfers = (row.sampleCount - row.endpointFailureCount).coerceAtLeast(0)
+        val transferRate = if (measurableTransfers == 0) 0.5 else {
+            (row.transferSuccessCount.toDouble() / measurableTransfers).coerceIn(0.0, 1.0)
+        }
+        val nativeQuality = if (row.stageReached >= RouteTournamentStage.MTU_VALIDATION) {
+            if (row.mtuValidated) 1.0 else 0.0
+        } else {
+            0.5
+        }
         return (
-            sampleFactor * 25.0 +
-                passRate * 35.0 +
-                dnsRate * 15.0 +
-                httpRate * 15.0 +
-                jitterQuality * 10.0
+            sampleFactor * 20.0 +
+                passRate * 30.0 +
+                dnsRate * 12.0 +
+                httpRate * 12.0 +
+                transferRate * 14.0 +
+                nativeQuality * 7.0 +
+                jitterQuality * 5.0
             ).roundToInt().coerceIn(0, 99)
     }
 
@@ -827,6 +1290,31 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         preferences.edit().putString(KEY_STAGE, RouteTournamentStage.COMPLETE.name).apply()
         phaseCompletedCount = phaseTotalCount
         updateRecommendedCandidates()
+        val prepared = plan
+        val champion = recommendedCandidateId?.let { id -> rows.firstOrNull { it.candidateId == id && it.usable } }
+        val backup = backupCandidateId?.let { id -> rows.firstOrNull { it.candidateId == id && it.usable } }
+        if (prepared != null && champion != null) {
+            tester.selectRouteWinner(
+                plan = prepared,
+                candidateId = champion.candidateId,
+                score = champion.score,
+                metrics = champion.toAdaptiveRouteMetrics(),
+                backupCandidateId = backup?.candidateId,
+                backupScore = backup?.score ?: 0,
+                backupMetrics = backup?.toAdaptiveRouteMetrics() ?: AdaptiveRouteMetrics(0),
+            )
+            selectedCandidateId = champion.candidateId
+            savedRouteProfileName = prepared.profile.name
+            savedChampionLabel = champion.label
+            savedBackupLabel = backup?.label
+            savedRouteDetails = buildSavedRouteDetails(
+                prepared,
+                prepared.candidates.firstOrNull { it.id == champion.candidateId }?.toSavedRouteDetails(),
+                backup?.candidateId?.let { id ->
+                    prepared.candidates.firstOrNull { it.id == id }?.toSavedRouteDetails()
+                },
+            )
+        }
         notice = if (recommendedCandidateId == null) {
             "Tournament complete • no route passed the complete connectivity check"
         } else {
@@ -835,11 +1323,17 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     private fun updateRecommendedCandidates() {
-        val ranked = rankedRows().filter(RouteSpeedRow::usable)
-        recommendedCandidateId = ranked.getOrNull(0)?.candidateId
-        backupCandidateId = ranked.getOrNull(1)?.candidateId
-        val champion = ranked.getOrNull(0)
-        val backup = ranked.getOrNull(1)
+        val ranked = rankedRows(
+            recommendationRowsForStage(
+                rows = rows,
+                currentStage = currentStage,
+                stageCandidateIds = ::restoreStageIds,
+            ),
+        )
+        val champion = ranked.firstOrNull()
+        val backup = champion?.let { preferredBackupRow(it, ranked) }
+        recommendedCandidateId = champion?.candidateId
+        backupCandidateId = backup?.candidateId
         championConfidence = if (champion == null) {
             0
         } else {
@@ -898,7 +1392,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         preferences.edit()
             .putString(KEY_PROFILE_ID, prepared.profile.id)
             .putString(KEY_SIGNATURE, prepared.signature)
-            .putString(KEY_NETWORK_KEY, prepared.session.network.learningKey())
+            .putString(KEY_NETWORK_KEY, prepared.session.network.exactStorageKey())
+            .putString(KEY_DISCOVERY_ID, prepared.discoveryId)
             .putString(KEY_CANDIDATE_IDS, prepared.candidates.joinToString("\n") { it.id })
             .putString(KEY_STAGE, RouteTournamentStage.QUALIFIER.name)
             .putString(stageIdsKey(RouteTournamentStage.QUALIFIER), prepared.candidates.joinToString("\n") { it.id })
@@ -910,7 +1405,10 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         preferences.getBoolean(KEY_SESSION_EXISTS, false) &&
             preferences.getString(KEY_PROFILE_ID, null) == prepared.profile.id &&
             preferences.getString(KEY_SIGNATURE, null) == prepared.signature &&
-            preferences.getString(KEY_NETWORK_KEY, null) == prepared.session.network.learningKey()
+            preferences.getString(KEY_NETWORK_KEY, null) == prepared.session.network.exactStorageKey() &&
+            preferences.getString(KEY_DISCOVERY_ID, null) == prepared.discoveryId &&
+            preferences.getString(KEY_CANDIDATE_IDS, null) ==
+            prepared.candidates.joinToString("\n") { it.id }
 
     private fun persistStage(stage: RouteTournamentStage, candidateIds: List<String>) {
         preferences.edit()
@@ -956,6 +1454,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
 
     private fun persistRow(row: RouteSpeedRow) {
         preferences.edit().putString(rowKey(row.candidateId), row.toJson().toString()).apply()
+    }
+
+    private fun persistRows(candidateIds: Collection<String>) {
+        if (candidateIds.isEmpty()) return
+        val ids = candidateIds.toHashSet()
+        val editor = preferences.edit()
+        rows.asSequence()
+            .filter { it.candidateId in ids }
+            .forEach { row -> editor.putString(rowKey(row.candidateId), row.toJson().toString()) }
+        editor.apply()
     }
 
     private fun persistAllRows() {
@@ -1004,6 +1512,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 observations = observations,
                 failureFingerprint = json.optString("failureFingerprint", "Not tested"),
                 detail = json.optString("detail", "Waiting to resume").take(MAX_PERSISTED_DETAIL),
+                uploadBytes = json.optInt("uploadBytes", 0),
+                downloadBytes = json.optInt("downloadBytes", 0),
+                uploadKbps = json.optLong("uploadKbps", 0L),
+                downloadKbps = json.optLong("downloadKbps", 0L),
+                transferSuccessCount = json.optInt("transferSuccessCount", 0),
+                endpointFailureCount = json.optInt("endpointFailureCount", 0),
+                txDelta = json.optLong("txDelta", 0L),
+                rxDelta = json.optLong("rxDelta", 0L),
+                nativeSampleCount = json.optInt("nativeSampleCount", 0),
+                mtuValidated = json.optBoolean("mtuValidated", false),
             )
             if (observations.isEmpty()) base else base.copy(
                 successfulSamples = observations.count(RouteObservation::accepted),
@@ -1037,6 +1555,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         .put("successfulSamples", successfulSamples)
         .put("failureFingerprint", failureFingerprint)
         .put("detail", detail.take(MAX_PERSISTED_DETAIL))
+        .put("uploadBytes", uploadBytes)
+        .put("downloadBytes", downloadBytes)
+        .put("uploadKbps", uploadKbps)
+        .put("downloadKbps", downloadKbps)
+        .put("transferSuccessCount", transferSuccessCount)
+        .put("endpointFailureCount", endpointFailureCount)
+        .put("txDelta", txDelta)
+        .put("rxDelta", rxDelta)
+        .put("nativeSampleCount", nativeSampleCount)
+        .put("mtuValidated", mtuValidated)
         .put("observations", JSONArray().apply {
             observations.forEach { put(it.toJson()) }
         })
@@ -1049,7 +1577,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             .put("profileId", prepared.profile.id)
             .put("profileName", prepared.profile.name)
             .put("signature", prepared.signature)
-            .put("networkKey", prepared.session.network.learningKey())
+            .put("networkKey", prepared.session.network.exactStorageKey())
             .put("carrier", prepared.session.network.carrier)
             .put("carrierClass", prepared.session.network.carrierClass)
             .put("networkLabel", buildNetworkLabel(prepared))
@@ -1061,7 +1589,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     private fun hasFinalStageSnapshot(prepared: RouteSpeedTestPlan): Boolean =
-        preferences.getString(finalStageSnapshotKey(prepared), null)?.isNotBlank() == true
+        restoreFinalStageSnapshot(prepared).isNotEmpty()
 
     private fun restoreFinalStageSnapshot(prepared: RouteSpeedTestPlan): List<RouteSpeedRow> {
         val raw = preferences.getString(finalStageSnapshotKey(prepared), null) ?: return emptyList()
@@ -1071,7 +1599,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             if (
                 snapshot.optString("profileId") != prepared.profile.id ||
                 snapshot.optString("signature") != prepared.signature ||
-                snapshot.optString("networkKey") != network.learningKey() ||
+                snapshot.optString("networkKey") != network.exactStorageKey() ||
                 snapshot.optString("carrier") != network.carrier ||
                 snapshot.optString("carrierClass") != network.carrierClass
             ) {
@@ -1084,11 +1612,15 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 }
             }
             val array = snapshot.optJSONArray("rows") ?: return@runCatching emptyList()
-            buildList {
+            val restored = buildList {
                 for (index in 0 until array.length()) {
                     array.optJSONObject(index)?.toSnapshotRow()?.let(::add)
                 }
             }
+            filterRestorableFinalRows(
+                rows = restored,
+                validCandidateIds = prepared.candidates.map(AdaptiveCandidate::id),
+            )
         }.getOrDefault(emptyList())
     }
 
@@ -1129,6 +1661,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             observations = observations,
             failureFingerprint = optString("failureFingerprint", "Saved Championship finalist"),
             detail = optString("detail", "Loaded from previous Championship"),
+            uploadBytes = optInt("uploadBytes", 0),
+            downloadBytes = optInt("downloadBytes", 0),
+            uploadKbps = optLong("uploadKbps", 0L),
+            downloadKbps = optLong("downloadKbps", 0L),
+            transferSuccessCount = optInt("transferSuccessCount", 0),
+            endpointFailureCount = optInt("endpointFailureCount", 0),
+            txDelta = optLong("txDelta", 0L),
+            rxDelta = optLong("rxDelta", 0L),
+            nativeSampleCount = optInt("nativeSampleCount", 0),
+            mtuValidated = optBoolean("mtuValidated", false),
         )
     }.getOrNull()
 
@@ -1145,6 +1687,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         .put("dnsSucceeded", dnsSucceeded)
         .put("detail", detail.take(MAX_PERSISTED_DETAIL))
         .put("failure", failureFingerprint)
+        .put("uploadBytes", uploadBytes)
+        .put("downloadBytes", downloadBytes)
+        .put("uploadKbps", uploadKbps)
+        .put("downloadKbps", downloadKbps)
+        .put("jitter", jitterMs ?: JSONObject.NULL)
+        .put("transferValidated", transferValidated)
+        .put("endpointFailure", endpointFailure)
+        .put("txDelta", txDelta)
+        .put("rxDelta", rxDelta)
+        .put("mtuValidated", mtuValidated)
 
     private fun JSONObject.toObservation(): RouteObservation? = runCatching {
         RouteObservation(
@@ -1160,6 +1712,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             dnsSucceeded = optBoolean("dnsSucceeded", false),
             detail = optString("detail", "").take(MAX_PERSISTED_DETAIL),
             failureFingerprint = optString("failure", "Connectivity probe rejected the route"),
+            uploadBytes = optInt("uploadBytes", 0),
+            downloadBytes = optInt("downloadBytes", optInt("payload", 0)),
+            uploadKbps = optLong("uploadKbps", 0L),
+            downloadKbps = optLong("downloadKbps", optLong("throughput", 0L)),
+            jitterMs = optLongOrNull("jitter"),
+            transferValidated = optBoolean("transferValidated", false),
+            endpointFailure = optBoolean("endpointFailure", false),
+            txDelta = optLong("txDelta", 0L),
+            rxDelta = optLong("rxDelta", 0L),
+            mtuValidated = optBoolean("mtuValidated", false),
         )
     }.getOrNull()
 
@@ -1179,6 +1741,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         dnsSucceeded = dnsSucceeded,
         detail = error ?: detail,
         failureFingerprint = failure,
+        uploadBytes = uploadBytes,
+        downloadBytes = downloadBytes,
+        uploadKbps = uploadKbps,
+        downloadKbps = downloadKbps,
+        jitterMs = jitterMs,
+        transferValidated = transferValidated,
+        endpointFailure = endpointFailure != null,
+        txDelta = txDelta,
+        rxDelta = rxDelta,
+        mtuValidated = mtuValidated,
     )
 
     private fun JSONObject.optLongOrNull(key: String): Long? =
@@ -1192,6 +1764,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         editor.remove(KEY_PROFILE_ID)
             .remove(KEY_SIGNATURE)
             .remove(KEY_NETWORK_KEY)
+            .remove(KEY_DISCOVERY_ID)
             .remove(KEY_CANDIDATE_IDS)
             .remove(KEY_STAGE)
             .remove(KEY_SESSION_EXISTS)
@@ -1244,7 +1817,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             carrierClass = network.carrierClass.ifBlank { "unknown" },
             provider = network.networkProvider.ifBlank { "Unknown" },
             asn = network.networkAsn.takeUnless { it.isBlank() || it == "unknown" }?.let { "AS$it" } ?: "Unknown",
-            networkFingerprint = network.learningKey(),
+            networkFingerprint = network.exactStorageKey(),
             networkMtu = network.mtu,
             metered = network.metered,
             validated = network.validated,
@@ -1272,6 +1845,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         },
         mtu = tunMtu,
         directCompat = directCompat,
+    )
+
+    private fun RouteSpeedRow.toAdaptiveRouteMetrics() = AdaptiveRouteMetrics(
+        score = score,
+        pingMs = latencyMs,
+        jitterMs = jitterMs,
+        uploadKbps = uploadKbps,
+        downloadKbps = downloadKbps,
+        confidence = confidence,
+        mtuValidated = mtuValidated,
     )
 
     private fun AdaptiveCandidate.toSavedRouteDetails() = SavedRouteDetails(
@@ -1308,7 +1891,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         val identity = listOf(
             prepared.profile.id,
             prepared.signature,
-            network.learningKey(),
+            network.exactStorageKey(),
             network.carrier,
             network.carrierClass,
         ).joinToString("\u001F")
@@ -1322,7 +1905,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
 
     private fun RouteTournamentStage.next(): RouteTournamentStage = when (this) {
         RouteTournamentStage.QUALIFIER -> RouteTournamentStage.VERIFICATION
-        RouteTournamentStage.VERIFICATION -> RouteTournamentStage.STABILITY
+        RouteTournamentStage.VERIFICATION -> RouteTournamentStage.MTU_VALIDATION
+        RouteTournamentStage.MTU_VALIDATION -> RouteTournamentStage.STABILITY
         RouteTournamentStage.STABILITY -> RouteTournamentStage.STRESS
         RouteTournamentStage.STRESS -> RouteTournamentStage.CHAMPIONSHIP
         RouteTournamentStage.CHAMPIONSHIP,
@@ -1332,7 +1916,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     private fun RouteTournamentStage.previous(): RouteTournamentStage? = when (this) {
         RouteTournamentStage.QUALIFIER -> null
         RouteTournamentStage.VERIFICATION -> RouteTournamentStage.QUALIFIER
-        RouteTournamentStage.STABILITY -> RouteTournamentStage.VERIFICATION
+        RouteTournamentStage.MTU_VALIDATION -> RouteTournamentStage.VERIFICATION
+        RouteTournamentStage.STABILITY -> RouteTournamentStage.MTU_VALIDATION
         RouteTournamentStage.STRESS -> RouteTournamentStage.STABILITY
         RouteTournamentStage.CHAMPIONSHIP -> RouteTournamentStage.STRESS
         RouteTournamentStage.COMPLETE -> RouteTournamentStage.CHAMPIONSHIP
@@ -1351,12 +1936,14 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     companion object {
-        private const val PREFERENCES_NAME = "route_speed_test_session_v2"
+        private const val PREFERENCES_NAME = "route_speed_test_session_v3"
         private const val KEY_SESSION_EXISTS = "session_exists"
         private const val KEY_RUN_REQUESTED = "run_requested"
+        private const val KEY_TEST_PROFILE_ID = "test_profile_id"
         private const val KEY_PROFILE_ID = "profile_id"
         private const val KEY_SIGNATURE = "signature"
         private const val KEY_NETWORK_KEY = "network_key"
+        private const val KEY_DISCOVERY_ID = "discovery_id"
         private const val KEY_CANDIDATE_IDS = "candidate_ids"
         private const val KEY_STAGE = "tournament_stage"
         private const val KEY_STAGE_IDS_PREFIX = "stage_ids:"

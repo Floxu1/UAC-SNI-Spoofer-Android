@@ -28,14 +28,14 @@ class MciConfigTest {
         assertTrue(config.contains("\"finalmask\""))
         assertTrue(config.contains("\"packets\":\"tlshello\""))
         assertTrue(config.contains("\"length\":\"5\""))
-        assertTrue(config.contains("\"delay\":\"20\""))
+        assertTrue(config.contains("\"delay\":\"0\""))
         assertTrue(config.contains("\"maxSplit\":\"2\""))
         assertTrue(MciXrayCore.buildConfig(MciConfig.IRANCELL_EDGE).contains("\"maxSplit\":\"100\""))
         assertEquals("tlshello", MciFragmenter.finalMask.packet)
         assertEquals(5, MciFragmenter.finalMask.length)
-        assertEquals(20, MciFragmenter.finalMask.delayMs)
+        assertEquals(0, MciFragmenter.finalMask.delayMs)
         assertEquals(2, MciFragmenter.finalMask.maxSplit)
-        assertTrue(config.contains("\"network\":\"udp\",\"port\":\"443\""))
+        assertFalse(config.contains("\"network\":\"udp\",\"port\":\"443\""))
         assertFalse(config.contains(MciConfig.PATTERN_FAKE_SNI))
     }
 }

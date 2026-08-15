@@ -8,6 +8,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.net.VpnService
@@ -26,6 +29,8 @@ import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciXrayCore
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProxyProfile
+import com.uacspoofer.mobile.profiles.RouteTransferMeasurementMode
+import com.uacspoofer.mobile.profiles.RouteTransferProbe
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
@@ -33,9 +38,11 @@ import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
 import com.uacspoofer.mobile.ui.MainActivity
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -45,6 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
 class UacVpnService : VpnService() {
@@ -58,6 +66,9 @@ class UacVpnService : VpnService() {
     @Volatile private var latencyJob: Job? = null
     @Volatile private var adaptiveLearningJob: Job? = null
     @Volatile private var networkWatchJob: Job? = null
+    @Volatile private var routeProbeJob: Job? = null
+    @Volatile private var activeRouteProbeId: String? = null
+    @Volatile private var activeRouteProbeStartId: Int? = null
     @Volatile private var resourcesActive = false
     @Volatile private var activeEdge: MciEdge? = null
     @Volatile private var activeCandidate: AdaptiveCandidate? = null
@@ -99,6 +110,8 @@ class UacVpnService : VpnService() {
             ACTION_DISCONNECT -> requestDisconnect()
             ACTION_CLOSE -> requestDisconnect(closeAppTasks = true)
             ACTION_SWITCH_PROFILE -> requestSwitchProfile()
+            ACTION_ROUTE_MTU_PROBE -> requestRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
+            ACTION_CANCEL_ROUTE_MTU_PROBE -> cancelRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
             ACTION_CONNECT, null -> requestConnect()
         }
         return Service.START_NOT_STICKY
@@ -126,15 +139,236 @@ class UacVpnService : VpnService() {
         latencyJob?.cancel()
         adaptiveLearningJob?.cancel()
         networkWatchJob?.cancel()
+        val interruptedRouteProbeId = activeRouteProbeId
+        routeProbeJob?.cancel()
         serviceScope.cancel()
         runBlocking(Dispatchers.IO) { runCatching { cleanupRoute() } }
+        interruptedRouteProbeId?.let {
+            RouteMtuProbeCoordinator.unregisterCancellation(it)
+            RouteMtuProbeCoordinator.fail(it, CancellationException("VPN service stopped"))
+        }
+        activeRouteProbeId = null
+        activeRouteProbeStartId = null
+        routeProbeJob = null
         if (ConnectionStateStore.state.value != ConnectionState.ERROR) {
             ConnectionStateStore.markDisconnected()
         }
         super.onDestroy()
     }
 
+    private fun requestRouteMtuProbe(requestId: String?, startId: Int) {
+        val id = requestId?.takeIf(String::isNotBlank)
+        val request = id?.let(RouteMtuProbeCoordinator::request)
+        if (id == null || request == null) {
+            if (routeProbeJob?.isActive == true) {
+                activeRouteProbeStartId = startId
+            } else if (!resourcesActive && connectJob?.isActive != true) {
+                finishIdleForegroundStart(startId)
+            }
+            return
+        }
+        if (resourcesActive || connectJob?.isActive == true) {
+            RouteMtuProbeCoordinator.fail(id, RouteProbeBusyException("VPN service is already busy"))
+            return
+        }
+        if (routeProbeJob?.isActive == true) {
+            activeRouteProbeStartId = startId
+            RouteMtuProbeCoordinator.fail(id, RouteProbeBusyException("VPN service is already busy"))
+            return
+        }
+        if (ConnectionStateStore.state.value !in setOf(ConnectionState.DISCONNECTED, ConnectionState.ERROR)) {
+            finishIdleForegroundStart(startId)
+            RouteMtuProbeCoordinator.fail(id, RouteProbeBusyException("Disconnect before native MTU validation"))
+            return
+        }
+        activeConnectionMode = CONNECTION_MODE_TUNNEL
+        try {
+            startForegroundNotification(connected = false)
+        } catch (error: Throwable) {
+            RouteMtuProbeCoordinator.fail(id, error)
+            stopSelfResult(startId)
+            return
+        }
+        activeRouteProbeId = id
+        activeRouteProbeStartId = startId
+        val job = serviceScope.launch(start = CoroutineStart.LAZY) {
+            var completedResult: RouteNativeMtuProbeResult? = null
+            var completionError: Throwable? = null
+            try {
+                completedResult = lifecycleMutex.withLock { performRouteMtuProbe(request) }
+            } catch (cancelled: CancellationException) {
+                completionError = cancelled
+            } catch (error: Throwable) {
+                AppLogRepository.warning(LogSource.TUN, "Native Route Speed MTU probe failed", error)
+                completionError = error
+            } finally {
+                val runningJob = coroutineContext[Job]
+                withContext(NonCancellable) {
+                    lifecycleMutex.withLock {
+                        if (activeRouteProbeId == id) runCatching { nativeTunEngine.stop() }
+                    }
+                    val stopStartId = activeRouteProbeStartId ?: startId
+                    if (activeRouteProbeId == id) {
+                        activeRouteProbeId = null
+                        activeRouteProbeStartId = null
+                    }
+                    if (routeProbeJob === runningJob) routeProbeJob = null
+                    RouteMtuProbeCoordinator.unregisterCancellation(id)
+                    val stopped = stopSelfResult(stopStartId)
+                    if (stopped && connectJob?.isActive != true && !resourcesActive) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    }
+                    when (val error = completionError) {
+                        is CancellationException -> RouteMtuProbeCoordinator.cancel(id)
+                        null -> RouteMtuProbeCoordinator.complete(id, checkNotNull(completedResult))
+                        else -> RouteMtuProbeCoordinator.fail(id, error)
+                    }
+                }
+            }
+        }
+        routeProbeJob = job
+        RouteMtuProbeCoordinator.registerCancellation(id) { job.cancel() }
+        job.start()
+    }
+
+    private suspend fun performRouteMtuProbe(
+        request: RouteNativeMtuProbeRequest,
+    ): RouteNativeMtuProbeResult {
+        val underlyingNetwork = checkNotNull(request.underlyingNetwork) {
+            "Native MTU validation has no underlying network"
+        }
+        val currentNetwork = fingerprintResolver.captureAdaptiveContext()
+        check(
+            currentNetwork.fingerprint.exactStorageKey() == request.expectedNetworkKey &&
+                currentNetwork.network?.networkHandle == underlyingNetwork.networkHandle,
+        ) {
+            "Network changed before native MTU validation"
+        }
+        val connectivityManager = getSystemService(ConnectivityManager::class.java)
+        check(connectivityManager.getNetworkCapabilities(underlyingNetwork) != null) {
+            "Underlying network disappeared before native MTU validation"
+        }
+        val existingVpnNetworks = vpnNetworks(connectivityManager).toSet()
+        val candidate = request.candidate
+        val settings = candidate.settings.copy(connectionMode = CONNECTION_MODE_TUNNEL).validated()
+        nativeTunEngine.start(
+            edge = candidate.edge,
+            settings = settings,
+            profile = request.profile,
+            runtimeOptions = candidate.runtimeOptions.copy(quietLogging = true),
+        ) { establishRouteProbeTun(settings, underlyingNetwork) }
+        val vpnNetwork = awaitRouteProbeNetwork(connectivityManager, existingVpnNetworks)
+        delay(ROUTE_MTU_PROBE_WARMUP_MS)
+        val before = nativeTunEngine.stats()
+        val dns = dnsProbe.verifyOnNetwork(settings, vpnNetwork)
+        val http = tunConnectivityProbe.verifyTunCandidate(vpnNetwork)
+        val transfer = RouteTransferProbe().measure(
+            measurementMode = RouteTransferMeasurementMode.NATIVE_TUN,
+            network = vpnNetwork,
+            config = request.transferConfig,
+        )
+        var after = nativeTunEngine.stats()
+        repeat(2) {
+            if (after.txBytes <= before.txBytes || after.rxBytes <= before.rxBytes) {
+                delay(ROUTE_STATS_SETTLE_MS)
+                after = nativeTunEngine.stats()
+            }
+        }
+        val txDelta = (after.txBytes - before.txBytes).coerceAtLeast(0L)
+        val rxDelta = (after.rxBytes - before.rxBytes).coerceAtLeast(0L)
+        val transferAccepted = transfer.success
+        val networkAfterProbe = fingerprintResolver.captureAdaptiveContext()
+        val networkStable = networkAfterProbe.fingerprint.exactStorageKey() == request.expectedNetworkKey &&
+            networkAfterProbe.network?.networkHandle == underlyingNetwork.networkHandle &&
+            connectivityManager.getNetworkCapabilities(underlyingNetwork) != null
+        val accepted = http.success && dns.success && transferAccepted && txDelta > 0L && rxDelta > 0L && networkStable
+        val detail = buildString {
+            append("nativeMtu=${settings.tunMtu}")
+            append(" http=${http.succeededTargets}/${http.attemptedTargets}")
+            append(" dns=${dns.answerCount}@${dns.latencyMs ?: -1}ms")
+            append(" upload=${transfer.uploadBytes}@${transfer.uploadKbps}Kbps")
+            append(" download=${transfer.downloadBytes}@${transfer.downloadKbps}Kbps")
+            append(" txDelta=$txDelta rxDelta=$rxDelta networkStable=$networkStable accepted=$accepted")
+            transfer.endpointFailure?.let { append(" endpoint=${it.kind}:${it.statusCode}") }
+            transfer.candidateFailure?.let { append(" failure=[$it]") }
+        }
+        AppLogRepository.info(LogSource.TUN, "Route Speed native result candidate=${candidate.id} $detail")
+        return RouteNativeMtuProbeResult(
+            accepted = accepted,
+            transfer = transfer,
+            httpSucceeded = http.succeededTargets,
+            httpAttempted = http.attemptedTargets,
+            httpDetail = http.detail,
+            dnsSucceeded = dns.success,
+            dnsLatencyMs = dns.latencyMs.takeIf { dns.success },
+            dnsAnswers = dns.answerCount,
+            txDelta = txDelta,
+            rxDelta = rxDelta,
+            detail = detail,
+        )
+    }
+
+    private fun establishRouteProbeTun(
+        settings: AdvancedSettingsData,
+        underlyingNetwork: Network,
+    ): android.os.ParcelFileDescriptor? {
+        val route = TunRouteParser.parse(settings.tunRoute)
+        return Builder()
+            .setSession("UAC Route MTU Probe")
+            .setBlocking(false)
+            .setMtu(settings.tunMtu)
+            .addAddress(settings.tunAddress, 32)
+            .addRoute(route.first, route.second)
+            .addDnsServer(settings.nativeDns)
+            .addDisallowedApplication(packageName)
+            .apply {
+                setUnderlyingNetworks(arrayOf(underlyingNetwork))
+                if (settings.ipv4Only) allowFamily(OsConstants.AF_INET)
+            }
+            .establish()
+    }
+
+    private suspend fun awaitRouteProbeNetwork(
+        connectivityManager: ConnectivityManager,
+        existingVpnNetworks: Set<Network>,
+    ): Network {
+        val deadline = SystemClock.elapsedRealtime() + ROUTE_VPN_NETWORK_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val available = vpnNetworks(connectivityManager)
+            available.firstOrNull { it !in existingVpnNetworks }?.let { return it }
+            delay(ROUTE_VPN_NETWORK_POLL_MS)
+        }
+        error("Android did not expose a new Route MTU VPN network")
+    }
+
+    private fun vpnNetworks(connectivityManager: ConnectivityManager): List<Network> =
+        connectivityManager.allNetworks.filter { network ->
+            connectivityManager.getNetworkCapabilities(network)
+                ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+        }
+
+    private fun finishIdleForegroundStart(startId: Int) {
+        val foregroundStarted = runCatching { startForegroundNotification(connected = false) }.isSuccess
+        val stopped = stopSelfResult(startId)
+        if (foregroundStarted && stopped) stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun cancelRouteMtuProbe(requestId: String?, startId: Int) {
+        val id = requestId
+        if (id == null || activeRouteProbeId != id) {
+            if (!resourcesActive && connectJob?.isActive != true && routeProbeJob?.isActive != true) {
+                stopSelfResult(startId)
+            }
+            return
+        }
+        activeRouteProbeStartId = startId
+        routeProbeJob?.cancel()
+    }
+
     private fun requestConnect() {
+        activeRouteProbeId?.let {
+            routeProbeJob?.cancel()
+        }
         if (resourcesActive || connectJob?.isActive == true) return
         val settings = advancedSettingsStore.snapshot()
         activeConnectionMode = settings.connectionMode
@@ -179,6 +413,9 @@ class UacVpnService : VpnService() {
 
     private fun requestDisconnect(closeAppTasks: Boolean = false) {
         AppLogRepository.info(LogSource.SERVICE, "Disconnect requested")
+        activeRouteProbeId?.let {
+            routeProbeJob?.cancel()
+        }
         ConnectionStateStore.tryBeginDisconnect()
         generation.incrementAndGet()
         val pendingConnect = connectJob
@@ -187,7 +424,9 @@ class UacVpnService : VpnService() {
         val pendingLatency = latencyJob
         val pendingLearning = adaptiveLearningJob
         val pendingNetworkWatch = networkWatchJob
+        val pendingRouteProbe = routeProbeJob
         serviceScope.launch {
+            pendingRouteProbe?.cancelAndJoin()
             pendingConnect?.cancelAndJoin()
             pendingHealth?.cancelAndJoin()
             pendingStats?.cancelAndJoin()
@@ -932,6 +1171,9 @@ class UacVpnService : VpnService() {
         const val ACTION_DISCONNECT = "com.uacspoofer.mobile.DISCONNECT"
         const val ACTION_CLOSE = "com.uacspoofer.mobile.CLOSE"
         const val ACTION_SWITCH_PROFILE = "com.uacspoofer.mobile.SWITCH_PROFILE"
+        const val ACTION_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.ROUTE_MTU_PROBE"
+        const val ACTION_CANCEL_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.CANCEL_ROUTE_MTU_PROBE"
+        const val EXTRA_ROUTE_PROBE_ID = "route_probe_id"
 
         private const val TAG = "UAC-SNI"
         private const val NOTIFICATION_CHANNEL = "uac_mci_vpn"
@@ -946,6 +1188,10 @@ class UacVpnService : VpnService() {
         private const val POST_CONNECT_HEALTH_DELAY_MS = 8_000L
         private const val NETWORK_WATCH_INTERVAL_MS = 3_000L
         private const val NETWORK_CHANGE_CONFIRMATIONS = 2
+        private const val ROUTE_MTU_PROBE_WARMUP_MS = 300L
+        private const val ROUTE_STATS_SETTLE_MS = 50L
+        private const val ROUTE_VPN_NETWORK_TIMEOUT_MS = 5_000L
+        private const val ROUTE_VPN_NETWORK_POLL_MS = 50L
 
     }
 }
