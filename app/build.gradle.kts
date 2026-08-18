@@ -53,7 +53,7 @@ android {
     buildTypes {
         debug {
             ndk {
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
             }
         }
         release {
@@ -61,7 +61,7 @@ android {
             isShrinkResources = false
             signingConfig = signingConfigs.findByName("release")
             ndk {
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
             }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -121,6 +121,9 @@ dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
 
     implementation(files("libs/libv2ray-native-tun.aar"))
+    implementation("com.facebook.fresco:fresco:3.6.0")
+    implementation("com.facebook.fresco:animated-webp:3.6.0")
+    implementation("com.facebook.fresco:webpsupport:3.6.0")
 
     implementation(composeBom)
     androidTestImplementation(composeBom)
