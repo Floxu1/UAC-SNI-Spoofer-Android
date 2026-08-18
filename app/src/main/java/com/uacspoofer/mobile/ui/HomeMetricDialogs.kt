@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.layout.offset
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -274,10 +275,12 @@ internal fun HomeCountryDialog(
 internal fun HomePingDialog(
     visible: Boolean,
     metrics: ConnectionMetrics,
+    onRefresh: () -> Unit,
     onDismissRequest: () -> Unit,
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
+
     AnimatedHomeMetricDialog(
         visible = visible,
         title = homeText("Ping details", "جزئیات پینگ"),
@@ -286,60 +289,158 @@ internal fun HomePingDialog(
         onDismissRequest = onDismissRequest,
     ) {
         val latency = metrics.latencyMs
-        Column(
+
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(DialogInnerSurface, RoundedCornerShape(16.dp))
-                .border(1.dp, DialogBorder.copy(alpha = 0.52f), RoundedCornerShape(16.dp))
+                .background(
+                    DialogInnerSurface,
+                    RoundedCornerShape(16.dp),
+                )
+                .border(
+                    1.dp,
+                    DialogBorder.copy(alpha = 0.52f),
+                    RoundedCornerShape(16.dp),
+                )
                 .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            if (metrics.isMeasuringLatency) {
-                CircularProgressIndicator(color = DialogBlue, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
-                Spacer(Modifier.height(9.dp))
-                Text(
-                    homeText("Testing route…", "در حال تست مسیر…"),
-                    color = DialogBlue,
-                    fontSize = 12.sp,
-                    fontFamily = localizedFont,
-                )
-            } else {
-                Text(
-                    text = latency?.let { "$it ms" } ?: "—",
-                    color = latencyColorForDialog(latency),
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = latencyQualityForDialog(latency, isPersian),
-                    color = UacColors.TextSecondary,
-                    fontSize = 11.sp,
-                    fontFamily = localizedFont,
+            IconButton(
+                onClick = onRefresh,
+                enabled = !metrics.isMeasuringLatency,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .offset(y = 2.dp)
+                    .size(34.dp)
+                    .background(
+                        color = DialogBlue.copy(
+                            alpha = if (metrics.isMeasuringLatency) 0.05f else 0.10f,
+                        ),
+                        shape = CircleShape,
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = DialogBlue.copy(
+                            alpha = if (metrics.isMeasuringLatency) 0.10f else 0.22f,
+                        ),
+                        shape = CircleShape,
+                    ),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = homeText(
+                        "Refresh ping",
+                        "بروزرسانی پینگ",
+                    ),
+                    tint = if (metrics.isMeasuringLatency) {
+                        UacColors.TextSecondary.copy(alpha = 0.55f)
+                    } else {
+                        DialogBlue
+                    },
+                    modifier = Modifier.size(18.dp),
                 )
             }
+
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (metrics.isMeasuringLatency) {
+                    CircularProgressIndicator(
+                        color = DialogBlue,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(28.dp),
+                    )
+
+                    Spacer(Modifier.height(9.dp))
+
+                    Text(
+                        text = homeText(
+                            "Testing route…",
+                            "در حال تست مسیر…",
+                        ),
+                        color = DialogBlue,
+                        fontSize = 12.sp,
+                        fontFamily = localizedFont,
+                    )
+                } else {
+                    Text(
+                        text = latency?.let { "$it ms" } ?: "—",
+                        color = latencyColorForDialog(latency),
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+
+                    Text(
+                        text = latencyQualityForDialog(
+                            latency,
+                            isPersian,
+                        ),
+                        color = UacColors.TextSecondary,
+                        fontSize = 11.sp,
+                        fontFamily = localizedFont,
+                    )
+                }
+            }
         }
+
         Spacer(Modifier.height(10.dp))
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(DialogInnerSurface.copy(alpha = 0.74f), RoundedCornerShape(16.dp))
-                .padding(horizontal = 15.dp, vertical = 7.dp),
+                .background(
+                    DialogInnerSurface.copy(alpha = 0.74f),
+                    RoundedCornerShape(16.dp),
+                )
+                .padding(
+                    horizontal = 15.dp,
+                    vertical = 7.dp,
+                ),
         ) {
-            MetricDetailRow(homeText("Average", "میانگین"), metrics.averageLatencyMs.asMillis())
-            MetricDetailRow(homeText("Minimum", "کمترین"), metrics.minimumLatencyMs.asMillis())
-            MetricDetailRow(homeText("Maximum", "بیشترین"), metrics.maximumLatencyMs.asMillis())
-            MetricDetailRow(homeText("Jitter", "نوسان"), metrics.jitterMs.asMillis())
+            MetricDetailRow(
+                homeText("Average", "میانگین"),
+                metrics.averageLatencyMs.asMillis(),
+            )
+
+            MetricDetailRow(
+                homeText("Minimum", "کمترین"),
+                metrics.minimumLatencyMs.asMillis(),
+            )
+
+            MetricDetailRow(
+                homeText("Maximum", "بیشترین"),
+                metrics.maximumLatencyMs.asMillis(),
+            )
+
+            MetricDetailRow(
+                homeText("Jitter", "نوسان"),
+                metrics.jitterMs.asMillis(),
+            )
+
             MetricDetailRow(
                 homeText("Samples", "تعداد تست"),
-                metrics.sampleCount.takeIf { it > 0 }?.toString() ?: "—",
+                metrics.sampleCount
+                    .takeIf { it > 0 }
+                    ?.toString()
+                    ?: "—",
             )
+
             MetricDetailRow(
                 homeText("Measured", "زمان سنجش"),
-                metrics.measuredAtMs?.let(::formatTime) ?: homeText("Waiting for sample", "در انتظار نتیجه"),
+                metrics.measuredAtMs
+                    ?.let(::formatTime)
+                    ?: homeText(
+                        "Waiting for sample",
+                        "در انتظار نتیجه",
+                    ),
             )
+
             MetricDetailRow(
                 homeText("Method", "روش تست"),
-                homeText("HTTPS payload through Xray tunnel", "ارسال HTTPS از تونل Xray"),
+                homeText(
+                    "HTTPS payload through Xray tunnel",
+                    "ارسال HTTPS از تونل Xray",
+                ),
             )
         }
     }

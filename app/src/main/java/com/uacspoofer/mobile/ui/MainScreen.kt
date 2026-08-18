@@ -118,7 +118,18 @@ fun MainScreen(
     val updateManager = remember(context.applicationContext) { AppUpdateManager(context.applicationContext) }
     val activity = context as? Activity
     var selectedDestination by rememberSaveable { mutableStateOf(DrawerDestination.HOME) }
-    var selectedLanguage by rememberSaveable { mutableStateOf(DrawerLanguage.PERSIAN) }
+    val languagePrefs = remember(context) {
+        context.getSharedPreferences("app_preferences", android.content.Context.MODE_PRIVATE)
+    }
+
+    var selectedLanguage by rememberSaveable {
+        mutableStateOf(
+            when (languagePrefs.getString("language", "PERSIAN")) {
+                "ENGLISH" -> DrawerLanguage.ENGLISH
+                else -> DrawerLanguage.PERSIAN
+            }
+        )
+    }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
     var drawerWidthPx by remember { mutableIntStateOf(0) }
@@ -282,7 +293,13 @@ fun MainScreen(
                     selectedDestination = it
                     closeDrawer()
                 },
-                onLanguageSelected = { selectedLanguage = it },
+                onLanguageSelected = { language ->
+                    selectedLanguage = language
+
+                    languagePrefs.edit()
+                        .putString("language", language.name)
+                        .apply()
+                },
                 modifier = Modifier
                     .fillMaxHeight()
                     .fillMaxWidth(0.80f)

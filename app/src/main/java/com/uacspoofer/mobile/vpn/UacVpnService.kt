@@ -110,13 +110,14 @@ class UacVpnService : VpnService() {
             ACTION_DISCONNECT -> requestDisconnect()
             ACTION_CLOSE -> requestDisconnect(closeAppTasks = true)
             ACTION_SWITCH_PROFILE -> requestSwitchProfile()
+            ACTION_REFRESH_LATENCY -> requestLatencyRefresh()
             ACTION_ROUTE_MTU_PROBE -> requestRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
             ACTION_CANCEL_ROUTE_MTU_PROBE -> cancelRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
             ACTION_CONNECT, null -> requestConnect()
         }
         return Service.START_NOT_STICKY
     }
-
+    
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
 
     override fun onRevoke() {
@@ -519,7 +520,16 @@ class UacVpnService : VpnService() {
         connectJob = job
         job.invokeOnCompletion { if (connectJob === job) connectJob = null }
     }
+    private fun requestLatencyRefresh() {
+        if (
+            ConnectionStateStore.state.value != ConnectionState.CONNECTED ||
+            !resourcesActive
+        ) {
+            return
+        }
 
+        startLatencySampler(generation.get())
+    }
     private suspend fun connectRoutes(
         token: Long,
         settings: AdvancedSettingsData,
@@ -1173,6 +1183,7 @@ class UacVpnService : VpnService() {
         const val ACTION_SWITCH_PROFILE = "com.uacspoofer.mobile.SWITCH_PROFILE"
         const val ACTION_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.ROUTE_MTU_PROBE"
         const val ACTION_CANCEL_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.CANCEL_ROUTE_MTU_PROBE"
+        const val ACTION_REFRESH_LATENCY = "com.uacspoofer.mobile.REFRESH_LATENCY"
         const val EXTRA_ROUTE_PROBE_ID = "route_probe_id"
 
         private const val TAG = "UAC-SNI"

@@ -1,5 +1,6 @@
 package com.uacspoofer.mobile.ui
-
+import android.content.Intent
+import com.uacspoofer.mobile.vpn.UacVpnService
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.fadeIn
@@ -136,6 +137,12 @@ internal fun ConnectionAwareFeatureCard(
     HomePingDialog(
         visible = activeDialog == HomeMetricDialog.PING,
         metrics = metrics,
+        onRefresh = {
+            context.startService(
+                Intent(context, UacVpnService::class.java)
+                    .setAction(UacVpnService.ACTION_REFRESH_LATENCY),
+            )
+        },
         onDismissRequest = { activeDialog = null },
     )
     HomeCountryDialog(
