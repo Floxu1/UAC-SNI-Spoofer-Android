@@ -309,7 +309,7 @@ internal fun RouteSpeedTestScreen(
             RouteTestProfileSelector(
                 profiles = controller.profileLibrary.allProfiles,
                 selectedId = controller.profileLibrary.selectedId,
-                saved = controller.savedRouteDetails?.profileId == controller.profileLibrary.selectedId,
+                saved = controller.savedRouteProfileId == controller.profileLibrary.selectedId,
                 expanded = profileMenuVisible,
                 enabled = !controller.loading && !controller.testing,
                 onExpand = { profileMenuVisible = true },
@@ -1067,7 +1067,7 @@ private fun CompactRouteTestSummary(
                 MiniSummaryDivider()
                 Button(
                     onClick = onToggleTest,
-                    enabled = canStart && !loading,
+                    enabled = testing || paused || (canStart && !loading),
                     modifier = Modifier.weight(1.05f).height(34.dp),
                     shape = RoundedCornerShape(10.dp),
                     colors = ButtonDefaults.buttonColors(
@@ -1088,7 +1088,7 @@ private fun CompactRouteTestSummary(
                             paused -> homeText("RESUME", "ادامه")
                             stage == RouteTournamentStage.COMPLETE -> homeText("RUN AGAIN", "اجرای دوباره")
                             completed > 0 -> homeText("START AGAIN", "شروع دوباره")
-                            else -> homeText("START TEST", "شروع مسابقه")
+                            else -> homeText("START TEST", "شروع تست")
                         },
                         fontSize = routeFontSize(7.8f, 9f),
                         fontWeight = FontWeight.Bold,
@@ -2368,16 +2368,6 @@ private fun RouteTestReadyState(
                     lineHeight = routeFontSize(14f, 17f),
                     textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(14.dp))
-                Button(
-                    onClick = onStart,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF238EE9)),
-                    shape = RoundedCornerShape(11.dp),
-                ) {
-                    Icon(Icons.Outlined.PlayArrow, null, modifier = Modifier.size(17.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(homeText("START ROUTE TEST", "شروع تست مسیر"), fontWeight = FontWeight.Bold)
-                }
             }
         }
     }

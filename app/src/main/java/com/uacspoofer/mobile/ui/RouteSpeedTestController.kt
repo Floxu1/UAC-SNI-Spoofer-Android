@@ -27,6 +27,14 @@ import com.uacspoofer.mobile.vpn.AdaptiveRouteMetrics
 import com.uacspoofer.mobile.vpn.IpAddress
 import com.uacspoofer.mobile.vpn.RouteProbeBusyException
 import com.uacspoofer.mobile.vpn.RouteProbePermissionRequiredException
+
+import com.uacspoofer.mobile.settings.AdvancedSettingsData
+import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.vpn.AdaptiveCandidatePlanner
+import com.uacspoofer.mobile.vpn.AdaptiveProfileStore
+import com.uacspoofer.mobile.vpn.NetworkFingerprint
+import com.uacspoofer.mobile.vpn.NetworkFingerprintResolver
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -245,15 +253,29 @@ internal data class SavedRouteProfileDetails(
 )
 
 internal class RouteSpeedTestController private constructor(context: Context) {
+
     private val appContext = context.applicationContext
+
     private val tester = ProfileLatencyTester(appContext)
     private val profileStore = ProfileStore(appContext)
-    private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private val settingsStore = AdvancedSettingsStore(appContext)
+    private val adaptiveProfileStore = AdaptiveProfileStore(appContext)
+    private val adaptivePlanner = AdaptiveCandidatePlanner(adaptiveProfileStore)
+    private val fingerprintResolver = NetworkFingerprintResolver(appContext)
+
+    private val preferences =
+        appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+
+    private val scope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     private var plan: RouteSpeedTestPlan? = null
     private var loadJob: Job? = null
+    private var savedRouteLoadJob: Job? = null
     private var testJob: Job? = null
     private var stageJob: Job? = null
+
     private var pauseRequested = false
     private var manualAdvanceRequested = false
     private var manualAdvanceCandidateIds: List<String>? = null
@@ -302,6 +324,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         private set
     var savedRouteProfileName by mutableStateOf<String?>(null)
         private set
+    var savedRouteProfileId by mutableStateOf<String?>(null)
+        private set
     var savedChampionLabel by mutableStateOf<String?>(null)
         private set
     var savedBackupLabel by mutableStateOf<String?>(null)
@@ -339,15 +363,84 @@ internal class RouteSpeedTestController private constructor(context: Context) {
 
     val canStartTest: Boolean
         get() = !loading && !testing && profileLibrary.allProfiles.isNotEmpty()
+    private fun loadSavedRouteBeforeStart(profile: ProxyProfile) {
+        savedRouteLoadJob?.cancel()
 
+        val requestedProfileId = profile.id
+
+        savedRouteLoadJob = scope.launch {
+            val settings = settingsStore.snapshot().validated()
+
+            val network = try {
+                fingerprintResolver.captureAdaptive()
+            } catch (_: Throwable) {
+                return@launch
+            }
+
+            if (profileLibrary.selectedId != requestedProfileId) {
+                return@launch
+            }
+
+            val signature = adaptivePlanner.signature(
+                settings = settings,
+                profile = profile,
+            )
+
+            val champion = adaptiveProfileStore.savedRoute(
+                network = network,
+                profile = profile,
+                signature = signature,
+            )
+
+            val backup = adaptiveProfileStore.savedBackupRoute(
+                network = network,
+                profile = profile,
+                signature = signature,
+            )
+
+            if (profileLibrary.selectedId != requestedProfileId) {
+                return@launch
+            }
+
+            if (champion == null) {
+                savedRouteProfileId = null
+                savedRouteProfileName = null
+                savedChampionLabel = null
+                savedBackupLabel = null
+                savedRouteDetails = null
+                return@launch
+            }
+
+            savedRouteProfileId = profile.id
+            savedRouteProfileName = profile.name
+            savedChampionLabel = champion.label
+            savedBackupLabel = backup?.label
+
+            savedRouteDetails = buildSavedRouteDetails(
+                profile = profile,
+                settings = settings,
+                network = network,
+                champion = champion.toSavedRouteDetails(),
+                backup = backup?.toSavedRouteDetails(),
+            )
+        }
+    }
     fun loadProfileLibrary() {
         if (testing || loading) return
+
         val latest = selectedTestProfileLibrary(profileStore.snapshot())
         profileLibrary = latest
+
         val prepared = plan
+
         if (prepared == null || prepared.profile.id != latest.selectedId) {
-            resetForProfileSelection(latest.selectedProfile, clearRunRequest = false)
+            resetForProfileSelection(
+                latest.selectedProfile,
+                clearRunRequest = false,
+            )
         }
+
+        loadSavedRouteBeforeStart(latest.selectedProfile)
     }
 
     fun selectTestProfile(profileId: String) {
@@ -356,6 +449,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         preferences.edit().putString(KEY_TEST_PROFILE_ID, profileId).apply()
         profileLibrary = profileLibrary.copy(selectedId = profileId)
         resetForProfileSelection(profile, clearRunRequest = true)
+        loadSavedRouteBeforeStart(profile)
         notice = "${profile.name} selected • tap START when you are ready"
     }
 
@@ -541,11 +635,22 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 detail = "Starting route preparation",
             )
             try {
-                val prepared = tester.prepareRouteSpeedTest(profileOverride = selectedProfile) { progress ->
-                    withContext(Dispatchers.Main.immediate) {
-                        applyPreparationProgress(progress)
-                    }
-                }
+                val prepared = tester.prepareRouteSpeedTest(
+                    profileOverride = selectedProfile,
+                    onProgress = { progress ->
+                        withContext(Dispatchers.Main.immediate) {
+                            applyPreparationProgress(progress)
+                        }
+                    },
+                    onSavedRouteResolved = { champion, backup ->
+                        withContext(Dispatchers.Main.immediate) {
+                            savedRouteProfileId = champion?.let { selectedProfile.id }
+                            savedRouteProfileName = champion?.let { selectedProfile.name }
+                            savedChampionLabel = champion?.label
+                            savedBackupLabel = backup?.label
+                        }
+                    },
+                )
                 plan = prepared
                 profileLibrary = selectedTestProfileLibrary(profileStore.snapshot())
                 profileName = prepared.profile.name
@@ -553,6 +658,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 viewingFinalStageHistory = false
                 finalStageRows.clear()
                 selectedCandidateId = prepared.savedChampionId
+                savedRouteProfileId = prepared.savedChampionLabel?.let { prepared.profile.id }
                 savedRouteProfileName = prepared.savedChampionLabel?.let { prepared.profile.name }
                 savedChampionLabel = prepared.savedChampionLabel
                 savedBackupLabel = prepared.savedBackupLabel
@@ -589,6 +695,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 savedChampionLabel = null
                 savedBackupLabel = null
                 savedRouteDetails = null
+                savedRouteProfileId = null
                 finalStageHistoryAvailable = false
                 viewingFinalStageHistory = false
                 finalStageRows.clear()
@@ -610,6 +717,11 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         clearRunRequest: Boolean,
     ) {
         loadJob?.cancel()
+
+        val keepSavedRoute =
+            savedRouteProfileId == profile.id ||
+                savedRouteDetails?.profileId == profile.id
+
         plan = null
         rows.clear()
         finalStageRows.clear()
@@ -624,19 +736,29 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         recommendedCandidateId = null
         backupCandidateId = null
         selectedCandidateId = null
-        savedRouteProfileName = null
-        savedChampionLabel = null
-        savedBackupLabel = null
-        savedRouteDetails = null
+
+        if (!keepSavedRoute) {
+            savedRouteProfileName = null
+            savedChampionLabel = null
+            savedBackupLabel = null
+            savedRouteDetails = null
+            savedRouteProfileId = null
+        }
+
         profileName = profile.name
         networkLabel = "Tap Start to detect the network"
+
         preparationProgress = RoutePreparationProgress(
             step = RoutePreparationStep.PROFILE_SNAPSHOT,
             detail = "Ready when you are",
         )
+
         notice = "Choose a profile, then tap START"
+
         if (clearRunRequest) {
-            preferences.edit().putBoolean(KEY_RUN_REQUESTED, false).apply()
+            preferences.edit()
+                .putBoolean(KEY_RUN_REQUESTED, false)
+                .apply()
         }
     }
 
@@ -1304,6 +1426,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 backupMetrics = backup?.toAdaptiveRouteMetrics() ?: AdaptiveRouteMetrics(0),
             )
             selectedCandidateId = champion.candidateId
+            savedRouteProfileId = prepared.profile.id
             savedRouteProfileName = prepared.profile.name
             savedChampionLabel = champion.label
             savedBackupLabel = backup?.label
@@ -1794,11 +1917,25 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         prepared: RouteSpeedTestPlan,
         champion: SavedRouteDetails?,
         backup: SavedRouteDetails?,
+    ): SavedRouteProfileDetails? = buildSavedRouteDetails(
+        profile = prepared.profile,
+        settings = prepared.session.settings,
+        network = prepared.session.network,
+        champion = champion,
+        backup = backup,
+    )
+
+    private fun buildSavedRouteDetails(
+        profile: ProxyProfile,
+        settings: AdvancedSettingsData,
+        network: NetworkFingerprint,
+        champion: SavedRouteDetails?,
+        backup: SavedRouteDetails?,
     ): SavedRouteProfileDetails? {
         if (champion == null) return null
-        val profile = prepared.profile
-        val runtime = profile.runtimeIdentity(prepared.session.settings)
-        val network = prepared.session.network
+
+        val runtime = profile.runtimeIdentity(settings)
+
         return SavedRouteProfileDetails(
             profileName = profile.name,
             profileId = profile.id,
@@ -1816,7 +1953,10 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             carrier = network.carrier.ifBlank { "Unknown" },
             carrierClass = network.carrierClass.ifBlank { "unknown" },
             provider = network.networkProvider.ifBlank { "Unknown" },
-            asn = network.networkAsn.takeUnless { it.isBlank() || it == "unknown" }?.let { "AS$it" } ?: "Unknown",
+            asn = network.networkAsn
+                .takeUnless { it.isBlank() || it == "unknown" }
+                ?.let { "AS$it" }
+                ?: "Unknown",
             networkFingerprint = network.exactStorageKey(),
             networkMtu = network.mtu,
             metered = network.metered,

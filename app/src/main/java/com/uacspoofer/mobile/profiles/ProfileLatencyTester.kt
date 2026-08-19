@@ -226,6 +226,7 @@ class ProfileLatencyTester(context: Context) {
     suspend fun prepareRouteSpeedTest(
         profileOverride: ProxyProfile? = null,
         onProgress: suspend (RoutePreparationProgress) -> Unit = {},
+        onSavedRouteResolved: suspend (AdaptiveSavedRoute?, AdaptiveSavedRoute?) -> Unit = { _, _ -> },
     ): RouteSpeedTestPlan = withContext(Dispatchers.IO) {
         val settings = settingsStore.snapshot().validated()
         val profile = (profileOverride ?: profileStore.selectedProfile()).copy()
@@ -259,6 +260,7 @@ class ProfileLatencyTester(context: Context) {
         val signature = adaptivePlanner.signature(settings, profile)
         val savedChampion = adaptiveProfileStore.savedRoute(network, profile, signature)
         val savedBackup = adaptiveProfileStore.savedBackupRoute(network, profile, signature)
+        onSavedRouteResolved(savedChampion, savedBackup)
         val savedEdges = listOfNotNull(savedChampion, savedBackup).map { saved ->
             MciEdge(saved.address, saved.port, saved.role, saved.maxSplit)
         }
