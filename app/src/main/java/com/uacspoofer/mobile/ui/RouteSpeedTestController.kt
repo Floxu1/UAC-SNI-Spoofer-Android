@@ -1094,6 +1094,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             notice = "${manualAdvanceCandidateIds.orEmpty().size} healthy routes promoted from ${stage.title}"
         } finally {
             stageJob = null
+            persistSavedRouteListSnapshot()
         }
     }
 
@@ -1790,8 +1791,11 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         network: NetworkFingerprint,
         signature: String,
     ): List<RouteSpeedRow> {
-        val snapshot = restoreFinalStageSnapshotLight(profile.id, signature, network)
-        if (snapshot.isNotEmpty()) return snapshot
+        val merged = mergeRouteRows(
+            restoreFinalStageSnapshotLight(profile.id, signature, network),
+            restorePersistedRowSnapshot(profile.id, signature, network),
+        )
+        if (merged.isNotEmpty()) return merged
         val champion = adaptiveProfileStore.savedRoute(network, profile, signature)
         val backup = adaptiveProfileStore.savedBackupRoute(network, profile, signature)
         val savedRoutes = listOfNotNull(champion, backup).distinctBy(AdaptiveSavedRoute::id)
@@ -1837,10 +1841,26 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 for (index in 0 until array.length()) {
                     array.optJSONObject(index)?.toSnapshotRow()?.let(::add)
                 }
-            }.let { restored ->
-                filterLateStageSnapshotRows(restored).sortedWith(routeRankingComparator())
-            }
+            }.filter(::isSnapshotEligible).sortedWith(routeRankingComparator())
         }.getOrDefault(emptyList())
+    }
+
+    private fun restorePersistedRowSnapshot(
+        profileId: String,
+        signature: String,
+        network: NetworkFingerprint,
+    ): List<RouteSpeedRow> {
+        if (!preferences.getBoolean(KEY_SESSION_EXISTS, false)) return emptyList()
+        if (preferences.getString(KEY_PROFILE_ID, null) != profileId) return emptyList()
+        if (preferences.getString(KEY_SIGNATURE, null) != signature) return emptyList()
+        if (preferences.getString(KEY_NETWORK_KEY, null) != network.exactStorageKey()) return emptyList()
+        val participantIds = allStageParticipantIds()
+        val restored = participantIds.mapNotNull { candidateId ->
+            preferences.getString(rowKey(candidateId), null)?.let { raw ->
+                runCatching { JSONObject(raw).toSnapshotRow() }.getOrNull()
+            }
+        }.filter(::isSnapshotEligible)
+        return rankedRows(restored)
     }
 
     private fun routeSpeedRowFromAdaptive(saved: AdaptiveSavedRoute): RouteSpeedRow {
@@ -1929,12 +1949,16 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     private fun buildLoadableRouteList(prepared: RouteSpeedTestPlan): List<RouteSpeedRow> {
-        if (hasMatchingSession(prepared)) {
-            val live = persistedFinalRouteListRows()
-            if (live.isNotEmpty()) return live
-        }
-        val snapshot = restoreFinalStageSnapshot(prepared)
-        if (snapshot.isNotEmpty()) return snapshot
+        val merged = mergeRouteRows(
+            if (hasMatchingSession(prepared)) completeSessionSnapshotRows() else emptyList(),
+            restoreFinalStageSnapshotForLoad(prepared),
+            restorePersistedRowSnapshot(
+                prepared.profile.id,
+                prepared.signature,
+                prepared.session.network,
+            ),
+        )
+        if (merged.isNotEmpty()) return merged
         if (hasMatchingSession(prepared)) {
             val ids = restoreStageIds(RouteTournamentStage.CHAMPIONSHIP).orEmpty()
             val championship = rows.filter { it.candidateId in ids }
@@ -2059,6 +2083,51 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         return rankedRows(rows.filter(RouteSpeedRow::usable))
     }
 
+    private fun snapshotSourceRows(): List<RouteSpeedRow> = when {
+        rows.isNotEmpty() -> rows.toList()
+        finalStageRows.isNotEmpty() -> finalStageRows.toList()
+        else -> emptyList()
+    }
+
+    private fun isSnapshotEligible(row: RouteSpeedRow): Boolean =
+        row.observations.isNotEmpty() ||
+            row.confidence > 0 ||
+            row.successfulSamples > 0 ||
+            row.status != RouteSpeedStatus.QUEUED ||
+            row.stageReached.ordinal > RouteTournamentStage.QUALIFIER.ordinal
+
+    private fun allStageParticipantIds(): Set<String> {
+        val ids = LinkedHashSet<String>()
+        RouteTournamentStage.entries
+            .filter { it != RouteTournamentStage.COMPLETE }
+            .forEach { stage ->
+                restoreStageIds(stage).orEmpty().forEach(ids::add)
+            }
+        if (ids.isEmpty()) {
+            preferences.getString(KEY_CANDIDATE_IDS, null)
+                .orEmpty()
+                .lineSequence()
+                .filter(String::isNotBlank)
+                .forEach(ids::add)
+        }
+        return ids
+    }
+
+    private fun mergeRouteRows(vararg lists: List<RouteSpeedRow>): List<RouteSpeedRow> =
+        lists.asSequence()
+            .flatten()
+            .distinctBy(RouteSpeedRow::candidateId)
+            .sortedWith(routeRankingComparator())
+            .toList()
+
+    private fun completeSessionSnapshotRows(): List<RouteSpeedRow> {
+        val source = snapshotSourceRows()
+        if (source.isEmpty()) return persistedFinalRouteListRows()
+        val eligible = source.filter(::isSnapshotEligible)
+        if (eligible.isNotEmpty()) return rankedRows(eligible)
+        return rankedRows(source)
+    }
+
     private fun persistFinalStageSnapshot(candidateIds: List<String>) {
         val finalists = rows.filter { it.candidateId in candidateIds }
             .sortedWith(routeRankingComparator())
@@ -2066,35 +2135,72 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     private fun persistSavedRouteListSnapshot() {
-        val ranked = persistedFinalRouteListRows()
+        val ranked = completeSessionSnapshotRows()
         if (ranked.isEmpty()) return
         persistFinalStageSnapshotRows(ranked)
+    }
+
+    private fun restoreFinalStageSnapshotForLoad(prepared: RouteSpeedTestPlan): List<RouteSpeedRow> {
+        val raw = preferences.getString(finalStageSnapshotKey(prepared), null) ?: return emptyList()
+        return runCatching {
+            val snapshot = JSONObject(raw)
+            val network = prepared.session.network
+            if (
+                snapshot.optString("profileId") != prepared.profile.id ||
+                snapshot.optString("signature") != prepared.signature ||
+                snapshot.optString("networkKey") != network.exactStorageKey() ||
+                snapshot.optString("carrier") != network.carrier ||
+                snapshot.optString("carrierClass") != network.carrierClass
+            ) {
+                return@runCatching emptyList()
+            }
+            finalStageHistoryTitle = buildString {
+                append(snapshot.optString("profileName", "Previous profile"))
+                snapshot.optString("networkLabel", "").takeIf(String::isNotBlank)?.let {
+                    append(" • ").append(it)
+                }
+            }
+            val array = snapshot.optJSONArray("rows") ?: return@runCatching emptyList()
+            buildList {
+                for (index in 0 until array.length()) {
+                    array.optJSONObject(index)?.toSnapshotRow()?.let(::add)
+                }
+            }.filter(::isSnapshotEligible).sortedWith(routeRankingComparator())
+        }.getOrDefault(emptyList())
     }
 
     private fun filterLateStageSnapshotRows(rows: List<RouteSpeedRow>): List<RouteSpeedRow> =
         rows.filter { row -> row.stageReached.ordinal >= RouteTournamentStage.STABILITY.ordinal }
 
     private fun persistFinalStageSnapshotRows(finalists: List<RouteSpeedRow>) {
-        val prepared = plan ?: return
         if (finalists.isEmpty()) return
+        val prepared = plan
+        val profile = prepared?.profile ?: profileLibrary.selectedProfile
+        val signature = prepared?.signature ?: adaptivePlanner.signature(
+            settingsStore.snapshot().validated(),
+            profile,
+        )
+        val network = prepared?.session?.network ?: activeRouteNetwork ?: return
         val snapshot = JSONObject()
-            .put("profileId", prepared.profile.id)
-            .put("profileName", prepared.profile.name)
-            .put("signature", prepared.signature)
-            .put("networkKey", prepared.session.network.exactStorageKey())
-            .put("carrier", prepared.session.network.carrier)
-            .put("carrierClass", prepared.session.network.carrierClass)
-            .put("networkLabel", buildNetworkLabel(prepared))
+            .put("profileId", profile.id)
+            .put("profileName", profile.name)
+            .put("signature", signature)
+            .put("networkKey", network.exactStorageKey())
+            .put("carrier", network.carrier)
+            .put("carrierClass", network.carrierClass)
+            .put("networkLabel", prepared?.let(::buildNetworkLabel) ?: buildNetworkLabelFrom(network))
             .put("savedAt", System.currentTimeMillis())
             .put("tournamentStage", currentStage.name)
             .put("rows", JSONArray().apply { finalists.forEach { put(it.toJson()) } })
-        preferences.edit().putString(finalStageSnapshotKey(prepared), snapshot.toString()).apply()
+        preferences.edit()
+            .putString(finalStageSnapshotKey(profile.id, signature, network), snapshot.toString())
+            .apply()
         finalStageHistoryAvailable = true
-        finalStageHistoryTitle = "${prepared.profile.name} • ${buildNetworkLabel(prepared)}"
+        finalStageHistoryTitle = "${profile.name} • ${prepared?.let(::buildNetworkLabel) ?: buildNetworkLabelFrom(network)}"
     }
 
     private fun hasFinalStageSnapshot(prepared: RouteSpeedTestPlan): Boolean =
-        restoreFinalStageSnapshot(prepared).isNotEmpty()
+        restoreFinalStageSnapshotForLoad(prepared).isNotEmpty()
 
     private fun restoreFinalStageSnapshot(prepared: RouteSpeedTestPlan): List<RouteSpeedRow> {
         val raw = preferences.getString(finalStageSnapshotKey(prepared), null) ?: return emptyList()
@@ -2117,15 +2223,11 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 }
             }
             val array = snapshot.optJSONArray("rows") ?: return@runCatching emptyList()
-            val restored = buildList {
+            buildList {
                 for (index in 0 until array.length()) {
                     array.optJSONObject(index)?.toSnapshotRow()?.let(::add)
                 }
-            }
-            filterRestorableFinalRows(
-                rows = filterLateStageSnapshotRows(restored).sortedWith(routeRankingComparator()),
-                validCandidateIds = prepared.candidates.map(AdaptiveCandidate::id),
-            )
+            }.filter(::isSnapshotEligible).sortedWith(routeRankingComparator())
         }.getOrDefault(emptyList())
     }
 
