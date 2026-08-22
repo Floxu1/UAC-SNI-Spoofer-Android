@@ -1059,6 +1059,49 @@ class ProfileLatencyTester(context: Context) {
         return true
     }
 
+    fun persistRouteSelection(
+        network: NetworkFingerprint,
+        profile: ProxyProfile,
+        signature: String,
+        champion: AdaptiveCandidate,
+        score: Int,
+        metrics: AdaptiveRouteMetrics = AdaptiveRouteMetrics(score),
+        backupCandidate: AdaptiveCandidate? = null,
+        backupScore: Int = 0,
+        backupMetrics: AdaptiveRouteMetrics = AdaptiveRouteMetrics(backupScore),
+    ) {
+        adaptiveProfileStore.recordSavedRoute(
+            network = network,
+            profile = profile,
+            signature = signature,
+            candidate = champion,
+            score = score,
+            metrics = metrics,
+        )
+        if (backupCandidate != null && backupCandidate.id != champion.id) {
+            adaptiveProfileStore.recordSavedBackupRoute(
+                network = network,
+                profile = profile,
+                signature = signature,
+                candidate = backupCandidate,
+                score = backupScore,
+                metrics = backupMetrics,
+            )
+        } else {
+            adaptiveProfileStore.clearSavedBackupRoute(
+                network = network,
+                profile = profile,
+                signature = signature,
+            )
+        }
+        AppLogRepository.info(
+            LogSource.APP,
+            "Route Speed Test selected candidate=${champion.id} profile=${profile.name} " +
+                "network=${network.exactStorageKey()} score=$score " +
+                "backup=${backupCandidate?.id ?: "none"} backupScore=$backupScore",
+        )
+    }
+
     suspend fun measureForSniMaker(
         profile: ProxyProfile,
         session: SniMakerTestSession,

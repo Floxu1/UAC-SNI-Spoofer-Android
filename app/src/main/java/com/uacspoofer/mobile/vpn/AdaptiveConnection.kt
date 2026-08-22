@@ -1090,6 +1090,12 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         }.distinctBy(AdaptiveCandidate::id)
     }
 
+    fun candidateFromSavedRoute(
+        saved: AdaptiveSavedRoute,
+        base: AdvancedSettingsData,
+        profile: ProxyProfile,
+    ): AdaptiveCandidate? = saved.toCandidate(base, profile)
+
     private fun AdaptiveSavedRoute.toCandidate(
         base: AdvancedSettingsData,
         profile: ProxyProfile,

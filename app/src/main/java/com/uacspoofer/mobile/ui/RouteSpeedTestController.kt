@@ -9,6 +9,10 @@ import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.mci.MciEdge
+import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
+import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
+import com.uacspoofer.mobile.profiles.LocalForwardProfile
 import com.uacspoofer.mobile.profiles.ProfileLatencyTester
 import com.uacspoofer.mobile.profiles.ProfileLibrary
 import com.uacspoofer.mobile.profiles.ProfileStore
@@ -271,6 +275,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var plan: RouteSpeedTestPlan? = null
+    private var activeRouteNetwork: NetworkFingerprint? = null
     private var loadJob: Job? = null
     private var loadLastRouteJob: Job? = null
     private var savedRouteLoadJob: Job? = null
@@ -543,45 +548,55 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     fun selectRoute(candidateId: String) {
-        val prepared = plan ?: return
-        val row = rows.firstOrNull { it.candidateId == candidateId } ?: return
+        val row = visibleRows().firstOrNull { it.candidateId == candidateId } ?: return
         if (!row.usable) return
-        val backup = preferredBackupRow(
+        val visibleUsable = visibleRows().filter(RouteSpeedRow::usable)
+        val backupRow = preferredBackupRow(
             champion = row,
-            rankedRows = rankedRows().filter(RouteSpeedRow::usable),
+            rankedRows = visibleUsable,
         )
-        if (
-            tester.selectRouteWinner(
-                plan = prepared,
-                candidateId = candidateId,
-                score = row.score,
-                metrics = row.toAdaptiveRouteMetrics(),
-                backupCandidateId = backup?.candidateId,
-                backupScore = backup?.score ?: 0,
-                backupMetrics = backup?.toAdaptiveRouteMetrics() ?: AdaptiveRouteMetrics(0),
-            )
-        ) {
+        val context = routeSelectionContext() ?: return
+        val settings = settingsStore.snapshot().validated()
+        val championCandidate = resolveCandidateForSelection(context, row, settings) ?: return
+        val backupCandidate = backupRow?.let { resolveCandidateForSelection(context, it, settings) }
+        tester.persistRouteSelection(
+            network = context.network,
+            profile = context.profile,
+            signature = context.signature,
+            champion = championCandidate,
+            score = row.score,
+            metrics = row.toAdaptiveRouteMetrics(),
+            backupCandidate = backupCandidate,
+            backupScore = backupRow?.score ?: 0,
+            backupMetrics = backupRow?.toAdaptiveRouteMetrics() ?: AdaptiveRouteMetrics(0),
+        )
+        val prepared = plan
+        if (prepared != null) {
             preferences.edit().putString(KEY_TEST_PROFILE_ID, prepared.profile.id).apply()
             profileLibrary = runCatching { selectedTestProfileLibrary(profileStore.select(prepared.profile.id)) }
                 .getOrDefault(profileLibrary.copy(selectedId = prepared.profile.id))
-            selectedCandidateId = candidateId
-            backupCandidateId = backup?.candidateId
-            savedRouteProfileName = prepared.profile.name
-            savedChampionLabel = row.label
-            savedBackupLabel = backup?.label
-            savedRouteDetails = buildSavedRouteDetails(
-                prepared,
-                prepared.candidates.firstOrNull { it.id == candidateId }?.toSavedRouteDetails(),
-                backup?.candidateId?.let { id ->
-                    prepared.candidates.firstOrNull { it.id == id }?.toSavedRouteDetails()
-                },
-            )
+        }
+        selectedCandidateId = candidateId
+        backupCandidateId = backupRow?.candidateId
+        recommendedCandidateId = candidateId
+        savedRouteProfileId = context.profile.id
+        savedRouteProfileName = context.profile.name
+        savedChampionLabel = row.label
+        savedBackupLabel = backupRow?.label
+        savedRouteDetails = buildSavedRouteDetails(
+            context.profile,
+            settings,
+            context.network,
+            row.toSavedRouteDetails(),
+            backupRow?.toSavedRouteDetails(),
+        )
+        if (prepared != null) {
             persistSavedRouteListSnapshot()
-            notice = if (backup == null) {
-                "${row.label} saved for this network and configuration"
-            } else {
-                "Champion and backup saved for automatic recovery on this network"
-            }
+        }
+        notice = if (backupRow == null) {
+            "${row.label} saved for this network and configuration"
+        } else {
+            "Champion and backup saved for automatic recovery on this network"
         }
     }
 
@@ -607,7 +622,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 }
                 finalStageRows.clear()
                 finalStageRows.addAll(ranked)
-                ranked.firstOrNull()?.candidateId?.let { recommendedCandidateId = it }
+                activeRouteNetwork = network
+                applyLoadedSavedRouteMarkers(profile, network, signature, ranked)
                 viewingFinalStageHistory = true
                 networkLabel = buildNetworkLabelFrom(network)
                 notice = "Loaded ${ranked.size} routes ranked by ping, speed and overall score"
@@ -1744,6 +1760,31 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             observations.forEach { put(it.toJson()) }
         })
 
+    private fun applyLoadedSavedRouteMarkers(
+        profile: ProxyProfile,
+        network: NetworkFingerprint,
+        signature: String,
+        loadedRows: List<RouteSpeedRow>,
+    ) {
+        val loadedIds = loadedRows.map(RouteSpeedRow::candidateId).toSet()
+        val champion = adaptiveProfileStore.savedRoute(network, profile, signature)
+        val backup = adaptiveProfileStore.savedBackupRoute(network, profile, signature)
+        savedRouteProfileId = champion?.let { profile.id }
+        savedRouteProfileName = champion?.let { profile.name }
+        savedChampionLabel = champion?.label
+        savedBackupLabel = backup?.label
+        val championId = champion?.id?.takeIf { it in loadedIds }
+        val backupId = backup?.id?.takeIf { it in loadedIds && it != championId }
+        if (championId != null) {
+            selectedCandidateId = championId
+            backupCandidateId = backupId
+            recommendedCandidateId = championId
+        } else {
+            loadedRows.firstOrNull()?.candidateId?.let { recommendedCandidateId = it }
+            backupCandidateId = backupId
+        }
+    }
+
     private fun buildLoadableRouteListLight(
         profile: ProxyProfile,
         network: NetworkFingerprint,
@@ -1858,6 +1899,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     private fun applyPreparedPlanState(prepared: RouteSpeedTestPlan, clearHistory: Boolean) {
         profileLibrary = selectedTestProfileLibrary(profileStore.snapshot())
         profileName = prepared.profile.name
+        activeRouteNetwork = prepared.session.network
         networkLabel = buildNetworkLabel(prepared)
         if (clearHistory) {
             viewingFinalStageHistory = false
@@ -2352,6 +2394,133 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         },
         mtu = settings.tunMtu,
         directCompat = runtimeOptions.preserveTransportFields || id.contains("direct-compat", ignoreCase = true),
+    )
+
+    private data class RouteSelectionContext(
+        val profile: ProxyProfile,
+        val network: NetworkFingerprint,
+        val signature: String,
+    )
+
+    private fun routeSelectionContext(): RouteSelectionContext? {
+        val prepared = plan
+        if (prepared != null) {
+            return RouteSelectionContext(
+                profile = prepared.profile,
+                network = prepared.session.network,
+                signature = prepared.signature,
+            )
+        }
+        val network = activeRouteNetwork ?: return null
+        val profile = profileLibrary.selectedProfile
+        val settings = settingsStore.snapshot().validated()
+        return RouteSelectionContext(
+            profile = profile,
+            network = network,
+            signature = adaptivePlanner.signature(settings, profile),
+        )
+    }
+
+    private fun resolveCandidateForSelection(
+        context: RouteSelectionContext,
+        row: RouteSpeedRow,
+        settings: AdvancedSettingsData,
+    ): AdaptiveCandidate? {
+        plan?.candidates?.firstOrNull { it.id == row.candidateId }?.let { return it }
+        findStoredSavedRoute(context, row.candidateId)?.let { saved ->
+            return adaptivePlanner.candidateFromSavedRoute(saved, settings, context.profile)
+        }
+        return candidateFromRouteRow(row, settings, context.profile)
+    }
+
+    private fun findStoredSavedRoute(
+        context: RouteSelectionContext,
+        candidateId: String,
+    ): AdaptiveSavedRoute? {
+        val champion = adaptiveProfileStore.savedRoute(
+            context.network,
+            context.profile,
+            context.signature,
+        )
+        val backup = adaptiveProfileStore.savedBackupRoute(
+            context.network,
+            context.profile,
+            context.signature,
+        )
+        return when (candidateId) {
+            champion?.id -> champion
+            backup?.id -> backup
+            else -> null
+        }
+    }
+
+    private fun candidateFromRouteRow(
+        row: RouteSpeedRow,
+        base: AdvancedSettingsData,
+        profile: ProxyProfile,
+    ): AdaptiveCandidate {
+        val (address, port) = parseEdgeKey(row.edgeKey)
+        val resolver = AdaptiveDnsResolvers.all.firstOrNull { it.id == row.resolverKey } ?: AdaptiveDnsResolvers.CLOUDFLARE
+        val fragmentOff = row.fragmentKey.equals("Fragment off", ignoreCase = true)
+        val fragmentParts = row.fragmentKey.substringBefore(" •").split('/')
+        val maxSplit = if (fragmentOff) {
+            1
+        } else {
+            fragmentParts.getOrNull(1)?.toIntOrNull()?.coerceIn(1, 10_000) ?: 2
+        }
+        val delayMs = if (fragmentOff) {
+            0
+        } else {
+            fragmentParts.getOrNull(2)?.removeSuffix("ms")?.toIntOrNull()?.coerceIn(0, 60_000) ?: 0
+        }
+        val packet = fragmentParts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: base.finalmaskPacket
+        val parsedIdentity = when {
+            profile.usesAdvancedSettingsIdentity() -> null
+            LocalForwardProfile.isLocalForward(profile) -> LocalForwardProfile.routingIdentity(profile, base)
+            else -> DirectCompatProfileParser.parse(profile)?.identity ?: profile.runtimeIdentity(base)
+        }
+        return AdaptiveCandidate(
+            id = row.candidateId,
+            label = row.label,
+            edge = MciEdge(
+                address = address,
+                port = port,
+                role = "saved-route",
+                finalmaskMaxSplit = maxSplit,
+            ),
+            settings = base.copy(
+                dnsResolverUrl = resolver.url,
+                finalmaskPacket = packet,
+                finalmaskDelayMs = delayMs,
+                tunMtu = row.mtu,
+            ).validated(),
+            runtimeOptions = MciXrayRuntimeOptions(
+                identityOverride = parsedIdentity,
+                finalmaskEnabled = !fragmentOff,
+                preserveEmptyAlpn = !profile.usesAdvancedSettingsIdentity(),
+                preserveTransportFields = !profile.usesAdvancedSettingsIdentity(),
+            ),
+        )
+    }
+
+    private fun parseEdgeKey(edgeKey: String): Pair<String, Int> {
+        val lastColon = edgeKey.lastIndexOf(':')
+        require(lastColon > 0) { "Invalid edge key: $edgeKey" }
+        val address = edgeKey.substring(0, lastColon)
+        val port = edgeKey.substring(lastColon + 1).toIntOrNull() ?: 443
+        return address to port
+    }
+
+    private fun RouteSpeedRow.toSavedRouteDetails() = SavedRouteDetails(
+        id = candidateId,
+        label = label,
+        edge = edgeKey,
+        role = "saved-route",
+        resolver = resolverKey,
+        fragment = fragmentKey,
+        mtu = mtu,
+        directCompat = candidateId.contains("direct-compat", ignoreCase = true) ||
+            candidateId.contains("matrix-direct", ignoreCase = true),
     )
 
     private fun startKeepAliveService() {
