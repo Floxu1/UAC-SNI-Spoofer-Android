@@ -8,6 +8,7 @@ import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.RuntimeProxyIdentity
+import com.uacspoofer.mobile.profiles.TlsAlpnResolver
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import java.net.IDN
 import java.net.InetAddress
@@ -380,7 +381,7 @@ internal class CloudflareEdgeDiscovery(
             port = originalPort,
             candidates = builders.values,
             ranges = ranges.ranges,
-            trustedProfile = profile.isBuiltIn,
+            trustedProfile = profile.usesAdvancedSettingsIdentity(),
         )
         if (decision.status == CloudflareSuitability.ELIGIBLE) {
             val usableRanges = ranges.ranges.filter { cidr ->
@@ -713,7 +714,7 @@ internal fun effectiveDiscoveryAlpn(identity: RuntimeProxyIdentity): List<String
 }
 
 private fun explicitDiscoveryAlpn(identity: RuntimeProxyIdentity): List<String> =
-    identity.alpn.split(',').map(String::trim).filter(String::isNotBlank)
+    TlsAlpnResolver.parseValues(identity.alpn)
 
 internal fun normalizeDiscoveryHostname(raw: String): String? {
     var value = raw.trim().trimEnd('.')

@@ -36,17 +36,6 @@ internal enum class MakerTestStatus { QUEUED, TESTING, HEALTHY, FAILED }
 
 internal enum class MakerImportSource { SUBSCRIPTION, CLIPBOARD }
 
-internal enum class MakerTestMode(val storageValue: String) {
-    COMPATIBILITY("compatibility"),
-    DEEP_ADAPTIVE("deep_adaptive");
-
-    companion object {
-        fun fromStorage(value: String?): MakerTestMode = entries.firstOrNull {
-            it.storageValue == value
-        } ?: COMPATIBILITY
-    }
-}
-
 internal enum class MakerSortMode {
     ORIGINAL,
     HEALTHY_FIRST,
@@ -110,10 +99,6 @@ internal class SniMakerController(context: Context) : Closeable {
     var importSource by mutableStateOf(MakerImportSource.SUBSCRIPTION)
         private set
     var sortMode by mutableStateOf(MakerSortMode.HEALTHY_FIRST)
-        private set
-    var testMode by mutableStateOf(
-        MakerTestMode.fromStorage(preferences.getString(KEY_TEST_MODE, null)),
-    )
         private set
     var workerCount by mutableIntStateOf(
         preferences.getInt(KEY_WORKERS, DEFAULT_WORKERS).coerceIn(MIN_WORKERS, MAX_WORKERS),
@@ -193,18 +178,12 @@ internal class SniMakerController(context: Context) : Closeable {
         persistTestSettings()
     }
 
-    fun updateTestMode(value: MakerTestMode) {
-        testMode = value
-        persistTestSettings()
-    }
-
     fun updateTimeoutMs(value: Int) {
         timeoutMs = normalizeTimeout(value)
         persistTestSettings()
     }
 
     fun resetTestSettings() {
-        testMode = MakerTestMode.COMPATIBILITY
         workerCount = DEFAULT_WORKERS
         timeoutMs = DEFAULT_TIMEOUT_MS
         persistTestSettings()
@@ -295,8 +274,7 @@ internal class SniMakerController(context: Context) : Closeable {
             return
         }
         val generation = ++testGeneration
-        val modeSnapshot = testMode
-        val workersSnapshot = if (modeSnapshot == MakerTestMode.COMPATIBILITY) 1 else workerCount
+        val workersSnapshot = workerCount
         val timeoutSnapshot = timeoutMs
         testing = true
         val resetRows = rows.map { row ->
@@ -322,16 +300,9 @@ internal class SniMakerController(context: Context) : Closeable {
         notice = "Preparing adaptive test for ${rows.size} configs…"
         testJob = scope.launch {
             try {
-                val session = if (modeSnapshot == MakerTestMode.DEEP_ADAPTIVE) {
-                    withContext(Dispatchers.IO) { tester.prepareSniMakerSession() }
-                } else {
-                    null
-                }
-                val preferredCandidate = AtomicReference(session?.initialPreferredCandidateId)
-                notice = when (modeSnapshot) {
-                    MakerTestMode.COMPATIBILITY -> "Compatibility Scan | ${rows.size} configs | Configs ping method"
-                    MakerTestMode.DEEP_ADAPTIVE -> "Deep Adaptive Test | ${rows.size} configs | $workersSnapshot workers | ${timeoutSnapshot}ms"
-                }
+                val session = withContext(Dispatchers.IO) { tester.prepareSniMakerSession() }
+                val preferredCandidate = AtomicReference(session.initialPreferredCandidateId)
+                notice = "Deep Adaptive Test | ${rows.size} configs | $workersSnapshot workers | ${timeoutSnapshot}ms"
                 coroutineScope {
                     val queue = Channel<Int>(workersSnapshot * 2)
                     val workers = List(workersSnapshot) {
@@ -341,24 +312,21 @@ internal class SniMakerController(context: Context) : Closeable {
                                     rows[index].also { rows[index] = it.copy(status = MakerTestStatus.TESTING) }
                                 }
                                 val updated = try {
-                                    val result = when (modeSnapshot) {
-                                        MakerTestMode.COMPATIBILITY -> tester.measureCompatibilityScan(startingRow.profile)
-                                        MakerTestMode.DEEP_ADAPTIVE -> tester.measureForSniMaker(
-                                            profile = startingRow.profile,
-                                            session = requireNotNull(session),
-                                            preferredCandidateId = preferredCandidate.get(),
-                                            totalTimeoutMs = timeoutSnapshot,
-                                            onCandidateProgress = { progress ->
-                                                withContext(Dispatchers.Main.immediate) {
-                                                    if (generation == testGeneration && index < rows.size &&
-                                                        rows[index].profile.id == startingRow.profile.id
-                                                    ) {
-                                                        rows[index] = rows[index].withCandidate(progress)
-                                                    }
+                                    val result = tester.measureForSniMaker(
+                                        profile = startingRow.profile,
+                                        session = session,
+                                        preferredCandidateId = preferredCandidate.get(),
+                                        totalTimeoutMs = timeoutSnapshot,
+                                        onCandidateProgress = { progress ->
+                                            withContext(Dispatchers.Main.immediate) {
+                                                if (generation == testGeneration && index < rows.size &&
+                                                    rows[index].profile.id == startingRow.profile.id
+                                                ) {
+                                                    rows[index] = rows[index].withCandidate(progress)
                                                 }
-                                            },
-                                        )
-                                    }
+                                            }
+                                        },
+                                    )
                                     if (result.candidateId.isNotBlank()) {
                                         preferredCandidate.set(result.candidateId)
                                     }
@@ -381,11 +349,7 @@ internal class SniMakerController(context: Context) : Closeable {
                                         candidateCount = if (result.candidateId.isNotBlank()) 1 else 0,
                                         candidateStage = SniCandidateStage.PASSED,
                                         candidateDetail = result.probeDetail,
-                                        candidateRoute = if (modeSnapshot == MakerTestMode.COMPATIBILITY) {
-                                            "5 HTTPS probes | 3 successes required | country via exit IP"
-                                        } else {
-                                            latestRow.candidateRoute
-                                        },
+                                        candidateRoute = latestRow.candidateRoute,
                                     )
                                 } catch (cancelled: CancellationException) {
                                     throw cancelled
@@ -513,7 +477,6 @@ internal class SniMakerController(context: Context) : Closeable {
 
     private fun persistTestSettings() {
         preferences.edit()
-            .putString(KEY_TEST_MODE, testMode.storageValue)
             .putInt(KEY_WORKERS, workerCount)
             .putInt(KEY_TIMEOUT, timeoutMs)
             .apply()
@@ -619,7 +582,6 @@ internal class SniMakerController(context: Context) : Closeable {
         private const val KEY_URL = "subscription_url"
         private const val KEY_WORKERS = "test_workers"
         private const val KEY_TIMEOUT = "test_timeout_ms"
-        private const val KEY_TEST_MODE = "test_mode"
         private const val KEY_ADAPTIVE_TEST_MIGRATION = "adaptive_test_settings_v1"
         private const val LEGACY_DEFAULT_WORKERS = 6
         private const val LEGACY_DEFAULT_TIMEOUT_MS = 8_000

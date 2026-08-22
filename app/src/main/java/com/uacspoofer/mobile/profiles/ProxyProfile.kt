@@ -33,8 +33,10 @@ data class ProxyProfile(
     val rawUri: String = "",
     val isBuiltIn: Boolean = false,
 ) {
+    fun usesAdvancedSettingsIdentity(): Boolean = isBuiltIn && id == BUILT_IN_ID
+
     fun runtimeIdentity(settings: AdvancedSettingsData): RuntimeProxyIdentity =
-        if (isBuiltIn) {
+        if (usesAdvancedSettingsIdentity()) {
             RuntimeProxyIdentity(
                 protocol = ProxyProtocol.TROJAN,
                 credential = settings.trojanPassword,
@@ -74,6 +76,7 @@ data class ProxyProfile(
 
     companion object {
         const val BUILT_IN_ID = "builtin:mci"
+        const val BUILT_IN_2_ID = "builtin:mci2"
 
         val UAC_SNI_BUILT_IN = ProxyProfile(
             id = BUILT_IN_ID,
@@ -92,6 +95,29 @@ data class ProxyProfile(
             country = CountryMetadata.resolve("FR", "France"),
             isBuiltIn = true,
         )
+
+        val UAC_SNI_BUILT_IN_2 = ProxyProfile(
+            id = BUILT_IN_2_ID,
+            name = "UAC SNI built-in 2",
+            protocol = ProxyProtocol.TROJAN,
+            credential = "humanity",
+            serverHost = "127.0.0.1",
+            serverPort = 40443,
+            network = "ws",
+            security = "tls",
+            sni = "api-ir.behroozuac.dpdns.org",
+            host = "api-ir.behroozuac.dpdns.org",
+            path = "/assignment",
+            alpn = "http/1.1",
+            fingerprint = "chrome",
+            country = CountryMetadata.resolve("NL", "Netherlands"),
+            rawUri = "trojan://humanity@127.0.0.1:40443?type=ws&security=tls&sni=api-ir.behroozuac.dpdns.org&host=api-ir.behroozuac.dpdns.org&path=%2Fassignment&alpn=http%2F1.1&fp=chrome#humanity-user",
+            isBuiltIn = true,
+        )
+
+        val BUILT_IN_PROFILES = listOf(UAC_SNI_BUILT_IN, UAC_SNI_BUILT_IN_2)
+
+        fun isProtectedBuiltIn(id: String): Boolean = id == BUILT_IN_ID || id == BUILT_IN_2_ID
     }
 }
 
@@ -117,7 +143,7 @@ data class ProfileLibrary(
     val customProfiles: List<ProxyProfile>,
     val selectedId: String,
 ) {
-    val allProfiles: List<ProxyProfile> get() = listOf(ProxyProfile.UAC_SNI_BUILT_IN) + customProfiles
+    val allProfiles: List<ProxyProfile> get() = ProxyProfile.BUILT_IN_PROFILES + customProfiles
     val selectedProfile: ProxyProfile
         get() = allProfiles.firstOrNull { it.id == selectedId } ?: ProxyProfile.UAC_SNI_BUILT_IN
 }

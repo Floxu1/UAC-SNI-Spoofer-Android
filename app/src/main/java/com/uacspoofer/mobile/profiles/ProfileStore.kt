@@ -21,7 +21,7 @@ class ProfileStore(context: Context) {
         val profiles = readProfiles()
         val requested = prefs.getString(KEY_SELECTED, ProxyProfile.BUILT_IN_ID) ?: ProxyProfile.BUILT_IN_ID
         val selected = requested.takeIf { id ->
-            id == ProxyProfile.BUILT_IN_ID || profiles.any { it.id == id }
+            ProxyProfile.isProtectedBuiltIn(id) || profiles.any { it.id == id }
         } ?: ProxyProfile.BUILT_IN_ID
         if (selected != requested) prefs.edit().putString(KEY_SELECTED, selected).apply()
         return ProfileLibrary(profiles, selected)
@@ -91,7 +91,7 @@ class ProfileStore(context: Context) {
 
     @Synchronized
     fun update(id: String, rawUri: String, name: String): ProfileLibrary {
-        require(id != ProxyProfile.BUILT_IN_ID) { "Built-in profile is read-only" }
+        require(!ProxyProfile.isProtectedBuiltIn(id)) { "Built-in profile is read-only" }
         val current = snapshot().customProfiles.toMutableList()
         val index = current.indexOfFirst { it.id == id }
         require(index >= 0) { "Profile is no longer available" }
@@ -102,7 +102,7 @@ class ProfileStore(context: Context) {
 
     @Synchronized
     fun updateCountry(id: String, country: CountryMetadata): ProfileLibrary {
-        require(id != ProxyProfile.BUILT_IN_ID) { "Built-in profile is read-only" }
+        require(!ProxyProfile.isProtectedBuiltIn(id)) { "Built-in profile is read-only" }
         if (!country.isKnown) return snapshot()
         val current = snapshot().customProfiles.toMutableList()
         val index = current.indexOfFirst { it.id == id }
@@ -120,7 +120,7 @@ class ProfileStore(context: Context) {
 
     @Synchronized
     fun deleteMany(ids: Set<String>): ProfileLibrary {
-        require(ProxyProfile.BUILT_IN_ID !in ids) { "Built-in profile is read-only" }
+        require(ProxyProfile.BUILT_IN_ID !in ids && ProxyProfile.BUILT_IN_2_ID !in ids) { "Built-in profile is read-only" }
         if (ids.isEmpty()) return snapshot()
         val before = snapshot()
         val remaining = before.customProfiles.filterNot { it.id in ids }

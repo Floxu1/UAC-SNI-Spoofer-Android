@@ -198,17 +198,6 @@ class ProfileLatencyTester(context: Context) {
             parallelProbes = false,
         ).latencyMs
 
-    suspend fun measureCompatibilityScan(profile: ProxyProfile): SniProfileProbeResult =
-        measureInternal(
-            profile = profile,
-            probeCount = PROBE_COUNT,
-            minSuccessCount = MIN_SUCCESS_COUNT,
-            resolveCountry = true,
-            probeTimeoutMs = PROBE_TIMEOUT_MS,
-            parallelProbes = true,
-        )
-
-    
     suspend fun prepareSniMakerSession(): SniMakerTestSession = withContext(Dispatchers.IO) {
         val settings = settingsStore.snapshot().validated()
         val network = fingerprintResolver.captureAdaptive()
@@ -306,7 +295,7 @@ class ProfileLatencyTester(context: Context) {
                 detail = "Combining Edge, DNS, tuning and MTU routes",
             ),
         )
-        val cloudflareEligible = profile.isBuiltIn || discovery.suitability.status == CloudflareSuitability.ELIGIBLE
+        val cloudflareEligible = profile.usesAdvancedSettingsIdentity() || discovery.suitability.status == CloudflareSuitability.ELIGIBLE
         val candidates = adaptivePlanner.routeSpeedCandidates(
             base = settings,
             network = network,
@@ -398,7 +387,7 @@ class ProfileLatencyTester(context: Context) {
             return discovery
         }
         val validationCandidates = buildList {
-            val customRuntime = if (profile.isBuiltIn) {
+            val customRuntime = if (profile.usesAdvancedSettingsIdentity()) {
                 com.uacspoofer.mobile.mci.MciXrayRuntimeOptions.DEFAULT
             } else {
                 com.uacspoofer.mobile.mci.MciXrayRuntimeOptions(

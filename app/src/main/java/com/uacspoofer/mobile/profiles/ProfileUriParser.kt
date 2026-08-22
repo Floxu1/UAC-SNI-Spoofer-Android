@@ -61,7 +61,7 @@ object ProfileUriParser {
             .ifBlank { sourceServerHost }
         val host = query["host"].orEmpty().ifBlank { sni }
         val path = normalizePath(query["path"].orEmpty(), network)
-        val alpn = query["alpn"].orEmpty().ifBlank { if (network == "grpc") "h2" else "http/1.1" }
+        val alpn = TlsAlpnResolver.canonicalString(query["alpn"].orEmpty(), network)
         val fingerprint = query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() }.ifBlank { "chrome" }
         val allowInsecure = parseBoolean(query["allowinsecure"] ?: query["insecure"])
         val serviceName = query["servicename"].orEmpty()
@@ -123,7 +123,8 @@ object ProfileUriParser {
     }
 
     fun canonicalUri(profile: ProxyProfile): String {
-        if (profile.isBuiltIn) return ""
+        if (profile.usesAdvancedSettingsIdentity()) return ""
+        if (profile.rawUri.isNotBlank()) return profile.rawUri
         if (profile.protocol == ProxyProtocol.VMESS) {
             val payload = JSONObject()
                 .put("v", "2")

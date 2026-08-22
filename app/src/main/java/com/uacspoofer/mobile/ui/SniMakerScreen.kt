@@ -1259,12 +1259,30 @@ private fun TestSettingsSheet(
                     )
                 }
             }
-            TestModeDropdown(
-                selected = controller.testMode,
-                onSelected = controller::updateTestMode,
-            )
-            if (controller.testMode == MakerTestMode.DEEP_ADAPTIVE) {
-                SettingStepper(
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color(0xB30A1826),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    Text(homeText("Test method", "روش تست"), color = Color(0xFF77CEE9), fontSize = 11.sp)
+                    Text(
+                        homeText("Deep Adaptive Test", "تست تطبیقی عمیق"),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        homeText(
+                            "Hard test across Edge, DNS and Fragment candidates",
+                            "همه گزینه‌های مسیر با تست سخت بررسی می‌شن",
+                        ),
+                        color = UacColors.TextSecondary,
+                        fontSize = 11.5.sp,
+                        lineHeight = 16.sp,
+                    )
+                }
+            }
+            SettingStepper(
                     title = homeText("Concurrent tests", "تست‌های هم‌زمان"),
                     subtitle = homeText("More threads are faster but use more memory", "تعداد بیشتر سریع‌تره، ولی حافظه بیشتری مصرف می‌کنه"),
                     valueText = controller.workerCount.toString(),
@@ -1281,8 +1299,7 @@ private fun TestSettingsSheet(
                     canIncrease = controller.timeoutMs < SniMakerController.MAX_TIMEOUT_MS,
                     onDecrease = { controller.updateTimeoutMs(controller.timeoutMs - SniMakerController.TIMEOUT_STEP_MS) },
                     onIncrease = { controller.updateTimeoutMs(controller.timeoutMs + SniMakerController.TIMEOUT_STEP_MS) },
-                )
-            }
+            )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 TextButton(
                     onClick = controller::resetTestSettings,
@@ -1303,91 +1320,6 @@ private fun TestSettingsSheet(
             }
         }
     }
-    }
-}
-
-@Composable
-private fun TestModeDropdown(
-    selected: MakerTestMode,
-    onSelected: (MakerTestMode) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val title = when (selected) {
-        MakerTestMode.COMPATIBILITY -> homeText("Compatibility Scan", "تست سازگاری")
-        MakerTestMode.DEEP_ADAPTIVE -> homeText("Deep Adaptive Test", "تست تطبیقی عمیق")
-    }
-    val subtitle = when (selected) {
-        MakerTestMode.COMPATIBILITY -> homeText(
-            "Same reliable ping method used in Configs + country flag",
-            "همان روش پینگ مطمئن بخش کانفیگ‌ها همراه با پرچم کشور",
-        )
-        MakerTestMode.DEEP_ADAPTIVE -> homeText(
-            "Hard test across Edge, DNS and Fragment candidates",
-            "همه گزینه‌های مسیر با تست سخت بررسی می‌شن",
-        )
-    }
-    Box(Modifier.fillMaxWidth()) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = true }
-                .border(1.dp, Color(0x5535D6FF), RoundedCornerShape(14.dp)),
-            color = Color(0xB30A1826),
-            shape = RoundedCornerShape(14.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(homeText("Test method", "روش تست"), color = Color(0xFF77CEE9), fontSize = 11.sp)
-                    Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    Text(subtitle, color = UacColors.TextSecondary, fontSize = 11.5.sp, lineHeight = 16.sp)
-                }
-                Icon(Icons.Outlined.KeyboardArrowDown, homeText("Select test method", "انتخاب روش تست"), tint = Color(0xFF35D6FF))
-            }
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            modifier = Modifier
-                .widthIn(min = 300.dp)
-                .background(Color(0xFF132433)),
-        ) {
-            MakerTestMode.entries.forEach { mode ->
-                val modeTitle = when (mode) {
-                    MakerTestMode.COMPATIBILITY -> homeText("Compatibility Scan (Default)", "تست سازگاری (پیش‌فرض)")
-                    MakerTestMode.DEEP_ADAPTIVE -> homeText("Deep Adaptive Test", "تست تطبیقی عمیق")
-                }
-                val modeSubtitle = when (mode) {
-                    MakerTestMode.COMPATIBILITY -> homeText(
-                        "Configs ping method + automatic country flag",
-                        "روش پینگ بخش کانفیگ‌ها همراه با پرچم خودکار کشور",
-                    )
-                    MakerTestMode.DEEP_ADAPTIVE -> homeText(
-                        "Hard Edge, DNS and Fragment candidate test",
-                        "همه گزینه‌های مسیر با تست سخت بررسی می‌شن",
-                    )
-                }
-                DropdownMenuItem(
-                    text = {
-                        Column {
-                            Text(
-                                modeTitle,
-                                color = if (mode == selected) Color(0xFF35D6FF) else Color.White,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            Text(modeSubtitle, color = UacColors.TextSecondary, fontSize = 11.sp, lineHeight = 15.sp)
-                        }
-                    },
-                    onClick = {
-                        onSelected(mode)
-                        expanded = false
-                    },
-                )
-            }
-        }
     }
 }
 
@@ -1445,10 +1377,6 @@ private fun localizedMakerNotice(message: String): String {
         message.startsWith("Preparing adaptive test for ") -> {
             val count = message.substringAfter("for ").substringBefore(' ')
             "در حال آماده‌سازی تست تطبیقی برای $count کانفیگ…"
-        }
-        message.startsWith("Compatibility Scan | ") -> {
-            val count = message.substringAfter("| ").substringBefore(' ')
-            "تست سازگاری • $count کانفیگ • روش پینگ بخش کانفیگ‌ها"
         }
         message.startsWith("Deep Adaptive Test | ") -> {
             val parts = message.split(" | ")

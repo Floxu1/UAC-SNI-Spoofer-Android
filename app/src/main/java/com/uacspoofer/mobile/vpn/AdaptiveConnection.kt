@@ -522,7 +522,7 @@ internal fun prioritizeAdaptiveCandidates(
 }
 
 internal fun AdaptiveCandidate.isDirectCompatRoute(profile: ProxyProfile): Boolean {
-    if (profile.isBuiltIn) return false
+    if (profile.usesAdvancedSettingsIdentity()) return false
     val direct = DirectCompatProfileParser.parse(profile)
     val originalAddress = direct?.address ?: profile.serverHost
     val originalPort = direct?.port ?: profile.serverPort
@@ -852,7 +852,7 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         val fallback = MciEdge(settings.fallbackAddress, settings.fallbackPort, "fallback", settings.fallbackMaxSplit)
         val cdnRescueA = MciEdge(settings.telegramFallbackAddress, settings.telegramPort, "cdn-rescue-a", 2)
         val cdnRescueB = MciEdge(settings.telegramAddress, settings.telegramPort, "cdn-rescue-b", 100)
-        val directCompat = if (network.carrierClass == "mci" && !profile.isBuiltIn) {
+        val directCompat = if (network.carrierClass == "mci" && !profile.usesAdvancedSettingsIdentity()) {
             DirectCompatProfileParser.parse(profile)
         } else {
             null
@@ -968,7 +968,7 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
             .take(RouteTestArchitecture.EDGE_LIMIT)
         val mtuValues = RouteTestArchitecture.mtuValues(settings.tunMtu)
         val tuningProfiles = RouteTestArchitecture.tuningProfiles(settings)
-        val directProfile = if (!profile.isBuiltIn) {
+        val directProfile = if (!profile.usesAdvancedSettingsIdentity()) {
             DirectCompatProfileParser.parse(profile) ?: DirectCompatProfile(
                 address = profile.serverHost,
                 port = profile.serverPort,
@@ -1088,7 +1088,7 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
                 preserveTransportFields = true,
             )
         } else {
-            val parsedIdentity = if (profile.isBuiltIn) {
+            val parsedIdentity = if (profile.usesAdvancedSettingsIdentity()) {
                 null
             } else {
                 DirectCompatProfileParser.parse(profile)?.identity ?: profile.runtimeIdentity(base)
@@ -1096,8 +1096,8 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
             MciXrayRuntimeOptions(
                 identityOverride = parsedIdentity,
                 finalmaskEnabled = finalmaskEnabled,
-                preserveEmptyAlpn = !profile.isBuiltIn,
-                preserveTransportFields = !profile.isBuiltIn,
+                preserveEmptyAlpn = !profile.usesAdvancedSettingsIdentity(),
+                preserveTransportFields = !profile.usesAdvancedSettingsIdentity(),
                 muxEnabledOverride = muxEnabledOverride,
             )
         }

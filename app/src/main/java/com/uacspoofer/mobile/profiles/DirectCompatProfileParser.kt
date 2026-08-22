@@ -13,7 +13,7 @@ data class DirectCompatProfile(
 
 object DirectCompatProfileParser {
     fun parse(profile: ProxyProfile): DirectCompatProfile? {
-        if (profile.isBuiltIn || profile.rawUri.isBlank()) return null
+        if (profile.usesAdvancedSettingsIdentity() || profile.rawUri.isBlank()) return null
         return runCatching {
             if (profile.rawUri.startsWith("vmess://", ignoreCase = true)) {
                 parseVmess(profile.rawUri)
@@ -67,7 +67,7 @@ object DirectCompatProfileParser {
                 sni = sni,
                 host = query["host"].orEmpty(),
                 path = query["path"].orEmpty(),
-                alpn = query["alpn"].orEmpty(),
+                alpn = TlsAlpnResolver.canonicalString(query["alpn"].orEmpty(), network),
                 fingerprint = query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() },
                 allowInsecure = boolean(query["allowinsecure"] ?: query["insecure"]),
                 flow = query["flow"].orEmpty(),
