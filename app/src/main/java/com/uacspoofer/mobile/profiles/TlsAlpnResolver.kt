@@ -24,7 +24,7 @@ object TlsAlpnResolver {
     }
 
     fun resolveForTransport(network: String, rawAlpn: String): List<String> {
-        val requested = parseValues(rawAlpn)
+        val requested = parseValues(canonicalString(rawAlpn, network))
         return when (network.lowercase()) {
             "grpc" -> buildList {
                 if (requested.any { it.equals("h2", ignoreCase = true) }) add("h2")
@@ -36,6 +36,18 @@ object TlsAlpnResolver {
                 requested.filterNot { isHttp11(it) }.forEach { add(it) }
             }
             else -> requested.ifEmpty { listOf("http/1.1") }
+        }
+    }
+
+    fun resolveForXray(
+        network: String,
+        rawAlpn: String,
+        preserveEmptyAlpn: Boolean,
+    ): List<String> {
+        if (preserveEmptyAlpn) return emptyList()
+        val resolved = resolveForTransport(network, rawAlpn)
+        return resolved.ifEmpty {
+            listOf(if (network.equals("grpc", ignoreCase = true)) "h2" else "http/1.1")
         }
     }
 

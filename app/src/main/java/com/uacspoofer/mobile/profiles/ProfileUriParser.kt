@@ -82,8 +82,8 @@ object ProfileUriParser {
             name = name,
             protocol = protocol,
             credential = credential,
-            serverHost = LOCAL_FORWARD_HOST,
-            serverPort = LOCAL_FORWARD_PORT,
+            serverHost = LocalForwardProfile.HOST,
+            serverPort = LocalForwardProfile.PORT,
             network = network,
             security = security,
             sni = sni,
@@ -208,8 +208,8 @@ object ProfileUriParser {
             name = name,
             protocol = ProxyProtocol.VMESS,
             credential = credential,
-            serverHost = LOCAL_FORWARD_HOST,
-            serverPort = LOCAL_FORWARD_PORT,
+            serverHost = LocalForwardProfile.HOST,
+            serverPort = LocalForwardProfile.PORT,
             network = network,
             security = security,
             sni = sni,
@@ -333,6 +333,4 @@ object ProfileUriParser {
 
     private fun newId(): String = "profile:${UUID.randomUUID()}"
 
-    private const val LOCAL_FORWARD_HOST = "127.0.0.1"
-    private const val LOCAL_FORWARD_PORT = 40443
 }

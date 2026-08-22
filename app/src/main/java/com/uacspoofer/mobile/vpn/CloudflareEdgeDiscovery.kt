@@ -6,6 +6,7 @@ import android.os.Build
 import com.uacspoofer.mobile.BuildConfig
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
+import com.uacspoofer.mobile.profiles.LocalForwardProfile
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.RuntimeProxyIdentity
 import com.uacspoofer.mobile.profiles.TlsAlpnResolver
@@ -294,10 +295,21 @@ internal class CloudflareEdgeDiscovery(
             ),
         )
         val ranges = runCatching { rangeSource.load(network) }.getOrElse { bundledCloudflareRanges() }
-        val identity = profile.runtimeIdentity(validated)
-        val direct = DirectCompatProfileParser.parse(profile)
-        val originalAddress = direct?.address.orEmpty().ifBlank { profile.serverHost }
-        val originalPort = direct?.port ?: profile.serverPort
+        val localForward = LocalForwardProfile.isLocalForward(profile)
+        val identity = if (localForward) {
+            LocalForwardProfile.routingIdentity(profile, validated)
+        } else {
+            profile.runtimeIdentity(validated)
+        }
+        val direct = if (localForward) null else DirectCompatProfileParser.parse(profile)
+        val originalAddress = when {
+            localForward -> identity.sni.ifBlank { identity.host }.ifBlank { profile.sni }
+            else -> direct?.address.orEmpty().ifBlank { profile.serverHost }
+        }
+        val originalPort = when {
+            localForward -> LocalForwardProfile.ROUTING_PORT
+            else -> direct?.port ?: profile.serverPort
+        }
         val builders = LinkedHashMap<String, MutableCandidate>()
         val resolvedCache = LinkedHashMap<String, List<IpAddress>>()
         onProgress(
@@ -714,7 +726,10 @@ internal fun effectiveDiscoveryAlpn(identity: RuntimeProxyIdentity): List<String
 }
 
 private fun explicitDiscoveryAlpn(identity: RuntimeProxyIdentity): List<String> =
-    TlsAlpnResolver.parseValues(identity.alpn)
+    TlsAlpnResolver.resolveForTransport(
+        identity.network,
+        TlsAlpnResolver.canonicalString(identity.alpn, identity.network),
+    )
 
 internal fun normalizeDiscoveryHostname(raw: String): String? {
     var value = raw.trim().trimEnd('.')

@@ -72,15 +72,26 @@ class AdaptiveCandidateSignatureTest {
     @Test
     fun realDirectEndpointAndIdentityChangeThePlanSignature() {
         val settings = AdvancedSettingsData.DEFAULT
-        val first = importedProfile("origin-a.example", 443, "")
-        val changedAddress = importedProfile("origin-b.example", 443, "")
-        val changedPort = importedProfile("origin-a.example", 8443, "")
-        val changedDirectAlpn = importedProfile("origin-a.example", 443, "http%2F1.1")
+        val first = directCompatProfile("origin-a.example", 443, "")
+        val changedAddress = directCompatProfile("origin-b.example", 443, "")
+        val changedPort = directCompatProfile("origin-a.example", 8443, "")
+        val changedDirectAlpn = directCompatProfile("origin-a.example", 443, "h2")
         val baseline = AdaptiveCandidatePlanner.signatureFor(settings, first)
 
         assertNotEquals(baseline, AdaptiveCandidatePlanner.signatureFor(settings, changedAddress))
         assertNotEquals(baseline, AdaptiveCandidatePlanner.signatureFor(settings, changedPort))
         assertNotEquals(baseline, AdaptiveCandidatePlanner.signatureFor(settings, changedDirectAlpn))
+    }
+
+    @Test
+    fun localForwardSignatureIgnoresLoopbackUriAddress() {
+        val settings = AdvancedSettingsData.DEFAULT
+        val first = localForwardImportedProfile("origin-a.example", 443, "")
+        val changedAddress = localForwardImportedProfile("origin-b.example", 443, "")
+        assertEquals(
+            AdaptiveCandidatePlanner.signatureFor(settings, first),
+            AdaptiveCandidatePlanner.signatureFor(settings, changedAddress),
+        )
     }
 
     @Test
@@ -107,7 +118,7 @@ class AdaptiveCandidateSignatureTest {
 
     @Test
     fun onlyTrueDirectCompatCandidateIsPersistedAsDirect() {
-        val imported = importedProfile("origin-a.example", 443, "")
+        val imported = directCompatProfile("origin-a.example", 443, "")
         val settings = AdvancedSettingsData.DEFAULT
         val edge = MciEdge("origin-a.example", 443, "origin", 2)
         val identity = requireNotNull(com.uacspoofer.mobile.profiles.DirectCompatProfileParser.parse(imported)).identity
@@ -132,7 +143,18 @@ class AdaptiveCandidateSignatureTest {
         assertFalse(fragmentedOriginalEndpoint.isDirectCompatRoute(imported))
     }
 
-    private fun importedProfile(address: String, port: Int, rawAlpn: String): ProxyProfile {
+    private fun directCompatProfile(address: String, port: Int, rawAlpn: String): ProxyProfile {
+        val alpn = rawAlpn.takeIf { it.isNotBlank() }?.let { "&alpn=$it" }.orEmpty()
+        return profile.copy(
+            serverHost = address,
+            serverPort = port,
+            alpn = "http/1.1",
+            rawUri = "vless://${profile.credential}@$address:$port" +
+                "?type=ws&security=tls&sni=cdn.example&host=cdn.example&path=%2Fws$alpn#Profile",
+        )
+    }
+
+    private fun localForwardImportedProfile(address: String, port: Int, rawAlpn: String): ProxyProfile {
         val alpn = rawAlpn.takeIf { it.isNotBlank() }?.let { "&alpn=$it" }.orEmpty()
         return profile.copy(
             serverHost = "127.0.0.1",

@@ -272,6 +272,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
 
     private var plan: RouteSpeedTestPlan? = null
     private var loadJob: Job? = null
+    private var loadLastRouteJob: Job? = null
     private var savedRouteLoadJob: Job? = null
     private var testJob: Job? = null
     private var stageJob: Job? = null
@@ -346,11 +347,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         get() = rows.count(RouteSpeedRow::usable)
 
     val advanceReadyCount: Int
-        get() = rows.count { row ->
-            row.observations.any { observation ->
-                observation.stage == currentStage && observation.accepted
-            }
-        }
+        get() = promotionRowsForNextStage().size
 
     val canAdvanceNow: Boolean
         get() = !loading &&
@@ -363,6 +360,25 @@ internal class RouteSpeedTestController private constructor(context: Context) {
 
     val canStartTest: Boolean
         get() = !loading && !testing && profileLibrary.allProfiles.isNotEmpty()
+
+    val canLoadLastRouteList: Boolean
+        get() {
+            if (finalStageHistoryAvailable) return true
+            val prepared = plan
+            if (prepared != null) {
+                if (hasFinalStageSnapshot(prepared)) return true
+                if (prepared.savedChampion != null) return true
+                if (hasSavedRouteInStore(prepared)) return true
+            }
+            return savedRouteDetails != null && savedRouteProfileId == profileLibrary.selectedId
+        }
+
+    private fun hasSavedRouteInStore(prepared: RouteSpeedTestPlan): Boolean =
+        adaptiveProfileStore.savedRoute(
+            prepared.session.network,
+            prepared.profile,
+            prepared.signature,
+        ) != null
     private fun loadSavedRouteBeforeStart(profile: ProxyProfile) {
         savedRouteLoadJob?.cancel()
 
@@ -423,6 +439,9 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 champion = champion.toSavedRouteDetails(),
                 backup = backup?.toSavedRouteDetails(),
             )
+            withContext(Dispatchers.Main.immediate) {
+                finalStageHistoryAvailable = true
+            }
         }
     }
     fun loadProfileLibrary() {
@@ -557,6 +576,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                     prepared.candidates.firstOrNull { it.id == id }?.toSavedRouteDetails()
                 },
             )
+            persistSavedRouteListSnapshot()
             notice = if (backup == null) {
                 "${row.label} saved for this network and configuration"
             } else {
@@ -565,31 +585,38 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         }
     }
 
-    fun loadLastFinalStageList(): Boolean {
+    fun loadLastFinalStageList() {
         if (testing) {
-            notice = "Pause the Tournament before opening the previous Championship"
-            return false
+            notice = "Pause the Tournament before loading the last saved route list"
+            return
         }
-        val prepared = plan ?: run {
-            notice = "Current profile and network are not ready yet"
-            return false
+        loadLastRouteJob?.cancel()
+        loadLastRouteJob = scope.launch {
+            try {
+                val profile = profileLibrary.selectedProfile
+                val settings = settingsStore.snapshot().validated()
+                val network = withContext(Dispatchers.IO) { fingerprintResolver.captureAdaptive() }
+                val signature = adaptivePlanner.signature(settings, profile)
+                val ranked = when (val prepared = plan) {
+                    null -> buildLoadableRouteListLight(profile, network, signature)
+                    else -> buildLoadableRouteList(prepared)
+                }.sortedWith(routeRankingComparator())
+                if (ranked.isEmpty()) {
+                    notice = "No saved route list is available yet"
+                    return@launch
+                }
+                finalStageRows.clear()
+                finalStageRows.addAll(ranked)
+                ranked.firstOrNull()?.candidateId?.let { recommendedCandidateId = it }
+                viewingFinalStageHistory = true
+                networkLabel = buildNetworkLabelFrom(network)
+                notice = "Loaded ${ranked.size} routes ranked by ping, speed and overall score"
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                notice = "Could not load saved routes: ${error.shortMessage()}"
+            }
         }
-        val snapshot = restoreFinalStageSnapshot(prepared)
-        val fallback = if (snapshot.isEmpty() && hasMatchingSession(prepared)) {
-            val ids = restoreStageIds(RouteTournamentStage.CHAMPIONSHIP).orEmpty()
-            rows.filter { it.candidateId in ids }
-        } else {
-            snapshot
-        }
-        if (fallback.isEmpty()) {
-            notice = "No previous Championship list is available yet"
-            return false
-        }
-        finalStageRows.clear()
-        finalStageRows.addAll(fallback)
-        viewingFinalStageHistory = true
-        notice = "Loaded ${fallback.size} routes from the previous Championship"
-        return true
     }
 
     fun showLiveRanking() {
@@ -601,8 +628,12 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         }
     }
 
-    fun visibleRows(): List<RouteSpeedRow> =
-        (if (viewingFinalStageHistory) finalStageRows else rows).sortedWith(
+    fun visibleRows(): List<RouteSpeedRow> {
+        val source = if (viewingFinalStageHistory) finalStageRows else rows
+        if (viewingFinalStageHistory) {
+            return source.sortedWith(routeRankingComparator())
+        }
+        return source.sortedWith(
         compareBy<RouteSpeedRow> {
             when {
                 it.candidateId == recommendedCandidateId -> 0
@@ -617,6 +648,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             .thenByDescending { it.throughputKbps }
             .thenBy { it.p95LatencyMs ?: Long.MAX_VALUE },
     )
+    }
 
     private fun preparePlan(
         resumeIfRequested: Boolean,
@@ -652,29 +684,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                     },
                 )
                 plan = prepared
-                profileLibrary = selectedTestProfileLibrary(profileStore.snapshot())
-                profileName = prepared.profile.name
-                networkLabel = buildNetworkLabel(prepared)
-                viewingFinalStageHistory = false
-                finalStageRows.clear()
-                selectedCandidateId = prepared.savedChampionId
-                savedRouteProfileId = prepared.savedChampionLabel?.let { prepared.profile.id }
-                savedRouteProfileName = prepared.savedChampionLabel?.let { prepared.profile.name }
-                savedChampionLabel = prepared.savedChampionLabel
-                savedBackupLabel = prepared.savedBackupLabel
-                savedRouteDetails = buildSavedRouteDetails(
-                    prepared,
-                    prepared.savedChampion?.toSavedRouteDetails(),
-                    prepared.savedBackup?.toSavedRouteDetails(),
-                )
-                finalStageHistoryAvailable = hasFinalStageSnapshot(prepared) ||
-                    (hasMatchingSession(prepared) &&
-                        !restoreStageIds(RouteTournamentStage.CHAMPIONSHIP).isNullOrEmpty())
-                restoreRows(prepared)
-                currentStage = restoreCurrentStage()
-                updatePhaseProgress(currentStage)
-                updateRecommendedCandidates()
-                paused = hasMatchingSession(prepared) && currentStage != RouteTournamentStage.COMPLETE
+                applyPreparedPlanState(prepared, clearHistory = true)
                 notice = when {
                     currentStage == RouteTournamentStage.COMPLETE ->
                         "Tournament complete • Champion and backup are ready"
@@ -1018,7 +1028,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                         try {
                             val stageTransferConfig = checkNotNull(transferConfigFor(stage))
                             val result = try {
-                                if (stage >= RouteTournamentStage.MTU_VALIDATION) {
+                                if (stage == RouteTournamentStage.MTU_VALIDATION) {
                                     tester.measureRouteSpeedNativeCandidate(
                                         plan = prepared,
                                         candidate = candidate,
@@ -1084,7 +1094,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 },
                 detail = when (probeStage) {
                     RouteSpeedProbeStage.STARTING -> "${stage.title}: starting a fresh Xray route"
-                    RouteSpeedProbeStage.PROBING -> if (stage >= RouteTournamentStage.MTU_VALIDATION) {
+                    RouteSpeedProbeStage.PROBING -> if (stage == RouteTournamentStage.MTU_VALIDATION) {
                         "${stage.title}: validating native TUN, HTTP, DNS, upload and download"
                     } else {
                         "${stage.title}: testing HTTP, DNS, upload and download"
@@ -1094,12 +1104,63 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         }
     }
 
-    private fun manualAdvanceShortlist(stage: RouteTournamentStage): List<String> {
-        val next = stage.next()
-        val passedThisStage = rows.filter { row ->
+    private fun rowsAcceptedInStage(stage: RouteTournamentStage): List<RouteSpeedRow> =
+        rows.filter { row ->
             row.observations.any { observation ->
                 observation.stage == stage && observation.accepted
             }
+        }
+
+    private fun rowsAcceptedInStage(
+        stage: RouteTournamentStage,
+        candidateIds: Collection<String>,
+    ): List<RouteSpeedRow> {
+        val idSet = candidateIds.toHashSet()
+        return rows.filter { row ->
+            row.candidateId in idSet && row.observations.any { observation ->
+                observation.stage == stage && observation.accepted
+            }
+        }
+    }
+
+    private fun promotionRowsForNextStage(): List<RouteSpeedRow> {
+        val next = currentStage.next()
+        if (next == RouteTournamentStage.COMPLETE) return rowsAcceptedInStage(currentStage)
+        if (
+            currentStage == RouteTournamentStage.MTU_VALIDATION &&
+            next == RouteTournamentStage.STABILITY
+        ) {
+            val mtuShortlist = restoreStageIds(RouteTournamentStage.MTU_VALIDATION).orEmpty()
+            val mtuPassed = rowsAcceptedInStage(RouteTournamentStage.MTU_VALIDATION, mtuShortlist)
+            if (mtuPassed.isNotEmpty()) return mtuPassed
+            return rowsAcceptedInStage(RouteTournamentStage.VERIFICATION, mtuShortlist)
+        }
+        return rowsAcceptedInStage(currentStage)
+    }
+
+    private fun promotionSourceRows(
+        targetStage: RouteTournamentStage,
+        candidateIds: Collection<String>,
+    ): List<RouteSpeedRow> {
+        val previous = targetStage.previous() ?: return emptyList()
+        val idSet = candidateIds.toHashSet()
+        val primary = rowsAcceptedInStage(previous, idSet)
+        if (primary.isNotEmpty()) return primary
+        if (
+            targetStage == RouteTournamentStage.STABILITY &&
+            previous == RouteTournamentStage.MTU_VALIDATION
+        ) {
+            return rowsAcceptedInStage(RouteTournamentStage.VERIFICATION, idSet)
+        }
+        return emptyList()
+    }
+
+    private fun manualAdvanceShortlist(stage: RouteTournamentStage): List<String> {
+        val next = stage.next()
+        val passedThisStage = if (stage == currentStage) {
+            promotionRowsForNextStage()
+        } else {
+            rowsAcceptedInStage(stage)
         }
         if (passedThisStage.isEmpty()) return emptyList()
         if (next == RouteTournamentStage.COMPLETE) {
@@ -1143,11 +1204,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         if (stage == RouteTournamentStage.QUALIFIER) return rows.map(RouteSpeedRow::candidateId)
         val previous = stage.previous() ?: return emptyList()
         val sourceIds = restoreStageIds(previous).orEmpty().ifEmpty { rows.map(RouteSpeedRow::candidateId) }
-        val sourceRows = rows.filter { row ->
-            row.candidateId in sourceIds && row.observations.any { observation ->
-                observation.stage == previous && observation.accepted
-            }
-        }
+        val sourceRows = promotionSourceRows(stage, sourceIds)
         val limit = minOf(stage.shortlistSize, sourceRows.size)
         if (limit <= 0) return emptyList()
         return when (stage) {
@@ -1405,9 +1462,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     }
 
     private fun finishTournament() {
-        restoreStageIds(RouteTournamentStage.CHAMPIONSHIP)
-            ?.takeIf(List<String>::isNotEmpty)
-            ?.let(::persistFinalStageSnapshot)
+        persistSavedRouteListSnapshot()
         currentStage = RouteTournamentStage.COMPLETE
         preferences.edit().putString(KEY_STAGE, RouteTournamentStage.COMPLETE.name).apply()
         phaseCompletedCount = phaseTotalCount
@@ -1538,9 +1593,6 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             .putString(KEY_STAGE, stage.name)
             .putString(stageIdsKey(stage), candidateIds.joinToString("\n"))
             .apply()
-        if (stage == RouteTournamentStage.CHAMPIONSHIP) {
-            persistFinalStageSnapshot(candidateIds)
-        }
     }
 
     private fun restoreCurrentStage(): RouteTournamentStage = runCatching {
@@ -1692,9 +1744,296 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             observations.forEach { put(it.toJson()) }
         })
 
+    private fun buildLoadableRouteListLight(
+        profile: ProxyProfile,
+        network: NetworkFingerprint,
+        signature: String,
+    ): List<RouteSpeedRow> {
+        val snapshot = restoreFinalStageSnapshotLight(profile.id, signature, network)
+        if (snapshot.isNotEmpty()) return snapshot
+        val champion = adaptiveProfileStore.savedRoute(network, profile, signature)
+        val backup = adaptiveProfileStore.savedBackupRoute(network, profile, signature)
+        val savedRoutes = listOfNotNull(champion, backup).distinctBy(AdaptiveSavedRoute::id)
+        if (savedRoutes.isNotEmpty()) {
+            return savedRoutes.map(::routeSpeedRowFromAdaptive).sortedWith(routeRankingComparator())
+        }
+        val details = savedRouteDetails?.takeIf { it.profileId == profile.id }
+        if (details != null) {
+            return listOfNotNull(details.champion, details.backup)
+                .distinctBy(SavedRouteDetails::id)
+                .map(::routeSpeedRowFromSavedDetailsLight)
+                .sortedWith(routeRankingComparator())
+        }
+        return emptyList()
+    }
+
+    private fun restoreFinalStageSnapshotLight(
+        profileId: String,
+        signature: String,
+        network: NetworkFingerprint,
+    ): List<RouteSpeedRow> {
+        val raw = preferences.getString(finalStageSnapshotKey(profileId, signature, network), null)
+            ?: return emptyList()
+        return runCatching {
+            val snapshot = JSONObject(raw)
+            if (
+                snapshot.optString("profileId") != profileId ||
+                snapshot.optString("signature") != signature ||
+                snapshot.optString("networkKey") != network.exactStorageKey() ||
+                snapshot.optString("carrier") != network.carrier ||
+                snapshot.optString("carrierClass") != network.carrierClass
+            ) {
+                return@runCatching emptyList()
+            }
+            finalStageHistoryTitle = buildString {
+                append(snapshot.optString("profileName", "Previous profile"))
+                snapshot.optString("networkLabel", "").takeIf(String::isNotBlank)?.let {
+                    append(" • ").append(it)
+                }
+            }
+            val array = snapshot.optJSONArray("rows") ?: return@runCatching emptyList()
+            buildList {
+                for (index in 0 until array.length()) {
+                    array.optJSONObject(index)?.toSnapshotRow()?.let(::add)
+                }
+            }.let { restored ->
+                filterLateStageSnapshotRows(restored).sortedWith(routeRankingComparator())
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun routeSpeedRowFromAdaptive(saved: AdaptiveSavedRoute): RouteSpeedRow {
+        val existing = rows.firstOrNull { it.candidateId == saved.id }
+        if (existing != null && existing.usable) return existing
+        val resolver = AdaptiveDnsResolvers.idFor(saved.resolverUrl)
+        val fragment = if (saved.finalmaskEnabled) {
+            "${saved.finalmaskPacket}/${saved.maxSplit}/${saved.finalmaskDelayMs}ms"
+        } else {
+            "Fragment off"
+        }
+        val throughput = saved.downloadKbps.coerceAtLeast(saved.uploadKbps)
+        return RouteSpeedRow(
+            candidateId = saved.id,
+            label = saved.label,
+            route = "${saved.address}:${saved.port}  •  $resolver  •  $fragment  •  MTU ${saved.tunMtu}",
+            edgeKey = "${saved.address}:${saved.port}",
+            resolverKey = resolver,
+            fragmentKey = fragment,
+            mtu = saved.tunMtu,
+            status = RouteSpeedStatus.PASSED,
+            stageReached = RouteTournamentStage.CHAMPIONSHIP,
+            score = saved.score,
+            tournamentScore = saved.score,
+            confidence = saved.confidence,
+            latencyMs = saved.pingMs,
+            p95LatencyMs = saved.pingMs,
+            jitterMs = saved.jitterMs,
+            throughputKbps = throughput,
+            downloadKbps = saved.downloadKbps,
+            uploadKbps = saved.uploadKbps,
+            mtuValidated = saved.mtuValidated,
+            successfulSamples = 1,
+            detail = "Saved route profile",
+        )
+    }
+
+    private fun routeSpeedRowFromSavedDetailsLight(details: SavedRouteDetails): RouteSpeedRow {
+        val existing = rows.firstOrNull { it.candidateId == details.id }
+        if (existing != null && existing.usable) return existing
+        return RouteSpeedRow(
+            candidateId = details.id,
+            label = details.label,
+            route = "${details.edge}  •  ${details.resolver}  •  ${details.fragment}  •  MTU ${details.mtu}",
+            edgeKey = details.edge,
+            resolverKey = details.resolver,
+            fragmentKey = details.fragment,
+            mtu = details.mtu,
+            status = RouteSpeedStatus.PASSED,
+            stageReached = RouteTournamentStage.CHAMPIONSHIP,
+            successfulSamples = 1,
+            detail = "Saved route profile",
+        )
+    }
+
+    private fun applyPreparedPlanState(prepared: RouteSpeedTestPlan, clearHistory: Boolean) {
+        profileLibrary = selectedTestProfileLibrary(profileStore.snapshot())
+        profileName = prepared.profile.name
+        networkLabel = buildNetworkLabel(prepared)
+        if (clearHistory) {
+            viewingFinalStageHistory = false
+            finalStageRows.clear()
+        }
+        selectedCandidateId = prepared.savedChampionId
+        savedRouteProfileId = prepared.savedChampionLabel?.let { prepared.profile.id }
+        savedRouteProfileName = prepared.savedChampionLabel?.let { prepared.profile.name }
+        savedChampionLabel = prepared.savedChampionLabel
+        savedBackupLabel = prepared.savedBackupLabel
+        savedRouteDetails = buildSavedRouteDetails(
+            prepared,
+            prepared.savedChampion?.toSavedRouteDetails(),
+            prepared.savedBackup?.toSavedRouteDetails(),
+        )
+        finalStageHistoryAvailable = hasFinalStageSnapshot(prepared) ||
+            prepared.savedChampion != null ||
+            hasSavedRouteInStore(prepared) ||
+            savedRouteDetails != null ||
+            (hasMatchingSession(prepared) &&
+                !restoreStageIds(RouteTournamentStage.CHAMPIONSHIP).isNullOrEmpty())
+        restoreRows(prepared)
+        currentStage = restoreCurrentStage()
+        updatePhaseProgress(currentStage)
+        updateRecommendedCandidates()
+        paused = hasMatchingSession(prepared) && currentStage != RouteTournamentStage.COMPLETE
+    }
+
+    private fun buildLoadableRouteList(prepared: RouteSpeedTestPlan): List<RouteSpeedRow> {
+        if (hasMatchingSession(prepared)) {
+            val live = persistedFinalRouteListRows()
+            if (live.isNotEmpty()) return live
+        }
+        val snapshot = restoreFinalStageSnapshot(prepared)
+        if (snapshot.isNotEmpty()) return snapshot
+        if (hasMatchingSession(prepared)) {
+            val ids = restoreStageIds(RouteTournamentStage.CHAMPIONSHIP).orEmpty()
+            val championship = rows.filter { it.candidateId in ids }
+            if (championship.isNotEmpty()) return rankedRows(championship)
+        }
+        val (champion, backup) = resolveSavedRoutes(prepared)
+        val savedRoutes = listOfNotNull(champion, backup).distinctBy(AdaptiveSavedRoute::id)
+        if (savedRoutes.isNotEmpty()) {
+            val savedRows = savedRoutes.map { routeSpeedRowFromSaved(it, prepared) }
+            val savedIds = savedRows.map(RouteSpeedRow::candidateId)
+            val extras = rows.filter { it.usable && it.candidateId !in savedIds }
+            return (savedRows + extras).sortedWith(routeRankingComparator())
+        }
+        return buildLoadableRouteListFromDetails(prepared)
+    }
+
+    private fun buildLoadableRouteListFromDetails(prepared: RouteSpeedTestPlan): List<RouteSpeedRow> {
+        val details = savedRouteDetails?.takeIf { it.profileId == prepared.profile.id } ?: return emptyList()
+        return listOfNotNull(details.champion, details.backup)
+            .distinctBy(SavedRouteDetails::id)
+            .map { routeSpeedRowFromSavedDetails(it, prepared) }
+            .sortedWith(routeRankingComparator())
+    }
+
+    private fun routeSpeedRowFromSavedDetails(
+        details: SavedRouteDetails,
+        prepared: RouteSpeedTestPlan,
+    ): RouteSpeedRow {
+        val existing = rows.firstOrNull { it.candidateId == details.id }
+        if (existing != null && existing.usable) return existing
+        val candidate = prepared.candidates.firstOrNull { it.id == details.id }
+        val base = candidate?.let(::initialRow) ?: RouteSpeedRow(
+            candidateId = details.id,
+            label = details.label,
+            route = "${details.edge}  •  ${details.resolver}  •  ${details.fragment}  •  MTU ${details.mtu}",
+            edgeKey = details.edge,
+            resolverKey = details.resolver,
+            fragmentKey = details.fragment,
+            mtu = details.mtu,
+        )
+        return base.copy(
+            status = RouteSpeedStatus.PASSED,
+            stageReached = RouteTournamentStage.CHAMPIONSHIP,
+            successfulSamples = 1,
+            detail = "Saved route profile",
+        )
+    }
+
+    private fun resolveSavedRoutes(prepared: RouteSpeedTestPlan): Pair<AdaptiveSavedRoute?, AdaptiveSavedRoute?> {
+        val network = prepared.session.network
+        val signature = prepared.signature
+        val profile = prepared.profile
+        val champion = prepared.savedChampion ?: adaptiveProfileStore.savedRoute(network, profile, signature)
+        val backup = prepared.savedBackup ?: adaptiveProfileStore.savedBackupRoute(network, profile, signature)
+        return champion to backup
+    }
+
+    private fun routeSpeedRowFromSaved(
+        saved: AdaptiveSavedRoute,
+        prepared: RouteSpeedTestPlan,
+    ): RouteSpeedRow {
+        val existing = rows.firstOrNull { it.candidateId == saved.id }
+        if (existing != null && existing.usable) return existing
+        val candidate = prepared.candidates.firstOrNull { it.id == saved.id }
+        val resolver = AdaptiveDnsResolvers.idFor(saved.resolverUrl)
+        val fragment = if (saved.finalmaskEnabled) {
+            "${saved.finalmaskPacket}/${saved.maxSplit}/${saved.finalmaskDelayMs}ms"
+        } else {
+            "Fragment off"
+        }
+        val base = candidate?.let(::initialRow) ?: RouteSpeedRow(
+            candidateId = saved.id,
+            label = saved.label,
+            route = "${saved.address}:${saved.port}  •  $resolver  •  $fragment  •  MTU ${saved.tunMtu}",
+            edgeKey = "${saved.address}:${saved.port}",
+            resolverKey = resolver,
+            fragmentKey = fragment,
+            mtu = saved.tunMtu,
+        )
+        val throughput = saved.downloadKbps.coerceAtLeast(saved.uploadKbps)
+        return base.copy(
+            status = RouteSpeedStatus.PASSED,
+            stageReached = RouteTournamentStage.CHAMPIONSHIP,
+            score = saved.score,
+            tournamentScore = saved.score,
+            confidence = saved.confidence,
+            latencyMs = saved.pingMs,
+            p95LatencyMs = saved.pingMs,
+            jitterMs = saved.jitterMs,
+            throughputKbps = throughput,
+            downloadKbps = saved.downloadKbps,
+            uploadKbps = saved.uploadKbps,
+            mtuValidated = saved.mtuValidated,
+            successfulSamples = 1,
+            detail = "Saved route profile",
+        )
+    }
+
+    private fun persistedFinalRouteListRows(): List<RouteSpeedRow> {
+        if (rows.isEmpty()) return emptyList()
+        val lateStages = listOf(
+            RouteTournamentStage.CHAMPIONSHIP,
+            RouteTournamentStage.STRESS,
+            RouteTournamentStage.STABILITY,
+        )
+        for (stage in lateStages) {
+            val ids = restoreStageIds(stage).orEmpty()
+            if (ids.isEmpty()) continue
+            val idSet = ids.toHashSet()
+            val tested = rows.filter { row ->
+                row.candidateId in idSet &&
+                    row.observations.any { observation ->
+                        observation.stage.ordinal >= stage.ordinal
+                    }
+            }
+            if (tested.isNotEmpty()) return rankedRows(tested)
+        }
+        val advanced = rows.filter { row ->
+            row.usable && row.stageReached.ordinal >= RouteTournamentStage.STABILITY.ordinal
+        }
+        if (advanced.isNotEmpty()) return rankedRows(advanced)
+        return rankedRows(rows.filter(RouteSpeedRow::usable))
+    }
+
     private fun persistFinalStageSnapshot(candidateIds: List<String>) {
-        val prepared = plan ?: return
         val finalists = rows.filter { it.candidateId in candidateIds }
+            .sortedWith(routeRankingComparator())
+        persistFinalStageSnapshotRows(finalists)
+    }
+
+    private fun persistSavedRouteListSnapshot() {
+        val ranked = persistedFinalRouteListRows()
+        if (ranked.isEmpty()) return
+        persistFinalStageSnapshotRows(ranked)
+    }
+
+    private fun filterLateStageSnapshotRows(rows: List<RouteSpeedRow>): List<RouteSpeedRow> =
+        rows.filter { row -> row.stageReached.ordinal >= RouteTournamentStage.STABILITY.ordinal }
+
+    private fun persistFinalStageSnapshotRows(finalists: List<RouteSpeedRow>) {
+        val prepared = plan ?: return
         if (finalists.isEmpty()) return
         val snapshot = JSONObject()
             .put("profileId", prepared.profile.id)
@@ -1705,6 +2044,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
             .put("carrierClass", prepared.session.network.carrierClass)
             .put("networkLabel", buildNetworkLabel(prepared))
             .put("savedAt", System.currentTimeMillis())
+            .put("tournamentStage", currentStage.name)
             .put("rows", JSONArray().apply { finalists.forEach { put(it.toJson()) } })
         preferences.edit().putString(finalStageSnapshotKey(prepared), snapshot.toString()).apply()
         finalStageHistoryAvailable = true
@@ -1741,7 +2081,7 @@ internal class RouteSpeedTestController private constructor(context: Context) {
                 }
             }
             filterRestorableFinalRows(
-                rows = restored,
+                rows = filterLateStageSnapshotRows(restored).sortedWith(routeRankingComparator()),
                 validCandidateIds = prepared.candidates.map(AdaptiveCandidate::id),
             )
         }.getOrDefault(emptyList())
@@ -1899,8 +2239,10 @@ internal class RouteSpeedTestController private constructor(context: Context) {
         if (index >= 0) rows[index] = transform(rows[index])
     }
 
-    private fun buildNetworkLabel(plan: RouteSpeedTestPlan): String {
-        val network = plan.session.network
+    private fun buildNetworkLabel(plan: RouteSpeedTestPlan): String =
+        buildNetworkLabelFrom(plan.session.network)
+
+    private fun buildNetworkLabelFrom(network: NetworkFingerprint): String {
         val provider = network.networkProvider
             .takeUnless { it.isBlank() || it == "unknown" || it == network.carrierClass }
             ?: network.carrier.takeUnless { it.isBlank() || it == "unknown" }
@@ -2026,11 +2368,21 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     private fun rowKey(candidateId: String) = "$KEY_ROW_PREFIX$candidateId"
     private fun stageIdsKey(stage: RouteTournamentStage) = "$KEY_STAGE_IDS_PREFIX${stage.name}"
 
-    private fun finalStageSnapshotKey(prepared: RouteSpeedTestPlan): String {
-        val network = prepared.session.network
-        val identity = listOf(
+    private fun finalStageSnapshotKey(prepared: RouteSpeedTestPlan): String =
+        finalStageSnapshotKey(
             prepared.profile.id,
             prepared.signature,
+            prepared.session.network,
+        )
+
+    private fun finalStageSnapshotKey(
+        profileId: String,
+        signature: String,
+        network: NetworkFingerprint,
+    ): String {
+        val identity = listOf(
+            profileId,
+            signature,
             network.exactStorageKey(),
             network.carrier,
             network.carrierClass,

@@ -51,7 +51,6 @@ import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.PersonOutline
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.SignalCellularAlt
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.SkipNext
 import androidx.compose.material.icons.outlined.Stop
@@ -81,6 +80,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -181,9 +182,12 @@ private fun localizedRouteNotice(value: String): String {
         .replace("Route Tournament paused • use the current best route or resume", "مسابقه متوقف شده • از بهترین مسیر فعلی استفاده کن یا ادامه بده")
         .replace("Route Tournament paused • tap RESUME to continue", "مسابقه متوقف شده • برای ادامه روی «ادامه» بزن")
         .replace("Tournament paused • current Champion can be used now", "مسابقه متوقف شده • الان می‌تونی از برنده فعلی استفاده کنی")
-        .replace("Pause the Tournament before opening the previous Championship", "قبل از باز کردن مرحله نهایی قبلی، مسابقه رو متوقف کن")
+        .replace("Pause the Tournament before opening the previous Championship", "قبل از لود آخرین مسیر، مسابقه رو متوقف کن")
+        .replace("Loading last saved routes…", "در حال لود آخرین مسیرهای ذخیره‌شده…")
+        .replace("Could not load saved routes:", "لود مسیرهای ذخیره‌شده انجام نشد:")
         .replace("Current profile and network are not ready yet", "کانفیگ و شبکه فعلی هنوز آماده نیستن")
-        .replace("No previous Championship list is available yet", "هنوز لیست مرحله نهایی قبلی وجود نداره")
+        .replace("No previous Championship list is available yet", "هنوز لیست مسیر ذخیره‌شده وجود نداره")
+        .replace("No saved route list is available yet", "هنوز لیست مسیر ذخیره‌شده وجود نداره")
         .replace("Detecting network and restoring the Route Tournament…", "در حال شناسایی شبکه و بازیابی مسابقه مسیرها…")
         .replace("Tournament complete • no route passed the complete connectivity check", "مسابقه تمام شد • هیچ مسیری تست کامل اتصال رو رد نکرد")
         .replace("Tournament complete • Champion and backup are ready", "مسابقه تمام شد • برنده و مسیر پشتیبان آماده‌ان")
@@ -194,7 +198,8 @@ private fun localizedRouteNotice(value: String): String {
         .replace("Champion and backup saved for automatic recovery on this network", "برنده و پشتیبان برای بازیابی خودکار روی این شبکه ذخیره شدن")
         .replace("saved for this network and configuration", "برای این شبکه و کانفیگ ذخیره شد")
         .replace("Loaded", "بارگذاری شد:")
-        .replace("routes from the previous Championship", "مسیر از مرحله نهایی قبلی")
+        .replace("routes from the previous Championship", "مسیر از لیست ذخیره‌شده")
+        .replace("routes ranked by ping, speed and overall score", "مسیر با رتبه پینگ، سرعت و امتیاز کلی")
         .replace("Live", "رتبه‌بندی زنده مرحله")
         .replace("ranking restored", "بازیابی شد")
         .replace("Tournament complete • Champion confidence", "مسابقه تمام شد • اطمینان برنده")
@@ -273,6 +278,11 @@ internal fun RouteSpeedTestScreen(
             ) {
                 listState.scrollToItem(0)
             }
+        }
+    }
+    LaunchedEffect(controller.viewingFinalStageHistory) {
+        if (controller.viewingFinalStageHistory) {
+            listState.scrollToItem(0)
         }
     }
     LaunchedEffect(sortOption) {
@@ -361,7 +371,7 @@ internal fun RouteSpeedTestScreen(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     if (controller.viewingFinalStageHistory) {
-                        homeText("Previous Championship", "مرحله نهایی قبلی")
+                        homeText("Last saved routes", "آخرین مسیرهای ذخیره‌شده")
                     } else {
                         homeText("Live Tournament Ranking", "رتبه‌بندی زنده")
                     },
@@ -501,9 +511,11 @@ internal fun RouteSpeedTestScreen(
     if (savedDetailsVisible) {
         SavedRouteProfileDialog(
             details = controller.savedRouteDetails,
-            finalStageAvailable = controller.finalStageHistoryAvailable,
+            finalStageAvailable = controller.canLoadLastRouteList,
+            savedRouteSaved = controller.savedRouteDetails != null,
             onLoadFinalStage = {
-                if (controller.loadLastFinalStageList()) savedDetailsVisible = false
+                controller.loadLastFinalStageList()
+                savedDetailsVisible = false
             },
             onDismiss = { savedDetailsVisible = false },
         )
@@ -1495,6 +1507,7 @@ private fun TournamentInfoCard(
 private fun SavedRouteProfileDialog(
     details: SavedRouteProfileDetails?,
     finalStageAvailable: Boolean,
+    savedRouteSaved: Boolean,
     onLoadFinalStage: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1601,10 +1614,10 @@ private fun SavedRouteProfileDialog(
                 Icon(Icons.Outlined.BarChart, null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(5.dp))
                 Text(
-                    if (finalStageAvailable) {
-                        homeText("PREVIOUS FINAL STAGE", "مرحله نهایی قبلی")
+                    if (savedRouteSaved) {
+                        homeText("LOAD LAST ROUTE", "لود آخرین مسیر")
                     } else {
-                        homeText("NO FINAL STAGE", "مرحله نهایی نداریم")
+                        homeText("NO SAVED ROUTE", "مسیر ذخیره نشده")
                     },
                     fontSize = routeFontSize(10f, 11.5f),
                     fontWeight = FontWeight.Bold,
@@ -1788,7 +1801,7 @@ private fun stageExplanation(stage: RouteTournamentStage): StageExplanation = wh
     RouteTournamentStage.MTU_VALIDATION -> StageExplanation(
         homeText("Measure MTU on the real Android TUN path instead of pretending proxy-only MTUs are different.", "${ltr("MTU")} روی مسیر واقعی ${ltr("TUN")} اندروید سنجیده می‌شه؛ نه روی مسیر Proxy که ${ltr("MTU")} در اون اثری نداره."),
         homeText("An app-only native VPN checks HTTP, DNS, upload, download and actual Xray TX/RX growth for every MTU.", "یک ${ltr("VPN")} آزمایشی فقط برای خود برنامه، ${ltr("HTTP")}، ${ltr("DNS")}، آپلود، دانلود و رشد واقعی ${ltr("TX/RX")} در ${ltr("Xray")} رو بررسی می‌کنه."),
-        homeText("Only routes with bidirectional native traffic can enter stability testing.", "فقط مسیرهایی که ترافیک واقعی دوطرفه دارن وارد مرحله پایداری می‌شن."),
+        homeText("If native MTU fails, routes that passed Resolver verification still advance to stability on the SOCKS path.", "اگر ${ltr("MTU")} واقعی رد بشه، مسیرهایی که در بررسی ${ltr("Resolver")} قبول شدن با همون مسیر ${ltr("SOCKS")} به پایداری می‌رن."),
     )
     RouteTournamentStage.STABILITY -> StageExplanation(
         homeText("Measure repeatability, jitter and reliability over multiple samples.", "تکرارپذیری، نوسان تأخیر و قابل‌اعتماد بودن مسیر در چند تست سنجیده می‌شه."),
@@ -1938,11 +1951,10 @@ private fun RouteResultCard(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Icon(
-                    Icons.Outlined.SignalCellularAlt,
-                    contentDescription = row.status.localizedLabel(),
-                    tint = if (row.usable) RouteGreen else color,
-                    modifier = Modifier.size(15.dp),
+                ConfidenceSignalIndicator(
+                    confidence = row.confidence,
+                    contentDescription = confidenceText,
+                    modifier = Modifier.size(width = 15.dp, height = 15.dp),
                 )
                 Spacer(Modifier.width(3.dp))
                 Icon(
@@ -2471,6 +2483,38 @@ private fun rankColor(rank: Int): Color = when (rank) {
     2 -> Color(0xFFD6E4EC)
     3 -> Color(0xFFD99861)
     else -> Color(0xFF7890A3)
+}
+
+@Composable
+private fun ConfidenceSignalIndicator(
+    confidence: Int,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+    val activeBars = when {
+        confidence >= 70 -> 3
+        confidence >= 40 -> 2
+        confidence > 0 -> 1
+        else -> 0
+    }
+    val barColor = confidenceColor(confidence)
+    val barHeights = listOf(5.dp, 8.dp, 11.dp)
+    Row(
+        modifier = modifier.semantics { this.contentDescription = contentDescription },
+        horizontalArrangement = Arrangement.spacedBy(1.5.dp, Alignment.End),
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        barHeights.forEachIndexed { index, height ->
+            if (index < activeBars) {
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(height)
+                        .background(barColor, RoundedCornerShape(1.dp)),
+                )
+            }
+        }
+    }
 }
 
 @Composable

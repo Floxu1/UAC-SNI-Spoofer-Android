@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.profiles.LocalForwardProfile
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciXrayBatchRoute
 import com.uacspoofer.mobile.mci.MciXrayCore
@@ -295,7 +296,9 @@ class ProfileLatencyTester(context: Context) {
                 detail = "Combining Edge, DNS, tuning and MTU routes",
             ),
         )
-        val cloudflareEligible = profile.usesAdvancedSettingsIdentity() || discovery.suitability.status == CloudflareSuitability.ELIGIBLE
+        val cloudflareEligible = profile.usesAdvancedSettingsIdentity() ||
+            LocalForwardProfile.isLocalForward(profile) ||
+            discovery.suitability.status == CloudflareSuitability.ELIGIBLE
         val candidates = adaptivePlanner.routeSpeedCandidates(
             base = settings,
             network = network,
@@ -1620,9 +1623,9 @@ class ProfileLatencyTester(context: Context) {
         private const val PROBE_HOST = "connectivitycheck.gstatic.com"
         private const val TAG = "UAC-RealDelay"
         private const val PROBE_PORT = 443
-        private const val PROBE_TIMEOUT_MS = 4_000
+        private const val PROBE_TIMEOUT_MS = 2_000
         private const val PROBE_COUNT = 5
-        private const val MIN_SUCCESS_COUNT = 3
+        private const val MIN_SUCCESS_COUNT = 2
         private const val MAKER_DEFAULT_TIMEOUT_MS = 20_000
         private const val MIN_MAKER_TIMEOUT_MS = 3_000
         private const val MAX_MAKER_TIMEOUT_MS = 30_000

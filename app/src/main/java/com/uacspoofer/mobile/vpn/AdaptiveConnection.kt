@@ -13,6 +13,7 @@ import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
 import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
 import com.uacspoofer.mobile.profiles.DirectCompatProfile
+import com.uacspoofer.mobile.profiles.LocalForwardProfile
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import java.nio.charset.StandardCharsets
@@ -522,7 +523,7 @@ internal fun prioritizeAdaptiveCandidates(
 }
 
 internal fun AdaptiveCandidate.isDirectCompatRoute(profile: ProxyProfile): Boolean {
-    if (profile.usesAdvancedSettingsIdentity()) return false
+    if (profile.usesAdvancedSettingsIdentity() || LocalForwardProfile.isLocalForward(profile)) return false
     val direct = DirectCompatProfileParser.parse(profile)
     val originalAddress = direct?.address ?: profile.serverHost
     val originalPort = direct?.port ?: profile.serverPort
@@ -968,7 +969,8 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
             .take(RouteTestArchitecture.EDGE_LIMIT)
         val mtuValues = RouteTestArchitecture.mtuValues(settings.tunMtu)
         val tuningProfiles = RouteTestArchitecture.tuningProfiles(settings)
-        val directProfile = if (!profile.usesAdvancedSettingsIdentity()) {
+        val localForward = LocalForwardProfile.isLocalForward(profile)
+        val directProfile = if (!profile.usesAdvancedSettingsIdentity() && !localForward) {
             DirectCompatProfileParser.parse(profile) ?: DirectCompatProfile(
                 address = profile.serverHost,
                 port = profile.serverPort,
@@ -977,13 +979,26 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         } else {
             null
         }
-        val matrixRuntimeBase = directProfile?.let { parsed ->
-            MciXrayRuntimeOptions(
-                identityOverride = parsed.identity,
+        val localForwardIdentity = if (localForward) {
+            LocalForwardProfile.routingIdentity(profile, settings)
+        } else {
+            null
+        }
+        val matrixRuntimeBase = when {
+            directProfile != null -> MciXrayRuntimeOptions(
+                identityOverride = directProfile.identity,
+                finalmaskEnabled = false,
                 preserveEmptyAlpn = true,
                 preserveTransportFields = true,
             )
-        } ?: MciXrayRuntimeOptions.DEFAULT
+            localForwardIdentity != null -> MciXrayRuntimeOptions(
+                identityOverride = localForwardIdentity,
+                finalmaskEnabled = false,
+                preserveEmptyAlpn = true,
+                preserveTransportFields = true,
+            )
+            else -> MciXrayRuntimeOptions.DEFAULT
+        }
 
         if (!cloudflareEligible && directProfile != null) {
             val directEdge = MciEdge(directProfile.address, directProfile.port, "direct", 1)
@@ -1050,7 +1065,10 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
                 }
             }
         }
-        val direct = directProfile?.let { parsed ->
+        val direct = if (localForward) {
+            null
+        } else {
+            directProfile?.let { parsed ->
                 AdaptiveCandidate(
                     id = "matrix-direct-compat",
                     label = "Direct profile • original transport",
@@ -1063,6 +1081,7 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
                         preserveTransportFields = true,
                     ),
                 )
+            }
         }
         val savedId = store.savedRoute(network, profile, signature(settings, profile))?.id
         return buildList {
@@ -1090,6 +1109,8 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         } else {
             val parsedIdentity = if (profile.usesAdvancedSettingsIdentity()) {
                 null
+            } else if (LocalForwardProfile.isLocalForward(profile)) {
+                LocalForwardProfile.routingIdentity(profile, base)
             } else {
                 DirectCompatProfileParser.parse(profile)?.identity ?: profile.runtimeIdentity(base)
             }
@@ -1145,14 +1166,22 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
 
         internal fun signatureFor(settings: AdvancedSettingsData, profile: ProxyProfile): String {
             val direct = DirectCompatProfileParser.parse(profile)
-            val endpointAddress = direct?.address ?: profile.serverHost
-            val endpointPort = direct?.port ?: profile.serverPort
-            val runtimeIdentity = direct?.identity ?: profile.runtimeIdentity(settings)
+            val endpointAddress = when {
+                LocalForwardProfile.isLocalForward(profile) -> LocalForwardProfile.routingEndpointKey(profile)
+                direct != null -> canonicalEndpointKey(direct.address, direct.port)
+                else -> canonicalEndpointKey(profile.serverHost, profile.serverPort)
+            }
+            val runtimeIdentity = when {
+                LocalForwardProfile.isLocalForward(profile) ->
+                    LocalForwardProfile.routingIdentity(profile, settings)
+                direct != null -> direct.identity
+                else -> profile.runtimeIdentity(settings)
+            }
             return sha256(
                 listOf(
                     STRATEGY_VERSION,
                     profile.id,
-                    canonicalEndpointKey(endpointAddress, endpointPort),
+                    endpointAddress,
                     runtimeIdentity,
                     settings,
                 ).joinToString("|"),

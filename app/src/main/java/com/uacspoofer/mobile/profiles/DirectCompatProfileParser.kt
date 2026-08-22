@@ -14,17 +14,25 @@ data class DirectCompatProfile(
 object DirectCompatProfileParser {
     fun parse(profile: ProxyProfile): DirectCompatProfile? {
         if (profile.usesAdvancedSettingsIdentity() || profile.rawUri.isBlank()) return null
+        return parseUnfiltered(profile)?.takeUnless { direct ->
+            direct.address.equals(LocalForwardProfile.HOST, ignoreCase = true) ||
+                direct.address.equals("localhost", ignoreCase = true) ||
+                direct.port !in 1..65_535
+        }
+    }
+
+    fun parseIdentity(profile: ProxyProfile): RuntimeProxyIdentity? =
+        parseUnfiltered(profile)?.identity
+
+    private fun parseUnfiltered(profile: ProxyProfile): DirectCompatProfile? {
+        if (profile.rawUri.isBlank()) return null
         return runCatching {
             if (profile.rawUri.startsWith("vmess://", ignoreCase = true)) {
                 parseVmess(profile.rawUri)
             } else {
                 parseUri(profile.rawUri)
             }
-        }.getOrNull()?.takeUnless { direct ->
-            direct.address.equals("127.0.0.1", ignoreCase = true) ||
-                direct.address.equals("localhost", ignoreCase = true) ||
-                direct.port !in 1..65_535
-        }
+        }.getOrNull()
     }
 
     private fun parseUri(raw: String): DirectCompatProfile {

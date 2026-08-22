@@ -212,12 +212,11 @@ internal object MciXrayConfigBuilder {
         nativeTun: Boolean,
         runtimeOptions: MciXrayRuntimeOptions,
     ): String {
-        val requestedAlpn = TlsAlpnResolver.resolveForTransport(identity.network, identity.alpn)
-        val alpn = when {
-            requestedAlpn.isNotEmpty() -> requestedAlpn
-            runtimeOptions.preserveEmptyAlpn -> emptyList()
-            else -> listOf(if (identity.network == "grpc") "h2" else "http/1.1")
-        }
+        val alpn = TlsAlpnResolver.resolveForXray(
+            network = identity.network,
+            rawAlpn = identity.alpn,
+            preserveEmptyAlpn = runtimeOptions.preserveEmptyAlpn,
+        )
         val alpnField = alpn.takeIf(List<String>::isNotEmpty)
             ?.joinToString(",", prefix = ",\"alpn\":[", postfix = "]") { "\"${q(it)}\"" }
             .orEmpty()

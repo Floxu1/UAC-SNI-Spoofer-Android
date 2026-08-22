@@ -1,5 +1,8 @@
 package com.uacspoofer.mobile.mci
 
+import com.uacspoofer.mobile.mci.MciConfig
+import com.uacspoofer.mobile.mci.MciXrayCore
+import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
 import com.uacspoofer.mobile.profiles.ProfileUriParser
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import org.junit.Assert.assertFalse
@@ -41,5 +44,32 @@ class CustomProfileXrayConfigTest {
         assertTrue(config.contains("different-password"))
         assertTrue(config.contains("\"network\":\"tcp\""))
         assertFalse(config.contains("humanity"))
+    }
+
+    @Test
+    fun trojanWsAlpnSlashPairUsesHttp11FirstInRouteSpeedStyleConfig() {
+        val profile = ProfileUriParser.parse(
+            "trojan://secret@origin.example:443?security=tls&type=ws&host=cdn.example&path=%2Fws&sni=cdn.example&alpn=h2%2Fhttp1.1#Trojan",
+        )
+        val directCompat = MciXrayRuntimeOptions(
+            identityOverride = profile.runtimeIdentity(AdvancedSettingsData.DEFAULT),
+            finalmaskEnabled = false,
+            preserveEmptyAlpn = true,
+            preserveTransportFields = true,
+        )
+        val omitted = MciXrayCore.buildConfig(
+            edge = MciConfig.PRIMARY_EDGE,
+            profile = profile,
+            runtimeOptions = directCompat,
+        )
+        assertFalse(omitted.contains("\"alpn\""))
+
+        val explicit = MciXrayCore.buildConfig(
+            edge = MciConfig.PRIMARY_EDGE,
+            profile = profile,
+            runtimeOptions = directCompat.copy(preserveEmptyAlpn = false),
+        )
+        assertTrue(explicit.contains("\"protocol\":\"trojan\""))
+        assertTrue(explicit.contains("\"alpn\":[\"http/1.1\",\"h2\"]"))
     }
 }

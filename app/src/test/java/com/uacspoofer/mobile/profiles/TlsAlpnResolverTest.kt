@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.profiles
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TlsAlpnResolverTest {
@@ -24,6 +25,13 @@ class TlsAlpnResolverTest {
         assertEquals(
             listOf("h2", "http/1.1"),
             TlsAlpnResolver.resolveForTransport("grpc", "http/1.1,h2"),
+        )
+    }
+
+    @Test
+    fun preserveEmptyAlpnOmitsTlsAlpnForDirectCompat() {
+        assertTrue(
+            TlsAlpnResolver.resolveForXray("ws", "h2/http1.1", preserveEmptyAlpn = true).isEmpty(),
         )
     }
 }

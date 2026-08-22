@@ -31,7 +31,8 @@ class ProfileUriParserTest {
         assertEquals("httpupgrade", profile.network)
         assertEquals("/vpnhu", profile.path)
         assertEquals(profile.copy(rawUri = ""), roundTrip.copy(rawUri = ""))
-        assertTrue(ProfileUriParser.canonicalUri(profile).contains("@127.0.0.1:40443"))
+        assertEquals("127.0.0.1", profile.serverHost)
+        assertEquals(40443, profile.serverPort)
     }
 
     @Test
