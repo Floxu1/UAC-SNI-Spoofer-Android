@@ -1,5 +1,6 @@
 package com.uacspoofer.mobile.mci
 
+import com.uacspoofer.mobile.profiles.ProfileNetworks
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.ProxyProtocol
 import com.uacspoofer.mobile.profiles.RuntimeProxyIdentity
@@ -187,13 +188,21 @@ internal object MciXrayConfigBuilder {
         val protocolSettings = when (identity.protocol) {
             ProxyProtocol.TROJAN ->
                 """{"servers":[{"address":"${q(edge.address)}","port":${edge.port},"password":"${q(identity.credential)}"}]}"""
-            ProxyProtocol.VLESS -> {
-                val flow = identity.flow.takeIf { it.isNotBlank() }
-                    ?.let { ",\"flow\":\"${q(it)}\"" }.orEmpty()
-                """{"vnext":[{"address":"${q(edge.address)}","port":${edge.port},"users":[{"id":"${q(identity.credential)}","encryption":"${q(identity.encryption)}"$flow}]}]}"""
-            }
-            ProxyProtocol.VMESS ->
-                """{"vnext":[{"address":"${q(edge.address)}","port":${edge.port},"users":[{"id":"${q(identity.credential)}","alterId":${identity.alterId},"security":"${q(identity.encryption.ifBlank { "auto" })}"}]}]}"""
+            ProxyProtocol.VLESS -> vnextSettings(
+                address = edge.address,
+                port = edge.port,
+                userJson = buildString {
+                    append("\"id\":\"${q(identity.credential)}\",\"encryption\":\"${q(identity.encryption)}\"")
+                    identity.flow.takeIf { it.isNotBlank() }?.let { append(",\"flow\":\"${q(it)}\"") }
+                },
+                packetEncoding = identity.packetEncoding,
+            )
+            ProxyProtocol.VMESS -> vnextSettings(
+                address = edge.address,
+                port = edge.port,
+                userJson = "\"id\":\"${q(identity.credential)}\",\"alterId\":${identity.alterId},\"security\":\"${q(identity.encryption.ifBlank { "auto" })}\"",
+                packetEncoding = identity.packetEncoding,
+            )
         }
         val stream = streamSettings(
             identity,
@@ -202,7 +211,8 @@ internal object MciXrayConfigBuilder {
             nativeTun,
             runtimeOptions,
         )
-        return """{"tag":"${q(tag)}","protocol":"${identity.protocol.wireName}","settings":$protocolSettings,"streamSettings":$stream,"mux":{"enabled":$muxEnabled,"concurrency":${settings.muxConcurrency}}}"""
+        val enableMux = muxEnabled && !ProfileNetworks.isXhttp(identity.network)
+        return """{"tag":"${q(tag)}","protocol":"${identity.protocol.wireName}","settings":$protocolSettings,"streamSettings":$stream,"mux":{"enabled":$enableMux,"concurrency":${settings.muxConcurrency}}}"""
     }
 
     private fun streamSettings(
@@ -252,6 +262,21 @@ internal object MciXrayConfigBuilder {
                     ?.let { ",\"authority\":\"${q(it)}\"" }.orEmpty()
                 """"grpcSettings":{"serviceName":"${q(identity.serviceName)}"$authority}"""
             }
+            "xhttp" -> {
+                val fields = buildList {
+                    if (runtimeOptions.preserveTransportFields) {
+                        identity.path.takeIf(String::isNotBlank)?.let { add("\"path\":\"${q(it)}\"") }
+                        identity.host.takeIf(String::isNotBlank)?.let { add("\"host\":\"${q(it)}\"") }
+                        identity.xhttpMode.takeIf(String::isNotBlank)?.let { add("\"mode\":\"${q(it)}\"") }
+                    } else {
+                        add("\"path\":\"${q(identity.path)}\"")
+                        add("\"host\":\"${q(identity.host)}\"")
+                        add("\"mode\":\"${q(identity.xhttpMode.ifBlank { "auto" })}\"")
+                    }
+                    identity.xhttpExtra.takeIf(String::isNotBlank)?.let { add("\"extra\":$it") }
+                }.joinToString(",")
+                "\"xhttpSettings\":{$fields}"
+            }
             "tcp" -> ""
             else -> error("Unsupported transport ${identity.network}")
         }
@@ -282,10 +307,22 @@ internal object MciXrayConfigBuilder {
         if (!runtimeOptions.preserveTransportFields) {
             require(identity.sni.isNotBlank()) { "Selected profile SNI is missing" }
         }
-        require(identity.network in setOf("ws", "tcp", "httpupgrade", "grpc")) {
+        require(identity.network in ProfileNetworks.SUPPORTED) {
             "Unsupported selected profile transport"
         }
         if (identity.network == "grpc") require(identity.serviceName.isNotBlank()) { "gRPC serviceName is missing" }
+    }
+
+    private fun vnextSettings(
+        address: String,
+        port: Int,
+        userJson: String,
+        packetEncoding: String,
+    ): String {
+        val encoding = packetEncoding.takeIf { it.isNotBlank() }
+            ?.let { ",\"packetEncoding\":\"${q(it)}\"" }
+            .orEmpty()
+        return """{"vnext":[{"address":"${q(address)}","port":$port,"users":[{$userJson}]}]$encoding}"""
     }
 
     private fun q(value: String): String = value

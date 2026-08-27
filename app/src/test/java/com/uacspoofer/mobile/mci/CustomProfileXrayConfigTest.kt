@@ -60,9 +60,16 @@ class CustomProfileXrayConfigTest {
         val omitted = MciXrayCore.buildConfig(
             edge = MciConfig.PRIMARY_EDGE,
             profile = profile,
-            runtimeOptions = directCompat,
+            runtimeOptions = directCompat.copy(identityOverride = profile.runtimeIdentity(AdvancedSettingsData.DEFAULT).copy(alpn = "")),
         )
         assertFalse(omitted.contains("\"alpn\""))
+
+        val preserved = MciXrayCore.buildConfig(
+            edge = MciConfig.PRIMARY_EDGE,
+            profile = profile,
+            runtimeOptions = directCompat,
+        )
+        assertTrue(preserved.contains("\"alpn\":[\"h2\",\"http/1.1\"]"))
 
         val explicit = MciXrayCore.buildConfig(
             edge = MciConfig.PRIMARY_EDGE,
@@ -71,5 +78,27 @@ class CustomProfileXrayConfigTest {
         )
         assertTrue(explicit.contains("\"protocol\":\"trojan\""))
         assertTrue(explicit.contains("\"alpn\":[\"http/1.1\",\"h2\"]"))
+    }
+
+    @Test
+    fun xhttpIdentityEmitsXhttpSettingsAndDisablesMux() {
+        val profile = ProfileUriParser.parse(
+            "vless://30980fc4-8789-42df-80d1-0c8e5cd26881@origin.example:443" +
+                "?encryption=none&security=tls&type=xhttp&host=cdn.example&path=%2Fxh" +
+                "&sni=cdn.example&mode=packet-up&alpn=h2#XHTTP",
+        )
+        val config = MciXrayCore.buildConfig(
+            edge = MciConfig.PRIMARY_EDGE,
+            settings = AdvancedSettingsData.DEFAULT.copy(muxEnabled = true),
+            profile = profile,
+        )
+
+        assertTrue(config.contains("\"network\":\"xhttp\""))
+        assertTrue(config.contains("\"xhttpSettings\""))
+        assertTrue(config.contains("\"path\":\"/xh\""))
+        assertTrue(config.contains("\"mode\":\"packet-up\""))
+        assertTrue(config.contains("\"alpn\":[\"h2\"]"))
+        assertTrue(config.contains("\"mux\":{\"enabled\":false"))
+        assertFalse(config.contains("\"httpupgradeSettings\""))
     }
 }

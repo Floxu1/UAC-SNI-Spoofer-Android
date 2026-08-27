@@ -29,9 +29,22 @@ class TlsAlpnResolverTest {
     }
 
     @Test
+    fun xhttpKeepsRequestedAlpnAndDefaultsToH2() {
+        assertEquals(listOf("h2"), TlsAlpnResolver.resolveForTransport("xhttp", ""))
+        assertEquals(
+            listOf("h2", "http/1.1"),
+            TlsAlpnResolver.resolveForTransport("xhttp", "h2,http/1.1"),
+        )
+    }
+
+    @Test
     fun preserveEmptyAlpnOmitsTlsAlpnForDirectCompat() {
         assertTrue(
-            TlsAlpnResolver.resolveForXray("ws", "h2/http1.1", preserveEmptyAlpn = true).isEmpty(),
+            TlsAlpnResolver.resolveForXray("ws", "", preserveEmptyAlpn = true).isEmpty(),
+        )
+        assertEquals(
+            listOf("h2", "http/1.1"),
+            TlsAlpnResolver.resolveForXray("xhttp", "h2,http/1.1", preserveEmptyAlpn = true),
         )
     }
 }

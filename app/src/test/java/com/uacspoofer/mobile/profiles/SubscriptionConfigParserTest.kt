@@ -1,4 +1,4 @@
-﻿package com.uacspoofer.mobile.profiles
+package com.uacspoofer.mobile.profiles
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -33,7 +33,7 @@ class SubscriptionConfigParserTest {
 
         assertEquals(1, result.profiles.size)
         assertEquals("tls", result.profiles.single().security)
-        assertEquals("httpupgrade", result.profiles.single().network)
+        assertEquals("xhttp", result.profiles.single().network)
         assertEquals("cdn.example", result.profiles.single().sni)
     }
 

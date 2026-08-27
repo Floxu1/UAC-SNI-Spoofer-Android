@@ -81,4 +81,34 @@ class ProfileUriParserTest {
         assertEquals(CountryMetadata.UNKNOWN, profile.country)
         assertEquals(80, profile.name.length)
     }
+
+    @Test
+    fun parsesVlessXhttpWithModeAndExtraAndRoundTrips() {
+        val extra = """{"headers":{"X-Pad":"1"},"xmux":{"maxConcurrency":16}}"""
+        val uri = "vless://30980fc4-8789-42df-80d1-0c8e5cd26881@origin.example:443" +
+            "?encryption=none&security=tls&type=xhttp&host=cdn.example&path=%2Fxh" +
+            "&sni=cdn.example&fp=chrome&alpn=h2&mode=stream-up&packetEncoding=xudp" +
+            "&extra=${java.net.URLEncoder.encode(extra, "UTF-8").replace("+", "%20")}#XHTTP"
+        val profile = ProfileUriParser.parse(uri, id = "xhttp")
+        val roundTrip = ProfileUriParser.parse(ProfileUriParser.canonicalUri(profile), id = "xhttp")
+
+        assertEquals(ProxyProtocol.VLESS, profile.protocol)
+        assertEquals("xhttp", profile.network)
+        assertEquals("/xh", profile.path)
+        assertEquals("stream-up", profile.xhttpMode)
+        assertEquals("xudp", profile.packetEncoding)
+        assertEquals("h2", profile.alpn)
+        assertTrue(profile.xhttpExtra.contains("\"maxConcurrency\":16"))
+        assertEquals(profile.copy(rawUri = ""), roundTrip.copy(rawUri = ""))
+    }
+
+    @Test
+    fun acceptsSplitHttpAliasAsXhttp() {
+        val profile = ProfileUriParser.parse(
+            "vless://30980fc4-8789-42df-80d1-0c8e5cd26881@origin.example:443" +
+                "?encryption=none&security=tls&type=splithttp&sni=cdn.example&path=%2F#Split",
+        )
+        assertEquals("xhttp", profile.network)
+        assertEquals("h2", profile.alpn)
+    }
 }

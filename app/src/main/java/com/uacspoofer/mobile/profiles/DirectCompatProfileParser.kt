@@ -24,6 +24,8 @@ object DirectCompatProfileParser {
     fun parseIdentity(profile: ProxyProfile): RuntimeProxyIdentity? =
         parseUnfiltered(profile)?.identity
 
+    internal fun parseRaw(profile: ProxyProfile): DirectCompatProfile? = parseUnfiltered(profile)
+
     private fun parseUnfiltered(profile: ProxyProfile): DirectCompatProfile? {
         if (profile.rawUri.isBlank()) return null
         return runCatching {
@@ -46,12 +48,14 @@ object DirectCompatProfileParser {
         require(address.isNotBlank()) { "Direct profile address is missing" }
         val port = uri.port.takeIf { it in 1..65_535 } ?: 443
         val query = parseQuery(uri.rawQuery)
-        val network = (query["type"] ?: query["network"] ?: "tcp").lowercase()
-        require(network in SUPPORTED_NETWORKS) { "Direct transport $network is unsupported" }
+        val network = ProfileNetworks.requireSupported(query["type"] ?: query["network"] ?: "tcp", "Direct transport")
         val security = (query["security"] ?: "tls").lowercase()
         require(security == "tls") { "Direct compatibility currently requires TLS" }
-        require(query["headertype"].orEmpty().let { it.isBlank() || it.equals("none", true) }) {
-            "Direct TCP header type is unsupported"
+        val headerType = query["headertype"].orEmpty()
+        if (!ProfileNetworks.isXhttp(network)) {
+            require(headerType.isBlank() || headerType.equals("none", true)) {
+                "Direct TCP header type is unsupported"
+            }
         }
         val credential = decode(uri.rawUserInfo.orEmpty()).trim()
         require(credential.isNotBlank()) { "Direct profile credential is missing" }
@@ -75,7 +79,7 @@ object DirectCompatProfileParser {
                 sni = sni,
                 host = query["host"].orEmpty(),
                 path = query["path"].orEmpty(),
-                alpn = TlsAlpnResolver.canonicalString(query["alpn"].orEmpty(), network),
+                alpn = query["alpn"].orEmpty(),
                 fingerprint = query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() },
                 allowInsecure = boolean(query["allowinsecure"] ?: query["insecure"]),
                 flow = query["flow"].orEmpty(),
@@ -83,6 +87,18 @@ object DirectCompatProfileParser {
                 alterId = 0,
                 serviceName = serviceName,
                 authority = query["authority"].orEmpty(),
+                xhttpMode = if (ProfileNetworks.isXhttp(network)) {
+                    ProfileNetworks.normalizeMode(query["mode"].orEmpty())
+                        .ifBlank { ProfileNetworks.optionalMode(headerType) }
+                } else {
+                    ""
+                },
+                xhttpExtra = if (ProfileNetworks.isXhttp(network)) {
+                    ProfileNetworks.normalizeExtra(query["extra"].orEmpty())
+                } else {
+                    ""
+                },
+                packetEncoding = ProfileNetworks.normalizePacketEncoding(query["packetencoding"].orEmpty()),
             ),
         )
     }
@@ -93,12 +109,14 @@ object DirectCompatProfileParser {
         val address = json.optString("add").trim()
         require(address.isNotBlank()) { "Direct VMess address is missing" }
         val port = json.optString("port", "443").toIntOrNull() ?: json.optInt("port", 443)
-        val network = json.optString("net", "tcp").lowercase()
-        require(network in SUPPORTED_NETWORKS) { "Direct VMess transport $network is unsupported" }
+        val network = ProfileNetworks.requireSupported(json.optString("net", "tcp"), "Direct VMess transport")
         val security = json.optString("tls", "tls").lowercase().ifBlank { "tls" }
         require(security == "tls") { "Direct VMess compatibility currently requires TLS" }
-        require(json.optString("type").let { it.isBlank() || it.equals("none", true) }) {
-            "Direct VMess TCP header type is unsupported"
+        val headerType = json.optString("type")
+        if (!ProfileNetworks.isXhttp(network)) {
+            require(headerType.isBlank() || headerType.equals("none", true)) {
+                "Direct VMess TCP header type is unsupported"
+            }
         }
         val serviceName = if (network == "grpc") {
             json.optString("serviceName").ifBlank { json.optString("path").removePrefix("/") }
@@ -125,6 +143,17 @@ object DirectCompatProfileParser {
                 alterId = json.optString("aid", "0").toIntOrNull()?.coerceAtLeast(0) ?: 0,
                 serviceName = serviceName,
                 authority = json.optString("authority"),
+                xhttpMode = if (ProfileNetworks.isXhttp(network)) {
+                    ProfileNetworks.vmessMode(headerType, json.optString("mode"))
+                } else {
+                    ""
+                },
+                xhttpExtra = if (ProfileNetworks.isXhttp(network)) {
+                    ProfileNetworks.normalizeExtra(json.optString("extra"))
+                } else {
+                    ""
+                },
+                packetEncoding = ProfileNetworks.normalizePacketEncoding(json.optString("packetEncoding")),
             ),
         )
     }
@@ -152,6 +181,5 @@ object DirectCompatProfileParser {
         else -> boolean(value?.toString())
     }
 
-    private val SUPPORTED_NETWORKS = setOf("ws", "tcp", "httpupgrade", "grpc")
     private val TRUE_VALUES = setOf("1", "true", "yes", "on")
 }

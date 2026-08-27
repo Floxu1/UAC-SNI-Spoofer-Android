@@ -553,6 +553,9 @@ internal class SniMakerController(context: Context) : Closeable {
                 identity.alterId.toString(),
                 identity.serviceName,
                 identity.authority.lowercase(),
+                identity.xhttpMode.lowercase(),
+                identity.xhttpExtra,
+                identity.packetEncoding.lowercase(),
             ).joinToString("\u001F")
         }
         return ProfileUriParser.canonicalUri(

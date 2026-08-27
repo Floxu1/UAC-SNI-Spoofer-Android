@@ -18,7 +18,11 @@ object TlsAlpnResolver {
     fun canonicalString(raw: String, network: String): String {
         val parsed = parseValues(raw)
         if (parsed.isEmpty()) {
-            return if (network.equals("grpc", ignoreCase = true)) "h2" else "http/1.1"
+            return when {
+                network.equals("grpc", ignoreCase = true) ||
+                    network.equals("xhttp", ignoreCase = true) -> "h2"
+                else -> "http/1.1"
+            }
         }
         return parsed.joinToString(",")
     }
@@ -35,6 +39,7 @@ object TlsAlpnResolver {
                 add("http/1.1")
                 requested.filterNot { isHttp11(it) }.forEach { add(it) }
             }
+            "xhttp" -> requested.ifEmpty { listOf("h2") }
             else -> requested.ifEmpty { listOf("http/1.1") }
         }
     }
@@ -44,10 +49,15 @@ object TlsAlpnResolver {
         rawAlpn: String,
         preserveEmptyAlpn: Boolean,
     ): List<String> {
-        if (preserveEmptyAlpn) return emptyList()
+        if (preserveEmptyAlpn) return parseValues(rawAlpn)
         val resolved = resolveForTransport(network, rawAlpn)
         return resolved.ifEmpty {
-            listOf(if (network.equals("grpc", ignoreCase = true)) "h2" else "http/1.1")
+            listOf(
+                if (
+                    network.equals("grpc", ignoreCase = true) ||
+                    network.equals("xhttp", ignoreCase = true)
+                ) "h2" else "http/1.1",
+            )
         }
     }
 

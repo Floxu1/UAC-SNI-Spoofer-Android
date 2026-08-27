@@ -499,24 +499,41 @@ internal fun prioritizeAdaptiveCandidates(
     savedBackupRoute: AdaptiveCandidate?,
     learnedId: String?,
     maxAdaptiveCandidates: Int,
+    connectChampion: AdaptiveCandidate? = null,
 ): List<AdaptiveCandidate> {
     val rawPool = raw.take(maxAdaptiveCandidates.coerceAtLeast(0))
     val diagnostic = rawPool.firstOrNull { it.id == AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID }
+    val lastGood = connectChampion?.takeIf { candidate ->
+        val endpoint = canonicalEndpointKey(candidate.edge.address, candidate.edge.port)
+        savedRoute == null || canonicalEndpointKey(savedRoute.edge.address, savedRoute.edge.port) != endpoint
+    }
+    val reservedEndpoints = buildSet {
+        lastGood?.let { add(canonicalEndpointKey(it.edge.address, it.edge.port)) }
+        diagnostic?.let { add(canonicalEndpointKey(it.edge.address, it.edge.port)) }
+    }
     val learned = learnedId?.let { id ->
-        rawPool.firstOrNull { it.id == id && it.id != AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID }
-            ?.copy(learned = true)
+        rawPool.firstOrNull { candidate ->
+            candidate.id == id &&
+                candidate.id != AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID &&
+                canonicalEndpointKey(candidate.edge.address, candidate.edge.port) !in reservedEndpoints
+        }?.copy(learned = true)
     }
     return buildList {
         if (savedRoute != null) add(savedRoute)
         if (savedBackupRoute != null) add(savedBackupRoute)
+        if (lastGood != null) add(lastGood.copy(learned = true))
         if (diagnostic != null) {
             add(diagnostic.copy(learned = learnedId == AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID))
         }
-        if (learned != null && learned.id != savedRoute?.id) add(learned)
+        if (learned != null && learned.id != savedRoute?.id && learned.id != lastGood?.id) add(learned)
         addAll(
-            rawPool.filterNot {
-                it.id == learnedId || it.id == AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID ||
-                    it.id == savedRoute?.id || it.id == savedBackupRoute?.id
+            rawPool.filterNot { candidate ->
+                candidate.id == learnedId ||
+                    candidate.id == AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID ||
+                    candidate.id == savedRoute?.id ||
+                    candidate.id == savedBackupRoute?.id ||
+                    candidate.id == lastGood?.id ||
+                    canonicalEndpointKey(candidate.edge.address, candidate.edge.port) in reservedEndpoints
             },
         )
     }.distinctBy(AdaptiveCandidate::id)
@@ -837,7 +854,10 @@ class AdaptiveProfileStore(context: Context) {
     }
 }
 
-class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
+class AdaptiveCandidatePlanner(
+    private val store: AdaptiveProfileStore,
+    private val edgePoolStore: ConnectEdgePoolStore? = null,
+) {
     fun signature(settings: AdvancedSettingsData, profile: ProxyProfile): String =
         signatureFor(settings, profile)
 
@@ -845,7 +865,23 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         base: AdvancedSettingsData,
         network: NetworkFingerprint,
         profile: ProxyProfile,
-    ): List<AdaptiveCandidate> {
+        poolOverride: List<MciEdge>? = null,
+        includeSavedRoutes: Boolean = true,
+    ): List<AdaptiveCandidate> = connectPlan(
+        base = base,
+        network = network,
+        profile = profile,
+        poolOverride = poolOverride,
+        includeSavedRoutes = includeSavedRoutes,
+    ).candidates
+
+    fun connectPlan(
+        base: AdvancedSettingsData,
+        network: NetworkFingerprint,
+        profile: ProxyProfile,
+        poolOverride: List<MciEdge>? = null,
+        includeSavedRoutes: Boolean = true,
+    ): AdaptiveConnectPlan {
         val settings = base.validated()
         val signature = signature(settings, profile)
         val primary = MciEdge(settings.primaryAddress, settings.primaryPort, "primary", settings.primaryMaxSplit)
@@ -853,7 +889,7 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         val fallback = MciEdge(settings.fallbackAddress, settings.fallbackPort, "fallback", settings.fallbackMaxSplit)
         val cdnRescueA = MciEdge(settings.telegramFallbackAddress, settings.telegramPort, "cdn-rescue-a", 2)
         val cdnRescueB = MciEdge(settings.telegramAddress, settings.telegramPort, "cdn-rescue-b", 100)
-        val directCompat = if (network.carrierClass == "mci" && !profile.usesAdvancedSettingsIdentity()) {
+        val directCompat = if (!profile.usesAdvancedSettingsIdentity()) {
             DirectCompatProfileParser.parse(profile)
         } else {
             null
@@ -861,33 +897,33 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         val savedRoute = store.savedRoute(network, profile, signature)
             ?.toCandidate(settings, profile)
             ?.copy(learned = true)
+            ?.takeIf { includeSavedRoutes }
         val savedBackupRoute = store.savedBackupRoute(network, profile, signature)
-            ?.takeIf { it.id != savedRoute?.id }
+            ?.takeIf { includeSavedRoutes && it.id != savedRoute?.id }
             ?.toCandidate(settings, profile)
             ?.copy(learned = false)
+        val directCandidate = directCompat?.let { direct ->
+            AdaptiveCandidate(
+                id = MCI_DIRECT_COMPAT_ID,
+                label = "Direct profile compatibility",
+                edge = MciEdge(
+                    address = direct.address,
+                    port = direct.port,
+                    role = MCI_DIRECT_COMPAT_ID,
+                    finalmaskMaxSplit = 1,
+                ),
+                settings = settings,
+                runtimeOptions = MciXrayRuntimeOptions(
+                    identityOverride = direct.identity,
+                    finalmaskEnabled = false,
+                    preserveEmptyAlpn = true,
+                    preserveTransportFields = true,
+                ),
+            )
+        }
         val raw = when (network.carrierClass) {
             "mci" -> buildList {
-                directCompat?.let { direct ->
-                    add(
-                        AdaptiveCandidate(
-                            id = MCI_DIRECT_COMPAT_ID,
-                            label = "Direct profile compatibility",
-                            edge = MciEdge(
-                                address = direct.address,
-                                port = direct.port,
-                                role = MCI_DIRECT_COMPAT_ID,
-                                finalmaskMaxSplit = 1,
-                            ),
-                            settings = settings,
-                            runtimeOptions = MciXrayRuntimeOptions(
-                                identityOverride = direct.identity,
-                                finalmaskEnabled = false,
-                                preserveEmptyAlpn = true,
-                                preserveTransportFields = true,
-                            ),
-                        ),
-                    )
-                }
+                directCandidate?.let(::add)
                 add(candidate("uac-primary-google", "UAC SNI primary + Google DNS", primary, settings, AdaptiveDnsResolvers.GOOGLE))
                 add(candidate("uac-primary-cloudflare-fast", "UAC SNI low delay + Cloudflare DNS", primary, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.CLOUDFLARE))
                 MCI_EDGE_POOL_ADDRESSES.forEachIndexed { index, address ->
@@ -913,36 +949,73 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
                 add(candidate("uac-cdn-b-opendns", "UAC SNI CDN B + OpenDNS", cdnRescueB, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.OPENDNS))
                 add(candidate("uac-primary-deep-google", "UAC SNI deep-fragment rescue", primary.copy(finalmaskMaxSplit = 100), settings.copy(finalmaskDelayMs = 5), AdaptiveDnsResolvers.GOOGLE))
             }
-            "irancell" -> listOf(
-                candidate("irancell-deep-cloudflare", "Irancell deep + Cloudflare DNS", irancell, settings, AdaptiveDnsResolvers.CLOUDFLARE),
-                candidate("irancell-primary-google-fast", "Irancell low delay + Google DNS", primary, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.GOOGLE),
-                candidate("irancell-fallback-quad9", "Irancell fallback + Quad9 DNS", fallback, settings, AdaptiveDnsResolvers.QUAD9),
-                candidate("irancell-cdn-a-adguard", "Irancell CDN A + AdGuard DNS", cdnRescueA.copy(finalmaskMaxSplit = 100), settings.copy(finalmaskDelayMs = 15), AdaptiveDnsResolvers.ADGUARD),
-                candidate("irancell-cdn-b-opendns", "Irancell CDN B + OpenDNS", cdnRescueB, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.OPENDNS),
-                candidate("irancell-primary-cloudflare", "Irancell standard rescue", primary, settings, AdaptiveDnsResolvers.CLOUDFLARE),
-            )
-            else -> listOf(
-                candidate("fixed-primary-cloudflare", "Primary + Cloudflare DNS", primary, settings, AdaptiveDnsResolvers.CLOUDFLARE),
-                candidate("fixed-primary-google-fast", "Low delay + Google DNS", primary, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.GOOGLE),
-                candidate("fixed-fallback-quad9", "Fallback + Quad9 DNS", fallback, settings, AdaptiveDnsResolvers.QUAD9),
-                candidate("fixed-cdn-a-adguard", "CDN A + AdGuard DNS", cdnRescueA, settings.copy(finalmaskDelayMs = 15), AdaptiveDnsResolvers.ADGUARD),
-                candidate("fixed-cdn-b-opendns", "CDN B + OpenDNS", cdnRescueB, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.OPENDNS),
-                candidate("fixed-primary-deep-google", "Deep-fragment rescue", primary.copy(finalmaskMaxSplit = 100), settings.copy(finalmaskDelayMs = 5), AdaptiveDnsResolvers.GOOGLE),
-            )
+            "irancell" -> buildList {
+                directCandidate?.let(::add)
+                add(candidate("irancell-deep-cloudflare", "Irancell deep + Cloudflare DNS", irancell, settings, AdaptiveDnsResolvers.CLOUDFLARE))
+                add(candidate("irancell-primary-google-fast", "Irancell low delay + Google DNS", primary, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.GOOGLE))
+                add(candidate("irancell-fallback-quad9", "Irancell fallback + Quad9 DNS", fallback, settings, AdaptiveDnsResolvers.QUAD9))
+                add(candidate("irancell-cdn-a-adguard", "Irancell CDN A + AdGuard DNS", cdnRescueA.copy(finalmaskMaxSplit = 100), settings.copy(finalmaskDelayMs = 15), AdaptiveDnsResolvers.ADGUARD))
+                add(candidate("irancell-cdn-b-opendns", "Irancell CDN B + OpenDNS", cdnRescueB, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.OPENDNS))
+                add(candidate("irancell-primary-cloudflare", "Irancell standard rescue", primary, settings, AdaptiveDnsResolvers.CLOUDFLARE))
+            }
+            else -> buildList {
+                directCandidate?.let(::add)
+                add(candidate("fixed-primary-cloudflare", "Primary + Cloudflare DNS", primary, settings, AdaptiveDnsResolvers.CLOUDFLARE))
+                add(candidate("fixed-primary-google-fast", "Low delay + Google DNS", primary, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.GOOGLE))
+                add(candidate("fixed-fallback-quad9", "Fallback + Quad9 DNS", fallback, settings, AdaptiveDnsResolvers.QUAD9))
+                add(candidate("fixed-cdn-a-adguard", "CDN A + AdGuard DNS", cdnRescueA, settings.copy(finalmaskDelayMs = 15), AdaptiveDnsResolvers.ADGUARD))
+                add(candidate("fixed-cdn-b-opendns", "CDN B + OpenDNS", cdnRescueB, settings.copy(finalmaskDelayMs = 0), AdaptiveDnsResolvers.OPENDNS))
+                add(candidate("fixed-primary-deep-google", "Deep-fragment rescue", primary.copy(finalmaskMaxSplit = 100), settings.copy(finalmaskDelayMs = 5), AdaptiveDnsResolvers.GOOGLE))
+            }
         }
-        val learnedId = store.winner(network, profile, signature)
+        val savedChampionEdge = if (includeSavedRoutes) {
+            edgePoolStore?.champion(network, profile.id)
+        } else {
+            null
+        }
+        val pool = when {
+            poolOverride != null -> ConnectPoolSelection(
+                poolWithChampionFirst(poolOverride, savedChampionEdge),
+                ConnectPoolSelection.SOURCE_RESCUE,
+            )
+            else -> {
+                val selection = resolveConnectPool(
+                    thisPool = edgePoolStore?.pool(network, profile.id),
+                    lastPool = edgePoolStore?.lastPool(profile.id),
+                    lastPoolKey = edgePoolStore?.lastPoolKey(profile.id),
+                    thisKey = connectPoolScopeKey(network.learningKey(), profile.id),
+                )
+                selection.copy(edges = poolWithChampionFirst(selection.edges, savedChampionEdge))
+            }
+        }
+        val pooled = applyConnectEdgePool(raw, pool.edges)
+        val template = pooled.firstOrNull { it.id != MCI_DIRECT_COMPAT_ID }
+        val connectChampion = savedChampionEdge?.takeIf(::persistableConnectEdge)?.let { edge ->
+            AdaptiveCandidate(
+                id = CONNECT_LAST_GOOD_ID,
+                label = "Last good connect ${edge.address}:${edge.port}",
+                edge = edge.copy(role = "connect-last-good"),
+                settings = template?.settings ?: settings,
+                runtimeOptions = template?.runtimeOptions ?: MciXrayRuntimeOptions.DEFAULT,
+                learned = true,
+            )
+        }?.takeIf { includeSavedRoutes }
+        val learnedId = store.winner(network, profile, signature).takeIf { includeSavedRoutes }
         val ordered = prioritizeAdaptiveCandidates(
-            raw = raw,
+            raw = pooled,
             savedRoute = savedRoute,
             savedBackupRoute = savedBackupRoute,
             learnedId = learnedId,
             maxAdaptiveCandidates = MAX_CANDIDATES,
+            connectChampion = connectChampion,
         )
         val (ready, coolingDown) = ordered.partition {
             !store.isCoolingDown(network, profile, signature, it.id)
         }
-        return (ready + coolingDown)
-            .distinctBy(AdaptiveCandidate::id)
+        return AdaptiveConnectPlan(
+            candidates = (ready + coolingDown).distinctBy(AdaptiveCandidate::id),
+            pool = pool,
+        )
     }
 
     fun routeSpeedCandidates(
@@ -1156,6 +1229,7 @@ class AdaptiveCandidatePlanner(private val store: AdaptiveProfileStore) {
         const val MAX_CANDIDATES = 11
         private const val STRATEGY_VERSION = "adaptive-v9-offline-fingerprint-direct-signature"
         const val MCI_DIRECT_COMPAT_ID = "uac-direct-compat"
+        const val CONNECT_LAST_GOOD_ID = "connect-last-good"
         private const val MCI_EDGE_POOL_PORT = 443
         private val MCI_EDGE_POOL_ADDRESSES = listOf(
             "104.26.14.85",

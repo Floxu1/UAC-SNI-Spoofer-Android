@@ -35,7 +35,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,8 +62,11 @@ import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.ui.theme.UacColors
+import kotlinx.coroutines.delay
 
 @Composable
 internal fun HomeHeader(
@@ -376,6 +383,17 @@ internal fun ConnectButton(
 internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
+    val routeProgress by ConnectionStateStore.routeProgress.collectAsStateWithLifecycle()
+    var showRouteProgress by remember(state) { mutableStateOf(false) }
+    LaunchedEffect(state) {
+        if (state != ConnectionState.CONNECTING) {
+            showRouteProgress = false
+            return@LaunchedEffect
+        }
+        showRouteProgress = false
+        delay(CONNECTING_ROUTE_HINT_DELAY_MS)
+        showRouteProgress = true
+    }
     val status = when (state) {
         ConnectionState.DISCONNECTED -> homeText("Disconnected", "وصل نیست")
         ConnectionState.CONNECTING -> homeText("Connecting...", "در حال اتصال…")
@@ -383,9 +401,17 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
         ConnectionState.DISCONNECTING -> homeText("Disconnecting...", "در حال قطع...")
         ConnectionState.ERROR -> homeText("Connection failed", "اتصال برقرار نشد")
     }
+    val connectingHint = if (showRouteProgress && routeProgress.isActive) {
+        homeText(
+            "Connecting with route ${routeProgress.current}/${routeProgress.total}",
+            "اتصال با مسیر ${routeProgress.current}/${routeProgress.total}",
+        )
+    } else {
+        homeText("Establishing a secure tunnel", "در حال ساخت اتصال امن")
+    }
     val hint = when (state) {
         ConnectionState.DISCONNECTED -> homeText("Tap the button to connect", "برای وصل شدن، دکمه رو بزن")
-        ConnectionState.CONNECTING -> homeText("Establishing a secure tunnel", "در حال ساخت اتصال امن")
+        ConnectionState.CONNECTING -> connectingHint
         ConnectionState.CONNECTED -> homeText("Your connection is secure", "اتصال شما امنه")
         ConnectionState.DISCONNECTING -> homeText("Closing the secure tunnel", "در حال بستن اتصال امن")
         ConnectionState.ERROR -> homeText("Tap retry to try again", "دوباره امتحان کن")
@@ -414,9 +440,14 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             fontWeight = FontWeight.Normal,
             fontFamily = localizedFont,
             textAlign = TextAlign.Center,
+            style = TextStyle(
+                textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
+            ),
         )
     }
 }
+
+private const val CONNECTING_ROUTE_HINT_DELAY_MS = 2_000L
 
 @Composable
 internal fun FeatureCard(accent: Color, compact: Boolean, modifier: Modifier = Modifier) {

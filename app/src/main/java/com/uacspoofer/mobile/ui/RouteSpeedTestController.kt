@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciEdge
@@ -452,7 +454,15 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     fun loadProfileLibrary() {
         if (testing || loading) return
 
-        val latest = selectedTestProfileLibrary(profileStore.snapshot())
+        val snapshot = profileStore.snapshot()
+        val currentId = resolveRouteSpeedTestProfileId(
+            selectedId = snapshot.selectedId,
+            profileIds = snapshot.allProfiles.map(ProxyProfile::id),
+            connected = ConnectionStateStore.state.value == ConnectionState.CONNECTED,
+            activeProfileId = profileStore.activeProfile()?.id,
+        )
+        preferences.edit().putString(KEY_TEST_PROFILE_ID, currentId).apply()
+        val latest = snapshot.copy(selectedId = currentId)
         profileLibrary = latest
 
         val prepared = plan

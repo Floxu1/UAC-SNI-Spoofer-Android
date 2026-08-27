@@ -12,10 +12,15 @@ object LocalForwardProfile {
     const val PORT = 40443
     const val ROUTING_PORT = 443
 
-    fun isLocalForward(profile: ProxyProfile): Boolean =
-        profile.serverPort == PORT &&
+    fun isLocalForward(profile: ProxyProfile): Boolean {
+        val storedLoopback = profile.serverPort == PORT &&
             (profile.serverHost.equals(HOST, ignoreCase = true) ||
                 profile.serverHost.equals("localhost", ignoreCase = true))
+        if (!storedLoopback) return false
+        val original = DirectCompatProfileParser.parseRaw(profile) ?: return true
+        return original.address.equals(HOST, ignoreCase = true) ||
+            original.address.equals("localhost", ignoreCase = true)
+    }
 
     fun routingIdentity(profile: ProxyProfile, settings: AdvancedSettingsData): RuntimeProxyIdentity =
         DirectCompatProfileParser.parseIdentity(profile) ?: profile.runtimeIdentity(settings)

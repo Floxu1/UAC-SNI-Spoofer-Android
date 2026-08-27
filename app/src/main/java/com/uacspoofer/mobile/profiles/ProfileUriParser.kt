@@ -8,10 +8,9 @@ import java.util.UUID
 import org.json.JSONObject
 
 object ProfileUriParser {
-    private val supportedNetworks = setOf("ws", "tcp", "httpupgrade", "grpc")
     private val recognizedKeys = setOf(
         "type", "network", "security", "sni", "servername", "host", "path", "alpn", "fp", "fingerprint",
-        "flow", "encryption", "servicename", "authority", "headertype",
+        "flow", "encryption", "servicename", "authority", "headertype", "mode", "extra", "packetencoding",
         "allowinsecure", "insecure", "country", "countrycode", "cc", "location",
     )
 
@@ -43,12 +42,13 @@ object ProfileUriParser {
         val unknown = query.keys - recognizedKeys
         require(unknown.isEmpty()) { "Unsupported parameter: ${unknown.first()}" }
 
-        val network = (query["type"] ?: query["network"] ?: "ws").lowercase()
-        require(network in supportedNetworks) { "Unsupported transport: $network" }
+        val network = ProfileNetworks.requireSupported(query["type"] ?: query["network"] ?: "ws")
         val security = (query["security"] ?: "tls").lowercase()
         require(security == "tls") { "UAC SNI requires TLS security" }
         val headerType = query["headertype"].orEmpty().lowercase()
-        require(headerType.isBlank() || headerType == "none") { "Unsupported TCP header type: $headerType" }
+        if (!ProfileNetworks.isXhttp(network)) {
+            require(headerType.isBlank() || headerType == "none") { "Unsupported TCP header type: $headerType" }
+        }
 
         val encryption = query["encryption"].orEmpty().ifBlank { "none" }
         if (protocol == ProxyProtocol.VLESS) {
@@ -66,6 +66,18 @@ object ProfileUriParser {
         val allowInsecure = parseBoolean(query["allowinsecure"] ?: query["insecure"])
         val serviceName = query["servicename"].orEmpty()
         val authority = query["authority"].orEmpty()
+        val xhttpMode = if (ProfileNetworks.isXhttp(network)) {
+            ProfileNetworks.normalizeMode(query["mode"].orEmpty())
+                .ifBlank { ProfileNetworks.optionalMode(headerType) }
+        } else {
+            ""
+        }
+        val xhttpExtra = if (ProfileNetworks.isXhttp(network)) {
+            ProfileNetworks.normalizeExtra(query["extra"].orEmpty())
+        } else {
+            ""
+        }
+        val packetEncoding = ProfileNetworks.normalizePacketEncoding(query["packetencoding"].orEmpty())
         val country = CountryMetadata.resolve(
             code = query["countrycode"] ?: query["cc"],
             name = query["country"] ?: query["location"],
@@ -97,6 +109,9 @@ object ProfileUriParser {
             alterId = 0,
             serviceName = serviceName,
             authority = authority,
+            xhttpMode = xhttpMode,
+            xhttpExtra = xhttpExtra,
+            packetEncoding = packetEncoding,
             country = country,
             rawUri = text,
         )
@@ -135,14 +150,18 @@ object ProfileUriParser {
                 .put("aid", profile.alterId.toString())
                 .put("scy", profile.encryption.ifBlank { "auto" })
                 .put("net", profile.network)
-                .put("type", "none")
+                .put("type", if (ProfileNetworks.isXhttp(profile.network)) profile.xhttpMode.ifBlank { "none" } else "none")
                 .put("host", profile.host)
                 .put("path", profile.path)
                 .put("tls", profile.security)
                 .put("sni", profile.sni)
                 .put("alpn", profile.alpn)
                 .put("fp", profile.fingerprint)
-                .apply { profile.country.countryCode?.let { put("countryCode", it) } }
+                .apply {
+                    if (profile.xhttpExtra.isNotBlank()) put("extra", profile.xhttpExtra)
+                    if (profile.packetEncoding.isNotBlank()) put("packetEncoding", profile.packetEncoding)
+                    profile.country.countryCode?.let { put("countryCode", it) }
+                }
                 .toString()
             return "vmess://${Base64Codec.encode(payload.toByteArray(Charsets.UTF_8))}"
         }
@@ -160,6 +179,9 @@ object ProfileUriParser {
         if (profile.flow.isNotBlank()) query["flow"] = profile.flow
         if (profile.serviceName.isNotBlank()) query["serviceName"] = profile.serviceName
         if (profile.authority.isNotBlank()) query["authority"] = profile.authority
+        if (profile.xhttpMode.isNotBlank()) query["mode"] = profile.xhttpMode
+        if (profile.xhttpExtra.isNotBlank()) query["extra"] = profile.xhttpExtra
+        if (profile.packetEncoding.isNotBlank()) query["packetEncoding"] = profile.packetEncoding
         profile.country.countryCode?.let { query["countryCode"] = it }
         if (profile.country.isKnown) query["country"] = profile.country.countryName
         val encodedQuery = query.entries.joinToString("&") { (key, value) -> "$key=${encode(value)}" }
@@ -190,15 +212,29 @@ object ProfileUriParser {
         require(sourceHost.isNotBlank()) { "VMess server host is missing" }
         val sourcePort = json.optString("port", "443").toIntOrNull() ?: json.optInt("port", 443)
         require(sourcePort in 1..65_535) { "VMess server port is invalid" }
-        val network = json.optString("net", "ws").lowercase()
-        require(network in supportedNetworks) { "Unsupported VMess transport: $network" }
+        val network = ProfileNetworks.requireSupported(json.optString("net", "ws"), "VMess transport")
         val security = json.optString("tls", "tls").lowercase().ifBlank { "tls" }
         require(security == "tls") { "SNI mode requires TLS security" }
         val sni = json.optString("sni").ifBlank { json.optString("host") }.ifBlank { sourceHost }
         val host = json.optString("host").ifBlank { sni }
         val path = normalizePath(json.optString("path"), network)
+        val headerType = json.optString("type")
         val serviceName = if (network == "grpc") json.optString("path").removePrefix("/") else ""
         if (network == "grpc") require(serviceName.isNotBlank()) { "gRPC serviceName is missing" }
+        if (!ProfileNetworks.isXhttp(network)) {
+            require(headerType.isBlank() || headerType.equals("none", true)) { "Unsupported TCP header type: $headerType" }
+        }
+        val xhttpMode = if (ProfileNetworks.isXhttp(network)) {
+            ProfileNetworks.vmessMode(headerType, json.optString("mode"))
+        } else {
+            ""
+        }
+        val xhttpExtra = if (ProfileNetworks.isXhttp(network)) {
+            ProfileNetworks.normalizeExtra(json.optString("extra"))
+        } else {
+            ""
+        }
+        val packetEncoding = ProfileNetworks.normalizePacketEncoding(json.optString("packetEncoding"))
         val country = CountryMetadata.resolve(json.optString("countryCode"), json.optString("country"))
         val name = nameOverride?.trim().orEmpty().ifBlank {
             json.optString("ps").trim().ifBlank { "VMESS • $sourceHost" }
@@ -215,12 +251,15 @@ object ProfileUriParser {
             sni = sni,
             host = host,
             path = path,
-            alpn = json.optString("alpn").ifBlank { if (network == "grpc") "h2" else "http/1.1" },
+            alpn = json.optString("alpn").ifBlank { TlsAlpnResolver.canonicalString("", network) },
             fingerprint = json.optString("fp").ifBlank { "chrome" },
             allowInsecure = parseBoolean(json.optString("allowInsecure")),
             encryption = json.optString("scy", "auto").ifBlank { "auto" },
             alterId = json.optString("aid", "0").toIntOrNull()?.coerceAtLeast(0) ?: 0,
             serviceName = serviceName,
+            xhttpMode = xhttpMode,
+            xhttpExtra = xhttpExtra,
+            packetEncoding = packetEncoding,
             country = country,
             rawUri = text,
         )
@@ -244,8 +283,9 @@ object ProfileUriParser {
         val query = parseQueryLenient(uri.rawQuery)
         val sourceNetwork = (query["type"] ?: query["network"] ?: "ws").lowercase()
         val network = when (sourceNetwork) {
-            "ws", "tcp", "httpupgrade", "grpc" -> sourceNetwork
-            "xhttp", "splithttp", "h2", "http" -> "httpupgrade"
+            "ws", "tcp", "httpupgrade", "grpc", "xhttp" -> sourceNetwork
+            "splithttp" -> "xhttp"
+            "h2", "http" -> "httpupgrade"
             "raw", "none" -> "tcp"
             else -> if (query["host"].orEmpty().isNotBlank() || query["path"].orEmpty().isNotBlank()) "ws" else "tcp"
         }
@@ -262,7 +302,7 @@ object ProfileUriParser {
             "sni" to sni,
             "host" to host,
             "path" to query["path"].orEmpty(),
-            "alpn" to query["alpn"].orEmpty().ifBlank { if (network == "grpc") "h2" else "http/1.1" },
+            "alpn" to query["alpn"].orEmpty().ifBlank { TlsAlpnResolver.canonicalString("", network) },
             "fp" to query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() }.ifBlank { "chrome" },
         )
         if (scheme == "vless") sanitized["encryption"] = "none"
@@ -271,6 +311,11 @@ object ProfileUriParser {
         }
         serviceName.takeIf(String::isNotBlank)?.let { sanitized["serviceName"] = it }
         query["authority"]?.takeIf(String::isNotBlank)?.let { sanitized["authority"] = it }
+        if (ProfileNetworks.isXhttp(network)) {
+            query["mode"]?.takeIf(String::isNotBlank)?.let { sanitized["mode"] = it }
+            query["extra"]?.takeIf(String::isNotBlank)?.let { sanitized["extra"] = it }
+        }
+        query["packetencoding"]?.takeIf(String::isNotBlank)?.let { sanitized["packetEncoding"] = it }
         (query["countrycode"] ?: query["cc"])?.takeIf(String::isNotBlank)?.let { sanitized["countryCode"] = it }
         (query["country"] ?: query["location"])?.takeIf(String::isNotBlank)?.let { sanitized["country"] = it }
         val insecure = query["allowinsecure"] ?: query["insecure"]
@@ -288,8 +333,9 @@ object ProfileUriParser {
             .getOrElse { throw IllegalArgumentException("Invalid VMess Base64 payload") }
         val sourceNetwork = json.optString("net", "ws").lowercase()
         val network = when (sourceNetwork) {
-            "ws", "tcp", "httpupgrade", "grpc" -> sourceNetwork
-            "xhttp", "splithttp", "h2", "http" -> "httpupgrade"
+            "ws", "tcp", "httpupgrade", "grpc", "xhttp" -> sourceNetwork
+            "splithttp" -> "xhttp"
+            "h2", "http" -> "httpupgrade"
             "raw", "none" -> "tcp"
             else -> if (json.optString("host").isNotBlank() || json.optString("path").isNotBlank()) "ws" else "tcp"
         }
@@ -300,7 +346,7 @@ object ProfileUriParser {
             .put("sni", sni)
             .put("host", json.optString("host").ifBlank { sni })
             .put("fp", json.optString("fp").ifBlank { "chrome" })
-            .put("alpn", json.optString("alpn").ifBlank { if (network == "grpc") "h2" else "http/1.1" })
+            .put("alpn", json.optString("alpn").ifBlank { TlsAlpnResolver.canonicalString("", network) })
         return "vmess://${Base64Codec.encode(json.toString().toByteArray(Charsets.UTF_8))}"
     }
 

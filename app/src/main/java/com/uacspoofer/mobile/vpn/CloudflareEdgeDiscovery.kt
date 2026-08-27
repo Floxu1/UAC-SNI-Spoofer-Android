@@ -395,7 +395,7 @@ internal class CloudflareEdgeDiscovery(
             ranges = ranges.ranges,
             trustedProfile = profile.usesAdvancedSettingsIdentity(),
         )
-        if (decision.status == CloudflareSuitability.ELIGIBLE) {
+        if (shouldSampleOfficialCloudflareRanges(decision)) {
             val usableRanges = ranges.ranges.filter { cidr ->
                 if (cidr.isIpv4) networkContext.fingerprint.hasIpv4 || !networkContext.fingerprint.hasIpv6
                 else networkContext.fingerprint.hasIpv6 && !validated.ipv4Only
@@ -542,7 +542,7 @@ internal fun evaluateCloudflareSuitability(
     }
     val network = identity.network.lowercase(Locale.ROOT)
     val protocolCompatible = when (network) {
-        "ws", "httpupgrade" -> port in CLOUDFLARE_HTTPS_PORTS
+        "ws", "httpupgrade", "xhttp" -> port in CLOUDFLARE_HTTPS_PORTS
         "grpc" -> port == 443 && "h2" in effectiveDiscoveryAlpn(identity)
         "tcp" -> false
         else -> false
@@ -583,6 +583,9 @@ internal fun evaluateCloudflareSuitability(
         CloudflareSuitabilityDecision(CloudflareSuitability.UNKNOWN, "no Cloudflare range evidence on the selected network")
     }
 }
+
+internal fun shouldSampleOfficialCloudflareRanges(decision: CloudflareSuitabilityDecision): Boolean =
+    decision.status == CloudflareSuitability.ELIGIBLE || decision.status == CloudflareSuitability.UNKNOWN
 
 internal fun selectSubnetDiverseEdges(
     candidates: List<CloudflareEdgeCandidate>,
@@ -722,7 +725,7 @@ private fun mergeCandidate(
 
 internal fun effectiveDiscoveryAlpn(identity: RuntimeProxyIdentity): List<String> {
     val explicit = explicitDiscoveryAlpn(identity)
-    return explicit.ifEmpty { listOf(if (identity.network.equals("grpc", true)) "h2" else "http/1.1") }
+    return explicit.ifEmpty { listOf(if (identity.network.equals("grpc", true) || identity.network.equals("xhttp", true)) "h2" else "http/1.1") }
 }
 
 private fun explicitDiscoveryAlpn(identity: RuntimeProxyIdentity): List<String> =

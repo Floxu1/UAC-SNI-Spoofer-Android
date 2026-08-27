@@ -368,6 +368,14 @@ fun MainScreen(
                         },
                     )
             }
+            ConnectRescueOverlay(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(WindowInsets.safeDrawing.asPaddingValues())
+                    .padding(bottom = 12.dp)
+                    .zIndex(20f),
+            )
             HomeConfigsDialog(
                 visible = homeConfigsVisible,
                 library = homeConfigsLibrary,

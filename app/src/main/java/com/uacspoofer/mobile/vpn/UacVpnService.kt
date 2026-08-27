@@ -83,10 +83,12 @@ class UacVpnService : VpnService() {
     private lateinit var dnsProbe: SocksDnsProbe
     private lateinit var adaptiveProbe: AdaptiveConnectionProbe
     private lateinit var adaptiveProfileStore: AdaptiveProfileStore
+    private lateinit var connectEdgePoolStore: ConnectEdgePoolStore
     private lateinit var adaptivePlanner: AdaptiveCandidatePlanner
     private lateinit var fingerprintResolver: NetworkFingerprintResolver
     private lateinit var advancedSettingsStore: AdvancedSettingsStore
     private lateinit var profileStore: ProfileStore
+    private lateinit var latencyTester: com.uacspoofer.mobile.profiles.ProfileLatencyTester
 
     override fun onCreate() {
         super.onCreate()
@@ -99,10 +101,12 @@ class UacVpnService : VpnService() {
         dnsProbe = SocksDnsProbe()
         adaptiveProbe = AdaptiveConnectionProbe(connectivityProbe, tunConnectivityProbe, dnsProbe)
         adaptiveProfileStore = AdaptiveProfileStore(this)
-        adaptivePlanner = AdaptiveCandidatePlanner(adaptiveProfileStore)
+        connectEdgePoolStore = ConnectEdgePoolStore(this)
+        adaptivePlanner = AdaptiveCandidatePlanner(adaptiveProfileStore, connectEdgePoolStore)
         fingerprintResolver = NetworkFingerprintResolver(this)
         advancedSettingsStore = AdvancedSettingsStore(this)
         profileStore = ProfileStore(this)
+        latencyTester = com.uacspoofer.mobile.profiles.ProfileLatencyTester(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -133,6 +137,7 @@ class UacVpnService : VpnService() {
 
     override fun onDestroy() {
         AppLogRepository.info(LogSource.SERVICE, "Connection service stopping")
+        ConnectRescueStore.hide()
         generation.incrementAndGet()
         connectJob?.cancel()
         healthJob?.cancel()
@@ -373,6 +378,7 @@ class UacVpnService : VpnService() {
         if (resourcesActive || connectJob?.isActive == true) return
         val settings = advancedSettingsStore.snapshot()
         activeConnectionMode = settings.connectionMode
+        ConnectRescueStore.hide()
         AppLogRepository.info(LogSource.SERVICE, "Connection requested mode=$activeConnectionMode")
         profileStore.clearActive()
         ConnectionStateStore.markConnecting()
@@ -392,8 +398,9 @@ class UacVpnService : VpnService() {
                 val profile = profileStore.selectedProfile()
                 lifecycleMutex.withLock { connectRoutes(token, settings, profile) }
             } catch (_: CancellationException) {
-                
+                ConnectRescueStore.hide()
             } catch (error: Throwable) {
+                ConnectRescueStore.hide()
                 Log.e(TAG, "connection worker failed", error)
                 AppLogRepository.error(LogSource.SERVICE, "Connection worker failed", error)
                 lifecycleMutex.withLock {
@@ -414,6 +421,7 @@ class UacVpnService : VpnService() {
 
     private fun requestDisconnect(closeAppTasks: Boolean = false) {
         AppLogRepository.info(LogSource.SERVICE, "Disconnect requested")
+        ConnectRescueStore.hide()
         activeRouteProbeId?.let {
             routeProbeJob?.cancel()
         }
@@ -538,18 +546,201 @@ class UacVpnService : VpnService() {
         activeConnectionMode = settings.connectionMode
         var lastFailure: Throwable? = null
         var bestReport: AdaptiveProbeReport? = null
-        val fingerprint = fingerprintResolver.captureAdaptive()
+        val networkContext = fingerprintResolver.captureAdaptiveContext()
+        val fingerprint = networkContext.fingerprint
         val signature = adaptivePlanner.signature(settings, profile)
         val savedChampionId = adaptiveProfileStore.savedRoute(fingerprint, profile, signature)?.id
         val savedBackupId = adaptiveProfileStore.savedBackupRoute(fingerprint, profile, signature)?.id
         val learnedWinnerId = adaptiveProfileStore.winner(fingerprint, profile, signature)
-        val candidates = adaptivePlanner.candidates(settings, fingerprint, profile)
         fun routeSource(candidate: AdaptiveCandidate): String = when (candidate.id) {
             savedChampionId -> "SAVED_CHAMPION"
             savedBackupId -> "SAVED_BACKUP"
+            AdaptiveCandidatePlanner.CONNECT_LAST_GOOD_ID -> "CONNECT_LAST_GOOD"
             learnedWinnerId -> "LEARNED_WINNER"
             else -> "ADAPTIVE_FALLBACK"
         }
+        fun persistWorkingPool(pool: ConnectPoolSelection, candidate: AdaptiveCandidate) {
+            val workingEdge = candidate.edge.takeIf(::persistableConnectEdge)
+            if (workingEdge != null) {
+                connectEdgePoolStore.saveChampion(fingerprint, profile.id, workingEdge)
+            }
+            val usedPoolEdge = pool.edges.any { edge ->
+                canonicalEndpointKey(edge.address, edge.port) ==
+                    canonicalEndpointKey(candidate.edge.address, candidate.edge.port)
+            }
+            val poolToSave = poolWithChampionFirst(
+                pool = if (usedPoolEdge) pool.edges else emptyList(),
+                champion = workingEdge,
+            )
+            if (poolToSave.isEmpty()) return
+            connectEdgePoolStore.save(fingerprint, profile.id, poolToSave)
+            AppLogRepository.info(
+                LogSource.ADAPTIVE,
+                "Saved connect edge pool profile=${profile.id} operator=${fingerprint.learningKey()} " +
+                    "source=${pool.source} champion=${workingEdge?.let { "${it.address}:${it.port}" } ?: "none"} " +
+                    "edges=${poolToSave.joinToString { "${it.address}:${it.port}" }}",
+            )
+        }
+        suspend fun tryCandidateBatch(
+            candidates: List<AdaptiveCandidate>,
+            pool: ConnectPoolSelection,
+            rescueGeneration: Long = 0L,
+            progressOffset: Int = 0,
+        ): Boolean {
+            val progressTotal = progressOffset + candidates.size
+            for ((index, candidate) in candidates.withIndex()) {
+                coroutineContext.ensureActive()
+                if (token != generation.get()) throw CancellationException("stale connect generation")
+                ConnectionStateStore.updateConnectRouteProgress(progressOffset + index + 1, progressTotal)
+                try {
+                    cleanupRoute()
+                    val edge = candidate.edge
+                    if (rescueGeneration != 0L) {
+                        ConnectRescueStore.update(rescueGeneration) { current ->
+                            current.copy(
+                                phase = ConnectRescuePhase.RETRYING,
+                                retryIndex = index + 1,
+                                retryTotal = candidates.size,
+                                currentTarget = "${edge.address}:${edge.port}",
+                                foundCount = pool.edges.size,
+                            )
+                        }
+                    }
+                    val candidateSettings = candidate.settings
+                    val source = routeSource(candidate)
+                    val routeAttempt =
+                        "ROUTE TRY source=$source position=${index + 1}/${candidates.size} " +
+                            "id=${candidate.id} label=${candidate.label} edge=${edge.address}:${edge.port} " +
+                            "resolver=${AdaptiveDnsResolvers.idFor(candidate.settings.dnsResolverUrl)}"
+                    when (source) {
+                        "SAVED_CHAMPION", "LEARNED_WINNER", "CONNECT_LAST_GOOD" ->
+                            AppLogRepository.success(LogSource.ADAPTIVE, routeAttempt)
+                        "SAVED_BACKUP" ->
+                            AppLogRepository.warning(LogSource.ADAPTIVE, routeAttempt)
+                        else -> AppLogRepository.info(LogSource.ADAPTIVE, routeAttempt)
+                    }
+                    Log.i(TAG, "starting adaptive candidate ${candidate.id} ${edge.role}=${edge.address}:${edge.port}")
+                    AppLogRepository.info(
+                        LogSource.ADAPTIVE,
+                        "Candidate ${index + 1}/${candidates.size} start ${candidate.summary()}",
+                    )
+                    activeConnectionMode = candidateSettings.connectionMode
+                    if (isProxyMode()) {
+                        val timing = proxyCore.start(edge, candidateSettings, profile, candidate.runtimeOptions)
+                        AppLogRepository.info(
+                            LogSource.PROXY,
+                            "Local SOCKS5 ready ${candidateSettings.socksAddress}:${candidateSettings.socksPort} " +
+                                "config=${timing.configPrepareMs}ms core=${timing.coreStartupMs}ms ready=${timing.proxyReadyMs}ms",
+                        )
+                    } else {
+                        nativeTunEngine.start(
+                            edge = edge,
+                            settings = candidateSettings,
+                            profile = profile,
+                            runtimeOptions = candidate.runtimeOptions,
+                        ) { establishTun(candidateSettings) }
+                    }
+                    delay(ADAPTIVE_PROBE_WARMUP_MS)
+                    val report = adaptiveProbe.verify(candidate)
+                    if (bestReport == null || report.score > bestReport!!.score) bestReport = report
+                    AppLogRepository.info(LogSource.ADAPTIVE, "Candidate ${candidate.id} result ${report.detail()}")
+                    check(report.accepted) { report.detail() }
+                    coroutineContext.ensureActive()
+                    if (token != generation.get()) throw CancellationException("stale connect generation")
+
+                    resourcesActive = true
+                    runtimeHealthSuccesses.set(0L)
+                    activeEdge = edge
+                    activeCandidate = candidate
+                    activeFingerprint = fingerprint
+                    activeSignature = signature
+                    profileStore.markActive(
+                        profile.id,
+                        com.uacspoofer.mobile.profiles.ProfileEndpoint(edge.address, edge.port),
+                    )
+                    if (!ConnectionStateStore.markConnected()) {
+                        cleanupRoute()
+                        resourcesActive = false
+                        return true
+                    }
+                    persistWorkingPool(pool, candidate)
+                    if (rescueGeneration != 0L) {
+                        ConnectRescueStore.update(rescueGeneration) { current ->
+                            current.copy(
+                                phase = ConnectRescuePhase.SUCCEEDED,
+                                retryIndex = index + 1,
+                                retryTotal = candidates.size,
+                                currentTarget = "${edge.address}:${edge.port}",
+                                foundCount = pool.edges.size.coerceAtLeast(1),
+                            )
+                        }
+                    }
+                    adaptiveProfileStore.recordWinner(
+                        network = fingerprint,
+                        profile = profile,
+                        signature = signature,
+                        candidate = candidate,
+                        score = report.score,
+                    )
+                    AppLogRepository.info(
+                        LogSource.ADAPTIVE,
+                        "Stored probe winner ${candidate.id} fingerprint=${fingerprint.key} " +
+                            "cohort=${fingerprint.learningKey()} score=${report.score}",
+                    )
+                    Log.i(TAG, "adaptive connectivity gate passed on ${candidate.id}: ${report.detail()}")
+                    AppLogRepository.info(
+                        LogSource.SERVICE,
+                        "Connected with ${candidate.label}: score=${report.score}, ${report.http.detail}",
+                    )
+                    AppLogRepository.success(
+                        LogSource.ADAPTIVE,
+                        "ROUTE ACTIVE source=${routeSource(candidate)} id=${candidate.id} " +
+                            "label=${candidate.label} score=${report.score} edge=${edge.address}:${edge.port}",
+                    )
+                    runCatching { updateNotification(connected = true) }
+                        .onFailure { Log.w(TAG, "connected notification update failed", it) }
+                    startHealthMonitor(token)
+                    startStatsMonitor(token)
+                    startLatencySampler(token)
+                    startAdaptiveLearningMonitor(token, candidate, fingerprint, profile, signature, report.score)
+                    startNetworkWatch(token, fingerprint)
+                    return true
+                } catch (cancelled: CancellationException) {
+                    cleanupRoute()
+                    resourcesActive = false
+                    throw cancelled
+                } catch (error: Throwable) {
+                    lastFailure = error
+                    adaptiveProfileStore.recordFailure(fingerprint, profile, signature, candidate.id)
+                    Log.w(TAG, "adaptive candidate ${candidate.id} failed", error)
+                    AppLogRepository.warning(LogSource.ADAPTIVE, "Candidate ${candidate.id} rejected", error)
+                    cleanupRoute()
+                    resourcesActive = false
+                    if (index + 1 < candidates.size) {
+                        val next = candidates[index + 1]
+                        val reason = error.message
+                            ?.substringBefore('\n')
+                            ?.take(220)
+                            ?.ifBlank { error.javaClass.simpleName }
+                            ?: error.javaClass.simpleName
+                        AppLogRepository.warning(
+                            LogSource.ADAPTIVE,
+                            "ROUTE SWITCH from=${routeSource(candidate)}:${candidate.id} " +
+                                "to=${routeSource(next)}:${next.id} reason=[$reason]",
+                        )
+                        val settleDelayMs = candidateRouteSettleDelayMs(fingerprint.transport)
+                        delay(settleDelayMs)
+                        AppLogRepository.debug(
+                            LogSource.ADAPTIVE,
+                            "Underlying ${fingerprint.transport} route settled for ${settleDelayMs}ms " +
+                                "before candidate ${index + 2}/${candidates.size}",
+                        )
+                    }
+                }
+            }
+            return false
+        }
+
         AppLogRepository.info(LogSource.SERVICE, "Selected ${profile.protocol.name} profile: ${profile.name}")
         AppLogRepository.info(LogSource.ADAPTIVE, "Session=$token network fingerprint ${fingerprint.summary()}")
         AppLogRepository.debug(
@@ -568,135 +759,66 @@ class UacVpnService : VpnService() {
                 "ROUTE SAVED_BACKUP ready id=$savedBackupId fingerprint=${fingerprint.learningKey()}",
             )
         }
+        val plan = adaptivePlanner.connectPlan(settings, fingerprint, profile)
         AppLogRepository.info(
             LogSource.ADAPTIVE,
-            "Planner signature=$signature candidates=${candidates.joinToString(",") { it.id }}",
+            "Connect edge pool source=${plan.pool.source} profile=${profile.id} " +
+                "operator=${fingerprint.learningKey()} " +
+                "edges=${plan.pool.edges.joinToString { "${it.address}:${it.port}" }.ifEmpty { "hardcoded-default" }}",
         )
-        for ((index, candidate) in candidates.withIndex()) {
-            coroutineContext.ensureActive()
-            if (token != generation.get()) throw CancellationException("stale connect generation")
-            try {
-                cleanupRoute()
-                val edge = candidate.edge
-                val candidateSettings = candidate.settings
-                val source = routeSource(candidate)
-                val routeAttempt =
-                    "ROUTE TRY source=$source position=${index + 1}/${candidates.size} " +
-                        "id=${candidate.id} label=${candidate.label} edge=${edge.address}:${edge.port} " +
-                        "resolver=${AdaptiveDnsResolvers.idFor(candidate.settings.dnsResolverUrl)}"
-                when (source) {
-                    "SAVED_CHAMPION", "LEARNED_WINNER" ->
-                        AppLogRepository.success(LogSource.ADAPTIVE, routeAttempt)
-                    "SAVED_BACKUP" ->
-                        AppLogRepository.warning(LogSource.ADAPTIVE, routeAttempt)
-                    else -> AppLogRepository.info(LogSource.ADAPTIVE, routeAttempt)
-                }
-                Log.i(TAG, "starting adaptive candidate ${candidate.id} ${edge.role}=${edge.address}:${edge.port}")
-                AppLogRepository.info(
-                    LogSource.ADAPTIVE,
-                    "Candidate ${index + 1}/${candidates.size} start ${candidate.summary()}",
-                )
-                activeConnectionMode = candidateSettings.connectionMode
-                if (isProxyMode()) {
-                    val timing = proxyCore.start(edge, candidateSettings, profile, candidate.runtimeOptions)
-                    AppLogRepository.info(
-                        LogSource.PROXY,
-                        "Local SOCKS5 ready ${candidateSettings.socksAddress}:${candidateSettings.socksPort} " +
-                            "config=${timing.configPrepareMs}ms core=${timing.coreStartupMs}ms ready=${timing.proxyReadyMs}ms",
-                    )
-                } else {
-                    nativeTunEngine.start(
-                        edge = edge,
-                        settings = candidateSettings,
-                        profile = profile,
-                        runtimeOptions = candidate.runtimeOptions,
-                    ) { establishTun(candidateSettings) }
-                }
-                delay(ADAPTIVE_PROBE_WARMUP_MS)
-                val report = adaptiveProbe.verify(candidate)
-                if (bestReport == null || report.score > bestReport!!.score) bestReport = report
-                AppLogRepository.info(LogSource.ADAPTIVE, "Candidate ${candidate.id} result ${report.detail()}")
-                check(report.accepted) { report.detail() }
-                coroutineContext.ensureActive()
-                if (token != generation.get()) throw CancellationException("stale connect generation")
+        AppLogRepository.info(
+            LogSource.ADAPTIVE,
+            "Planner signature=$signature candidates=${plan.candidates.joinToString(",") { it.id }}",
+        )
+        if (tryCandidateBatch(plan.candidates, plan.pool)) return
 
-                resourcesActive = true
-                runtimeHealthSuccesses.set(0L)
-                activeEdge = edge
-                activeCandidate = candidate
-                activeFingerprint = fingerprint
-                activeSignature = signature
-                profileStore.markActive(
-                    profile.id,
-                    com.uacspoofer.mobile.profiles.ProfileEndpoint(edge.address, edge.port),
+        AppLogRepository.info(
+            LogSource.ADAPTIVE,
+            "Connect edge pool exhausted; searching for clean Cloudflare IPs",
+        )
+        val rescueGeneration = ConnectRescueStore.begin()
+        val rescuedEdges = latencyTester.discoverConnectEdgePool(
+            settings = settings,
+            profile = profile,
+            networkContext = networkContext,
+            profileSignature = signature,
+            rescueGeneration = rescueGeneration,
+        )
+        val triedEndpoints = plan.candidates
+            .filter { it.id != AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID }
+            .map { canonicalEndpointKey(it.edge.address, it.edge.port) }
+            .toSet()
+        val freshEdges = rescuedEdges.filter { edge ->
+            canonicalEndpointKey(edge.address, edge.port) !in triedEndpoints
+        }
+        if (freshEdges.isNotEmpty()) {
+            val rescuePlan = adaptivePlanner.connectPlan(
+                base = settings,
+                network = fingerprint,
+                profile = profile,
+                poolOverride = freshEdges,
+                includeSavedRoutes = false,
+            )
+            AppLogRepository.info(
+                LogSource.ADAPTIVE,
+                "Connect rescue retry edges=${freshEdges.joinToString { "${it.address}:${it.port}" }} " +
+                    "candidates=${rescuePlan.candidates.joinToString(",") { it.id }}",
+            )
+            if (tryCandidateBatch(
+                    rescuePlan.candidates,
+                    rescuePlan.pool,
+                    rescueGeneration,
+                    progressOffset = plan.candidates.size,
                 )
-                if (!ConnectionStateStore.markConnected()) {
-                    cleanupRoute()
-                    resourcesActive = false
-                    return
-                }
-                adaptiveProfileStore.recordWinner(
-                    network = fingerprint,
-                    profile = profile,
-                    signature = signature,
-                    candidate = candidate,
-                    score = report.score,
-                )
-                AppLogRepository.info(
-                    LogSource.ADAPTIVE,
-                    "Stored probe winner ${candidate.id} fingerprint=${fingerprint.key} " +
-                        "cohort=${fingerprint.learningKey()} score=${report.score}",
-                )
-                Log.i(TAG, "adaptive connectivity gate passed on ${candidate.id}: ${report.detail()}")
-                AppLogRepository.info(
-                    LogSource.SERVICE,
-                    "Connected with ${candidate.label}: score=${report.score}, ${report.http.detail}",
-                )
-                AppLogRepository.success(
-                    LogSource.ADAPTIVE,
-                    "ROUTE ACTIVE source=${routeSource(candidate)} id=${candidate.id} " +
-                        "label=${candidate.label} score=${report.score} edge=${edge.address}:${edge.port}",
-                )
-                runCatching { updateNotification(connected = true) }
-                    .onFailure { Log.w(TAG, "connected notification update failed", it) }
-                startHealthMonitor(token)
-                startStatsMonitor(token)
-                startLatencySampler(token)
-                startAdaptiveLearningMonitor(token, candidate, fingerprint, profile, signature, report.score)
-                startNetworkWatch(token, fingerprint)
-                return
-            } catch (cancelled: CancellationException) {
-                cleanupRoute()
-                resourcesActive = false
-                throw cancelled
-            } catch (error: Throwable) {
-                lastFailure = error
-                adaptiveProfileStore.recordFailure(fingerprint, profile, signature, candidate.id)
-                Log.w(TAG, "adaptive candidate ${candidate.id} failed", error)
-                AppLogRepository.warning(LogSource.ADAPTIVE, "Candidate ${candidate.id} rejected", error)
-                cleanupRoute()
-                resourcesActive = false
-                if (index + 1 < candidates.size) {
-                    val next = candidates[index + 1]
-                    val reason = error.message
-                        ?.substringBefore('\n')
-                        ?.take(220)
-                        ?.ifBlank { error.javaClass.simpleName }
-                        ?: error.javaClass.simpleName
-                    AppLogRepository.warning(
-                        LogSource.ADAPTIVE,
-                        "ROUTE SWITCH from=${routeSource(candidate)}:${candidate.id} " +
-                            "to=${routeSource(next)}:${next.id} reason=[$reason]",
-                    )
-                    val settleDelayMs = candidateRouteSettleDelayMs(fingerprint.transport)
-                    delay(settleDelayMs)
-                    AppLogRepository.debug(
-                        LogSource.ADAPTIVE,
-                        "Underlying ${fingerprint.transport} route settled for ${settleDelayMs}ms " +
-                            "before candidate ${index + 2}/${candidates.size}",
-                    )
-                }
-            }
+            ) return
+        } else {
+            AppLogRepository.warning(
+                LogSource.ADAPTIVE,
+                "Connect rescue found no new Cloudflare edges after the exhausted pool",
+            )
+        }
+        ConnectRescueStore.update(rescueGeneration) { current ->
+            current.copy(phase = ConnectRescuePhase.FAILED, foundCount = freshEdges.size)
         }
 
         Log.e(TAG, "all adaptive candidates failed", lastFailure)

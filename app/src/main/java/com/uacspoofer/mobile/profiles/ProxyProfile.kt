@@ -29,6 +29,9 @@ data class ProxyProfile(
     val alterId: Int = 0,
     val serviceName: String = "",
     val authority: String = "",
+    val xhttpMode: String = "",
+    val xhttpExtra: String = "",
+    val packetEncoding: String = "",
     val country: CountryMetadata = CountryMetadata.UNKNOWN,
     val rawUri: String = "",
     val isBuiltIn: Boolean = false,
@@ -53,6 +56,9 @@ data class ProxyProfile(
                 alterId = 0,
                 serviceName = "",
                 authority = "",
+                xhttpMode = "",
+                xhttpExtra = "",
+                packetEncoding = "",
             )
         } else {
             RuntimeProxyIdentity(
@@ -71,6 +77,9 @@ data class ProxyProfile(
                 alterId = alterId,
                 serviceName = serviceName,
                 authority = authority,
+                xhttpMode = xhttpMode,
+                xhttpExtra = xhttpExtra,
+                packetEncoding = packetEncoding,
             )
         }
 
@@ -137,6 +146,9 @@ data class RuntimeProxyIdentity(
     val alterId: Int,
     val serviceName: String,
     val authority: String,
+    val xhttpMode: String = "",
+    val xhttpExtra: String = "",
+    val packetEncoding: String = "",
 )
 
 data class ProfileLibrary(

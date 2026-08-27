@@ -84,11 +84,11 @@ class AdaptiveCandidateSignatureTest {
     }
 
     @Test
-    fun localForwardSignatureIgnoresLoopbackUriAddress() {
+    fun importedPublicEndpointChangesThePlanSignature() {
         val settings = AdvancedSettingsData.DEFAULT
         val first = localForwardImportedProfile("origin-a.example", 443, "")
         val changedAddress = localForwardImportedProfile("origin-b.example", 443, "")
-        assertEquals(
+        assertNotEquals(
             AdaptiveCandidatePlanner.signatureFor(settings, first),
             AdaptiveCandidatePlanner.signatureFor(settings, changedAddress),
         )

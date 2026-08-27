@@ -348,6 +348,182 @@ class ProfileLatencyTester(context: Context) {
         )
     }
 
+    suspend fun discoverConnectEdgePool(
+        settings: com.uacspoofer.mobile.settings.AdvancedSettingsData,
+        profile: ProxyProfile,
+        networkContext: com.uacspoofer.mobile.vpn.UnderlyingNetworkSnapshot,
+        profileSignature: String,
+        rescueGeneration: Long = 0L,
+    ): List<MciEdge> = withContext(Dispatchers.IO) {
+        val validated = settings.validated()
+        val network = networkContext.fingerprint
+        AppLogRepository.info(
+            LogSource.ADAPTIVE,
+            "Connect rescue discovery start profile=${profile.name} network=${network.summary()}",
+        )
+        fun publish(
+            phase: com.uacspoofer.mobile.vpn.ConnectRescuePhase,
+            completed: Int = 0,
+            total: Int = 0,
+            healthy: Int = 0,
+            currentTarget: String = "",
+            foundCount: Int = 0,
+        ) {
+            if (rescueGeneration == 0L) return
+            com.uacspoofer.mobile.vpn.ConnectRescueStore.update(rescueGeneration) { current ->
+                current.copy(
+                    phase = phase,
+                    completed = if (phase == current.phase) maxOf(current.completed, completed) else completed,
+                    total = total,
+                    healthy = if (phase == current.phase) maxOf(current.healthy, healthy) else healthy,
+                    currentTarget = currentTarget.ifBlank { current.currentTarget },
+                    foundCount = if (foundCount > 0) foundCount else current.foundCount,
+                )
+            }
+        }
+        publish(com.uacspoofer.mobile.vpn.ConnectRescuePhase.COLLECTING)
+        val discovery = CloudflareEdgeDiscovery.create(appContext).discover(
+            settings = validated,
+            profile = profile,
+            networkContext = networkContext,
+            profileSignature = profileSignature,
+            savedEdges = emptyList(),
+            onProgress = { progress ->
+                publish(
+                    phase = when (progress.phase) {
+                        CloudflareDiscoveryPhase.COLLECTING -> com.uacspoofer.mobile.vpn.ConnectRescuePhase.COLLECTING
+                        CloudflareDiscoveryPhase.PREFLIGHT -> com.uacspoofer.mobile.vpn.ConnectRescuePhase.PREFLIGHT
+                    },
+                    completed = progress.completed,
+                    total = progress.total,
+                    healthy = progress.healthy,
+                    currentTarget = progress.currentTarget,
+                )
+            },
+        )
+        if (discovery.suitability.status == CloudflareSuitability.INELIGIBLE) {
+            AppLogRepository.info(
+                LogSource.ADAPTIVE,
+                "Connect rescue skipped; Cloudflare suitability=${discovery.suitability.status} " +
+                    "reason=${discovery.suitability.reason}",
+            )
+            return@withContext emptyList()
+        }
+        if (discovery.suitability.status == CloudflareSuitability.UNKNOWN) {
+            AppLogRepository.info(
+                LogSource.ADAPTIVE,
+                "Connect rescue continuing without DNS Cloudflare evidence; " +
+                    "sampling official CIDRs reason=${discovery.suitability.reason}",
+            )
+        }
+        val eligible = discovery.candidates
+            .filter { edge -> edge.reserved || edge.preflight?.tcpSucceeded == true }
+            .sortedWith(
+                compareByDescending<CloudflareEdgeCandidate> { it.score }
+                    .thenBy { it.preflight?.tcpLatencyMs ?: Long.MAX_VALUE },
+            )
+            .take(CONNECT_RESCUE_SCREEN_LIMIT)
+        if (eligible.isEmpty()) {
+            AppLogRepository.warning(LogSource.ADAPTIVE, "Connect rescue had no TCP-reachable Cloudflare edge")
+            return@withContext emptyList()
+        }
+        val customRuntime = if (profile.usesAdvancedSettingsIdentity()) {
+            com.uacspoofer.mobile.mci.MciXrayRuntimeOptions.DEFAULT
+        } else {
+            com.uacspoofer.mobile.mci.MciXrayRuntimeOptions(
+                identityOverride = profile.runtimeIdentity(validated),
+                preserveEmptyAlpn = true,
+                preserveTransportFields = true,
+            )
+        }
+        val provisionalPlan = RouteSpeedTestPlan(
+            profile = profile,
+            session = SniMakerTestSession(validated, network, null),
+            signature = profileSignature,
+            candidates = emptyList(),
+            savedChampionId = null,
+            savedChampionLabel = null,
+            savedChampion = null,
+            savedBackupId = null,
+            savedBackupLabel = null,
+            savedBackup = null,
+            discoveryId = discovery.discoveryId,
+            discoverySummary = "connect rescue",
+            discoveredEdgeCount = eligible.size,
+            underlyingNetwork = networkContext.network,
+        )
+        publish(
+            phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SCREENING,
+            completed = 0,
+            total = eligible.size,
+            currentTarget = eligible.firstOrNull()?.let { "${it.address}:${it.port}" }.orEmpty(),
+        )
+        val screenedCompleted = AtomicInteger(0)
+        val screenedHealthy = AtomicInteger(0)
+        val isolatedByEndpoint = coroutineScope {
+            val slots = Semaphore(EDGE_XRAY_VALIDATION_WORKERS)
+            eligible.mapIndexed { index, edge ->
+                async {
+                    slots.withPermit {
+                        val endpoint = "${edge.address}:${edge.port}"
+                        val candidate = AdaptiveCandidate(
+                            id = "connect-rescue-$index",
+                            label = "Connect rescue ${edge.address}",
+                            edge = edge.toMciEdge("connect-rescue-${index + 1}", validated.primaryMaxSplit),
+                            settings = validated.copy(finalmaskDelayMs = 20).validated(),
+                            runtimeOptions = customRuntime,
+                        )
+                        val result = measureRouteSpeedCandidate(
+                            plan = provisionalPlan,
+                            candidate = candidate,
+                            transferConfig = null,
+                        )
+                        val finished = screenedCompleted.incrementAndGet()
+                        if (result.accepted) screenedHealthy.incrementAndGet()
+                        publish(
+                            phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SCREENING,
+                            completed = finished,
+                            total = eligible.size,
+                            healthy = screenedHealthy.get(),
+                            currentTarget = endpoint,
+                        )
+                        endpoint to result
+                    }
+                }
+            }.awaitAll().toMap()
+        }
+        val xrayAccepted = eligible.mapNotNull { edge ->
+            val result = isolatedByEndpoint["${edge.address}:${edge.port}"]
+                ?.takeIf(RouteSpeedProbeResult::accepted)
+                ?: return@mapNotNull null
+            edge.copy(score = edge.score + result.score * 10)
+        }
+        publish(
+            phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SELECTING,
+            completed = eligible.size,
+            total = eligible.size,
+            healthy = xrayAccepted.size,
+        )
+        val source = xrayAccepted.ifEmpty { eligible }
+        val (primary, backups) = selectSubnetDiverseEdges(source)
+        val selected = (primary + backups).mapIndexed { index, edge ->
+            edge.toMciEdge("connect-pool-${index + 1}", validated.primaryMaxSplit)
+        }
+        publish(
+            phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SELECTING,
+            completed = selected.size,
+            total = selected.size.coerceAtLeast(1),
+            healthy = selected.size,
+            foundCount = selected.size,
+        )
+        AppLogRepository.info(
+            LogSource.ADAPTIVE,
+            "Connect rescue discovery done screened=${eligible.size} xrayAccepted=${xrayAccepted.size} " +
+                "selected=${selected.joinToString { "${it.address}:${it.port}" }}",
+        )
+        selected
+    }
+
     private suspend fun validateDiscoveredEdges(
         settings: com.uacspoofer.mobile.settings.AdvancedSettingsData,
         profile: ProxyProfile,
@@ -1679,6 +1855,7 @@ class ProfileLatencyTester(context: Context) {
         private const val ROUTE_SCREEN_BATCH_SIZE = 16
         private const val ROUTE_SCREEN_PARALLEL_PROBES = 4
         private const val EDGE_XRAY_VALIDATION_WORKERS = 2
+        private const val CONNECT_RESCUE_SCREEN_LIMIT = 12
         private const val ISOLATED_QUALIFIER_FALLBACK = "isolated qualifier fallback:"
         private const val COUNTRY_TIMEOUT_MS = 3_500
         private const val COUNTRY_PROVIDER_TIMEOUT_MS = 2_200

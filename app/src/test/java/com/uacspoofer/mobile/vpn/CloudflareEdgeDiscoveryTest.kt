@@ -95,6 +95,53 @@ class CloudflareEdgeDiscoveryTest {
     }
 
     @Test
+    fun xhttpTlsProfileWithOfficialRangeEvidenceIsEligible() {
+        val identity = websocketIdentity().copy(network = "xhttp", alpn = "h2")
+        val ip = requireNotNull(IpAddress.parse("104.18.1.1"))
+        val candidate = CloudflareEdgeCandidate(
+            key = ip.key,
+            address = ip.canonical,
+            port = 443,
+            ip = ip,
+            sources = setOf(CloudflareEdgeSource.DNS_SNI),
+            reserved = false,
+        )
+        val decision = evaluateCloudflareSuitability(
+            identity,
+            443,
+            listOf(candidate),
+            bundledCloudflareRanges().ranges,
+        )
+        assertEquals(CloudflareSuitability.ELIGIBLE, decision.status)
+    }
+
+    @Test
+    fun xhttpOnCloudflarePortWithoutDnsEvidenceStillSamplesOfficialRanges() {
+        val identity = websocketIdentity().copy(network = "xhttp", alpn = "h2,http/1.1")
+        val decision = evaluateCloudflareSuitability(
+            identity = identity,
+            port = 2053,
+            candidates = emptyList(),
+            ranges = bundledCloudflareRanges().ranges,
+        )
+        assertEquals(CloudflareSuitability.UNKNOWN, decision.status)
+        assertTrue(shouldSampleOfficialCloudflareRanges(decision))
+    }
+
+    @Test
+    fun xhttpOnNonCloudflarePortDoesNotSampleOfficialRanges() {
+        val identity = websocketIdentity().copy(network = "xhttp", alpn = "h2")
+        val decision = evaluateCloudflareSuitability(
+            identity = identity,
+            port = 1234,
+            candidates = emptyList(),
+            ranges = bundledCloudflareRanges().ranges,
+        )
+        assertEquals(CloudflareSuitability.INELIGIBLE, decision.status)
+        assertFalse(shouldSampleOfficialCloudflareRanges(decision))
+    }
+
+    @Test
     fun trustedBuiltInProfileIsEligibleWithoutDnsEvidence() {
         val identity = websocketIdentity()
         val untrusted = evaluateCloudflareSuitability(
