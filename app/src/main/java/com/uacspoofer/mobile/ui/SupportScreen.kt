@@ -77,24 +77,18 @@ internal fun SupportScreen(
     val baseTextStyle = LocalTextStyle.current
     val localizedTextStyle = homeLocalizedFont()?.let { baseTextStyle.copy(fontFamily = it) } ?: baseTextStyle
     CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
-        ToolPageBackground(accent = SupportPurple) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(WindowInsets.safeDrawing.asPaddingValues())
-                    .padding(horizontal = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item {
-                    Spacer(Modifier.height(10.dp))
-                    ToolPageHeader(
-                        title = homeText("Support", "پشتیبانی"),
-                        subtitle = homeText("Community, updates and project links", "ارتباط با ما، به‌روزرسانی‌ها و لینک‌های پروژه"),
-                        icon = Icons.Outlined.SupportAgent,
-                        accent = SupportPurple,
-                        onMenuClick = onMenuClick,
-                    )
-                }
+        ToolPageScaffold(
+            accent = SupportPurple,
+            header = {
+                ToolPageHeader(
+                    title = homeText("Support", "پشتیبانی"),
+                    subtitle = homeText("Community, updates and project links", "ارتباط با ما، به‌روزرسانی‌ها و لینک‌های پروژه"),
+                    icon = Icons.Outlined.SupportAgent,
+                    accent = SupportPurple,
+                    onMenuClick = onMenuClick,
+                )
+            },
+        ) {
                 item { SupportIntroCard() }
                 item { SectionLabel("Telegram") }
                 item {
@@ -133,7 +127,6 @@ internal fun SupportScreen(
                     )
                 }
                 item { Spacer(Modifier.height(8.dp).navigationBarsPadding()) }
-            }
         }
     }
 }

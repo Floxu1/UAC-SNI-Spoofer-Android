@@ -149,29 +149,23 @@ internal fun EngineModeScreen(
         }
     }
 
-    ToolPageBackground(accent) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(WindowInsets.safeDrawing.asPaddingValues())
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item {
-                Spacer(Modifier.height(10.dp))
-                ToolPageHeader(
-                    title = homeText("Connection engine", "موتور اتصال"),
-                    subtitle = homeText(
-                        "Xray and Tor never share a session",
-                        "`Xray` و `Tor` هیچ‌وقت همزمان اجرا نمی‌شن",
-                    ),
-                    icon = Icons.Outlined.Hub,
-                    accent = accent,
-                    onMenuClick = onBackClick,
-                    navigationIcon = Icons.AutoMirrored.Outlined.ArrowBack,
-                    navigationDescription = homeText("Back to settings", "برگشت به تنظیمات"),
-                )
-            }
+    ToolPageScaffold(
+        accent = accent,
+        header = {
+            ToolPageHeader(
+                title = homeText("Connection engine", "موتور اتصال"),
+                subtitle = homeText(
+                    "Xray and Tor never share a session",
+                    "`Xray` و `Tor` هیچ‌وقت همزمان اجرا نمی‌شن",
+                ),
+                icon = Icons.Outlined.Hub,
+                accent = accent,
+                onMenuClick = onBackClick,
+                navigationIcon = Icons.AutoMirrored.Outlined.ArrowBack,
+                navigationDescription = homeText("Back to settings", "برگشت به تنظیمات"),
+            )
+        },
+    ) {
             item {
                 EngineSelectorCard(
                     mode = mode,
@@ -401,7 +395,6 @@ internal fun EngineModeScreen(
             }
             item { Spacer(Modifier.height(20.dp)) }
         }
-    }
 
     pendingCutover?.let { target ->
         if (!cutoverInProgress) {

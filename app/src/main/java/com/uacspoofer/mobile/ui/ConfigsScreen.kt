@@ -37,7 +37,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.QrCode
+import androidx.compose.material.icons.outlined.QrCode2
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
@@ -127,6 +127,22 @@ import kotlinx.coroutines.launch
 
 private fun configLtr(value: String): String = "\u2066$value\u2069"
 
+internal fun showConfigsPhoneImport(wideShell: Boolean): Boolean = wideShell
+
+internal fun emptyProfileImportHintEnglish(wideShell: Boolean): String =
+    if (wideShell) {
+        "Tap + or the QR icon to import VLESS, Trojan or VMess"
+    } else {
+        "Tap + to import VLESS, Trojan or VMess"
+    }
+
+internal fun emptyProfileImportHintPersian(wideShell: Boolean): String =
+    if (wideShell) {
+        "برای افزودن ${configLtr("VLESS")}، ${configLtr("Trojan")} یا ${configLtr("VMess")} روی + یا ${configLtr("QR")} بزن"
+    } else {
+        "برای افزودن ${configLtr("VLESS")}، ${configLtr("Trojan")} یا ${configLtr("VMess")} روی + بزن"
+    }
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun ConfigsScreen(
@@ -138,6 +154,7 @@ internal fun ConfigsScreen(
 ) {
     val context = LocalContext.current
     val isPersian = LocalHomePersian.current
+    val wideShell = LocalWideShell.current
     val store = remember(context) { ProfileStore(context) }
     var library by remember { mutableStateOf(store.snapshot()) }
     val latencyCache = remember(context) { ProfileLatencyCache(context) }
@@ -174,6 +191,10 @@ internal fun ConfigsScreen(
     BackHandler(enabled = selectionMode) {
         selectionMode = false
         markedIds = emptySet()
+    }
+
+    LaunchedEffect(wideShell) {
+        if (!wideShell) phoneImportVisible = false
     }
 
     LaunchedEffect(library.allProfiles.map { "${it.id}:${it.country.countryCode.orEmpty()}:${it.rawUri.hashCode()}" }) {
@@ -357,11 +378,13 @@ internal fun ConfigsScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(WindowInsets.safeDrawing.asPaddingValues())
-                    .padding(horizontal = 16.dp),
+                    .padding(WindowInsets.safeDrawing.asPaddingValues()),
             ) {
-                Spacer(Modifier.height(8.dp))
-                ConfigsTopBar(
+                WideSplitColumn(
+                    headerPadding = 16.dp,
+                    header = {
+                        Spacer(Modifier.height(8.dp))
+                        ConfigsTopBar(
                     count = library.customProfiles.size,
                     selectionMode = selectionMode,
                     selectedCount = markedIds.size,
@@ -371,12 +394,18 @@ internal fun ConfigsScreen(
                     onMenuClick = onMenuClick,
                     onTestAll = { testDelay(library.allProfiles) },
                     onEnterSelection = { selectionMode = true; markedIds = emptySet() },
-                    onPhoneImport = { phoneImportVisible = true },
+                    onPhoneImport = if (wideShell) {
+                        { phoneImportVisible = true }
+                    } else {
+                        null
+                    },
                     onCancelSelection = { selectionMode = false; markedIds = emptySet() },
                     onSelectAll = { markedIds = library.customProfiles.mapTo(linkedSetOf(), ProxyProfile::id) },
                     onExportSelected = ::exportMarkedProfiles,
                     onDeleteSelected = { if (markedIds.isNotEmpty()) bulkDeletePending = true },
                 )
+                    },
+                ) {
                 Spacer(Modifier.height(12.dp))
 
                 LazyColumn(
@@ -420,6 +449,7 @@ internal fun ConfigsScreen(
                     if (library.customProfiles.isEmpty()) {
                         item { EmptyProfileHint() }
                     }
+                }
                 }
             }
 
@@ -473,7 +503,7 @@ internal fun ConfigsScreen(
                     editorError = null
                 }
             },
-            onPhoneImport = if (editingId == null) {
+            onPhoneImport = if (editingId == null && wideShell) {
                 { editorVisible = false; phoneImportVisible = true }
             } else {
                 null
@@ -546,7 +576,7 @@ internal fun ConfigsScreen(
         )
     }
 
-    if (phoneImportVisible) {
+    if (phoneImportVisible && wideShell) {
         PhoneImportQrDialog(
             onImported = { consumeImportedText(it) },
             onDismiss = { phoneImportVisible = false },
@@ -572,7 +602,7 @@ private fun ConfigsTopBar(
     onSortOrderChange: (ConfigLatencySort) -> Unit,
     onMenuClick: () -> Unit,
     onTestAll: () -> Unit,
-    onPhoneImport: () -> Unit,
+    onPhoneImport: (() -> Unit)? = null,
     onEnterSelection: () -> Unit,
     onCancelSelection: () -> Unit,
     onSelectAll: () -> Unit,
@@ -713,12 +743,14 @@ private fun ConfigsTopBar(
                     }
                 }
             }
-            RemoteIconButton(onClick = onPhoneImport) {
-                Icon(
-                    Icons.Outlined.QrCode,
-                    homeText("Add configs from phone", "افزودن کانفیگ با موبایل"),
-                    tint = UacColors.DisconnectedBlue,
-                )
+            if (onPhoneImport != null) {
+                RemoteIconButton(onClick = onPhoneImport) {
+                    Icon(
+                        Icons.Outlined.QrCode2,
+                        homeText("Add configs from phone", "افزودن کانفیگ با موبایل"),
+                        tint = UacColors.DisconnectedBlue,
+                    )
+                }
             }
             RemoteIconButton(onClick = onTestAll, enabled = !testing) {
                 if (testing) {
@@ -919,8 +951,8 @@ private fun EmptyProfileHint() {
         Spacer(Modifier.height(4.dp))
         Text(
             homeText(
-                "Tap + or the QR icon to import VLESS, Trojan or VMess",
-                "برای افزودن ${configLtr("VLESS")}، ${configLtr("Trojan")} یا ${configLtr("VMess")} روی + یا ${configLtr("QR")} بزن",
+                emptyProfileImportHintEnglish(LocalWideShell.current),
+                emptyProfileImportHintPersian(LocalWideShell.current),
             ),
             color = UacColors.TextSecondary,
             fontSize = 10.5.sp,
@@ -1031,7 +1063,7 @@ private fun ProfileEditorSheet(
                 }
                 if (onPhoneImport != null) {
                     OutlinedButton(onClick = onPhoneImport, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Outlined.QrCode, null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Outlined.QrCode2, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
                         Text(homeText("Add from phone", "افزودن با موبایل"))
                     }

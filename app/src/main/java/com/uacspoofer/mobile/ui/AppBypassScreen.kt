@@ -165,17 +165,25 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(WindowInsets.safeDrawing.asPaddingValues())
-                .padding(horizontal = 16.dp),
+                .padding(WindowInsets.safeDrawing.asPaddingValues()),
         ) {
+            WideSplitColumn(
+                headerPadding = 16.dp,
+                header = {
+                    if (!searchMode) {
+                        Spacer(Modifier.height(8.dp))
+                        HomeHeader(
+                            accent = UacColors.DisconnectedBlue,
+                            compact = true,
+                            onMenuClick = onMenuClick,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        Spacer(Modifier.height(8.dp))
+                    }
+                },
+            ) {
             if (!searchMode) {
-                Spacer(Modifier.height(8.dp))
-                HomeHeader(
-                    accent = UacColors.DisconnectedBlue,
-                    compact = true,
-                    onMenuClick = onMenuClick,
-                    modifier = Modifier.fillMaxWidth(),
-                )
                 Spacer(Modifier.height(2.dp))
                 Text(
                     text = homeText("App Bypass", "عبور انتخابی برنامه‌ها"),
@@ -339,6 +347,7 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                         textAlign = TextAlign.Center,
                     )
                 }
+            }
             }
         }
     }

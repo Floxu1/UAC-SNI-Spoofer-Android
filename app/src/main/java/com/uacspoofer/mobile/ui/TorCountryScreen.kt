@@ -171,15 +171,19 @@ internal fun TorCountryScreen(onMenuClick: () -> Unit) {
                         .fillMaxSize()
                         .windowInsetsPadding(
                             WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top),
-                        )
-                        .padding(horizontal = 16.dp),
+                        ),
                 ) {
-                    Spacer(Modifier.height(if (imeVisible) 4.dp else 8.dp))
-                    TorCountryTopBar(
-                        subtitle = selectedLabel,
-                        compact = imeVisible,
-                        onMenuClick = onMenuClick,
-                    )
+                    WideSplitColumn(
+                        headerPadding = 16.dp,
+                        header = {
+                            Spacer(Modifier.height(if (imeVisible) 4.dp else 8.dp))
+                            TorCountryTopBar(
+                                subtitle = selectedLabel,
+                                compact = imeVisible,
+                                onMenuClick = onMenuClick,
+                            )
+                        },
+                    ) {
                     Spacer(Modifier.height(if (imeVisible) 8.dp else 10.dp))
                     OutlinedTextField(
                         value = query,
@@ -312,6 +316,7 @@ internal fun TorCountryScreen(onMenuClick: () -> Unit) {
                                 )
                             }
                         }
+                    }
                     }
                 }
                 SnackbarHost(

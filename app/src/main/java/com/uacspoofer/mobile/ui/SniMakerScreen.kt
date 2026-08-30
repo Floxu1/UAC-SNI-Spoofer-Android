@@ -129,11 +129,13 @@ internal fun SniMakerScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(WindowInsets.safeDrawing.asPaddingValues())
-                .padding(horizontal = 14.dp),
+                .padding(WindowInsets.safeDrawing.asPaddingValues()),
         ) {
-            Spacer(Modifier.height(7.dp))
-            MakerTopBar(
+            WideSplitColumn(
+                headerPadding = 14.dp,
+                header = {
+                    Spacer(Modifier.height(7.dp))
+                    MakerTopBar(
                 total = controller.rows.size,
                 healthy = controller.healthyCount,
                 testing = controller.testing,
@@ -143,6 +145,8 @@ internal fun SniMakerScreen(
                 canClear = controller.rows.isNotEmpty() || controller.loading || controller.testing || controller.saving,
                 onClearClick = { clearConfirmationVisible = true },
             )
+                },
+            ) {
             Spacer(Modifier.height(11.dp))
 
             MakerProgressStrip(
@@ -182,6 +186,7 @@ internal fun SniMakerScreen(
                 onSortStatus = controller::cycleStatusSort,
             )
             Spacer(Modifier.height(7.dp))
+            }
         }
     }
 

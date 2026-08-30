@@ -3,6 +3,8 @@ package com.uacspoofer.mobile.ui
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.CountryMetadata
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConfigsSortTest {
@@ -60,6 +62,20 @@ class ConfigsSortTest {
         )
 
         assertEquals(listOf("c", "a", "b", "d"), sorted.map(ProxyProfile::id))
+    }
+
+    @Test
+    fun phoneImportQrIsTvOrWideOnly() {
+        assertFalse(showConfigsPhoneImport(wideShell = false))
+        assertTrue(showConfigsPhoneImport(wideShell = true))
+        assertEquals(
+            "Tap + to import VLESS, Trojan or VMess",
+            emptyProfileImportHintEnglish(wideShell = false),
+        )
+        assertEquals(
+            "Tap + or the QR icon to import VLESS, Trojan or VMess",
+            emptyProfileImportHintEnglish(wideShell = true),
+        )
     }
 
     private fun profile(id: String): ProxyProfile = ProxyProfile.UAC_SNI_BUILT_IN.copy(

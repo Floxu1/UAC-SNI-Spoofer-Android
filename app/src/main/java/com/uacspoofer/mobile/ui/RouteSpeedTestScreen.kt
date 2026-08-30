@@ -305,15 +305,19 @@ internal fun RouteSpeedTestScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(WindowInsets.safeDrawing.asPaddingValues())
-                .padding(horizontal = 12.dp),
+                .padding(WindowInsets.safeDrawing.asPaddingValues()),
         ) {
-            Spacer(Modifier.height(7.dp))
-            RouteSpeedHeader(
+            WideSplitColumn(
+                headerPadding = 12.dp,
+                header = {
+                    Spacer(Modifier.height(7.dp))
+                    RouteSpeedHeader(
                 loading = controller.loading,
                 onBackClick = onBackClick,
                 onRefresh = controller::refresh,
             )
+                },
+            ) {
             Spacer(Modifier.height(7.dp))
             RouteTestProfileSelector(
                 profiles = controller.profileLibrary.allProfiles,
@@ -459,6 +463,7 @@ internal fun RouteSpeedTestScreen(
                     }
                     item { Spacer(Modifier.height(8.dp)) }
                 }
+            }
             }
         }
     }

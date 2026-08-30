@@ -87,24 +87,18 @@ internal fun SettingsScreen(
     }
 
     CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
-        ToolPageBackground(accent) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(WindowInsets.safeDrawing.asPaddingValues())
-                    .padding(horizontal = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item {
-                    Spacer(Modifier.height(10.dp))
-                    ToolPageHeader(
-                        title = homeText("Settings", "تنظیمات"),
-                        subtitle = homeText("App and connection preferences", "تنظیمات برنامه و اتصال"),
-                        icon = Icons.Outlined.Settings,
-                        accent = accent,
-                        onMenuClick = onMenuClick,
-                    )
-                }
+        ToolPageScaffold(
+            accent = accent,
+            header = {
+                ToolPageHeader(
+                    title = homeText("Settings", "تنظیمات"),
+                    subtitle = homeText("App and connection preferences", "تنظیمات برنامه و اتصال"),
+                    icon = Icons.Outlined.Settings,
+                    accent = accent,
+                    onMenuClick = onMenuClick,
+                )
+            },
+        ) {
                 item {
                     SettingsNavigationCard(
                         icon = Icons.Outlined.Tune,
@@ -203,7 +197,6 @@ internal fun SettingsScreen(
                             },
                     )
                 }
-            }
         }
     }
 }

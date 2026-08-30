@@ -372,6 +372,7 @@ fun MainScreen(
             LocalHomePersian provides (selectedLanguage == DrawerLanguage.PERSIAN),
             LocalHomeRemoteFocus provides homeRemoteFocus,
             LocalDrawerOpen provides drawerOpen,
+            LocalWideShell provides rememberWideShell(),
         ) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (selectedDestination) {
@@ -670,7 +671,10 @@ private fun HomeScreenContent(
             safeDrawingPadding.calculateBottomPadding()
         val compact = innerHeight < 700.dp
         val tight = innerHeight < 620.dp
-        val selectorMaxWidth = maxWidth * 0.80f
+        val wide = LocalWideShell.current || WideShell.isWide(maxWidth, maxHeight)
+        val contentMax = if (wide) WideShell.HomeContentMax else maxWidth
+        val selectorMaxWidth = contentMax * 0.80f
+        val headerPad = if (wide) WideShell.EdgePadding else if (compact) 20.dp else 24.dp
         val topSpacing = (innerHeight * 0.028f).coerceIn(
             if (tight) 6.dp else 10.dp,
             if (compact) 18.dp else 28.dp,
@@ -708,7 +712,7 @@ private fun HomeScreenContent(
                 onEngineLaidOut = { engineLayout = it },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = if (compact) 20.dp else 24.dp),
+                    .padding(horizontal = headerPad),
             )
             Spacer(Modifier.height(if (compact) 2.dp else 6.dp))
             Box(
@@ -725,7 +729,15 @@ private fun HomeScreenContent(
                 ) { mode ->
                     CompositionLocalProvider(LocalDisplayedEngineMode provides mode) {
                         Column(
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .then(
+                                    if (wide) {
+                                        Modifier.widthIn(max = contentMax).fillMaxWidth()
+                                    } else {
+                                        Modifier.fillMaxWidth()
+                                    },
+                                ),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             AppTitle(compact = compact, accent = stateColors.accent)
@@ -787,17 +799,17 @@ private fun HomeScreenContent(
                                 modifier = Modifier.fillMaxWidth(0.86f),
                             )
                             Spacer(Modifier.height(if (tight) 2.dp else if (compact) 3.dp else 6.dp))
-                            AnimatedDottedWave(
-                                accent = stateColors.accent,
-                                motionEnabled = motionEnabled,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(if (tight) 14.dp else if (compact) 22.dp else 32.dp),
-                            )
                         }
                     }
                 }
             }
+            AnimatedDottedWave(
+                accent = stateColors.accent,
+                motionEnabled = motionEnabled,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (tight) 14.dp else if (compact) 22.dp else 32.dp),
+            )
         }
         if (showGuide) {
             val step = checkNotNull(guideStep)

@@ -75,26 +75,20 @@ internal fun RuntimeDiagnosticsScreen(onClose: () -> Unit) {
     }
 
     CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
-        ToolPageBackground(accent) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(WindowInsets.safeDrawing.asPaddingValues())
-                    .padding(horizontal = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                item {
-                    Spacer(Modifier.height(10.dp))
-                    ToolPageHeader(
-                        title = homeText("Runtime diagnostics", "وضعیت لحظه‌ای برنامه"),
-                        subtitle = homeText("CPU, RAM and leak watch", "پردازنده، رم و بررسی نشت حافظه"),
-                        icon = Icons.Outlined.Memory,
-                        accent = accent,
-                        onMenuClick = onClose,
-                        navigationIcon = Icons.AutoMirrored.Outlined.ArrowBack,
-                        navigationDescription = homeText("Back to settings", "برگشت به تنظیمات"),
-                    )
-                }
+        ToolPageScaffold(
+            accent = accent,
+            header = {
+                ToolPageHeader(
+                    title = homeText("Runtime diagnostics", "وضعیت لحظه‌ای برنامه"),
+                    subtitle = homeText("CPU, RAM and leak watch", "پردازنده، رم و بررسی نشت حافظه"),
+                    icon = Icons.Outlined.Memory,
+                    accent = accent,
+                    onMenuClick = onClose,
+                    navigationIcon = Icons.AutoMirrored.Outlined.ArrowBack,
+                    navigationDescription = homeText("Back to settings", "برگشت به تنظیمات"),
+                )
+            },
+        ) {
                 item {
                     LeakStatusCard(signal = leak, primaryId = snapshot?.primarySuspectId)
                 }
@@ -181,7 +175,6 @@ internal fun RuntimeDiagnosticsScreen(onClose: () -> Unit) {
                     }
                 }
                 item { Spacer(Modifier.height(18.dp)) }
-            }
         }
     }
 }

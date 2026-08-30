@@ -37,8 +37,20 @@ private data class SettingField(val key:String,val label:String,val value:String
     val accent=UacColors.DisconnectedBlue
     fun update(k:String,v:String){text=text.toMutableMap().also{it[k]=v}}
     fun fields(vararg pairs:Pair<String,String>)=pairs.map{SettingField(it.first,it.second,text[it.first].orEmpty(),it.first=="trojanPassword")}
-    ToolPageBackground(accent){LazyColumn(Modifier.fillMaxSize().padding(WindowInsets.safeDrawing.asPaddingValues()).padding(horizontal=18.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
-        item{Spacer(Modifier.height(10.dp));ToolPageHeader(title=homeText("Advanced Settings","تنظیمات پیشرفته"),subtitle=homeText("Complete runtime connection controls","کنترل کامل تنظیمات اتصال"),icon=Icons.Outlined.Tune,accent=accent,onMenuClick=onBackClick,navigationIcon=Icons.AutoMirrored.Outlined.ArrowBack,navigationDescription=homeText("Back to settings","برگشت به تنظیمات"))}
+    ToolPageScaffold(
+        accent = accent,
+        header = {
+            ToolPageHeader(
+                title = homeText("Advanced Settings", "تنظیمات پیشرفته"),
+                subtitle = homeText("Complete runtime connection controls", "کنترل کامل تنظیمات اتصال"),
+                icon = Icons.Outlined.Tune,
+                accent = accent,
+                onMenuClick = onBackClick,
+                navigationIcon = Icons.AutoMirrored.Outlined.ArrowBack,
+                navigationDescription = homeText("Back to settings", "برگشت به تنظیمات"),
+            )
+        },
+    ) {
         item{ConnectionModeSelector(data.connectionMode){data=data.copy(connectionMode=it);notice="Changes are applied on the next connection"}}
         item{Group("Primary edge",fields("primaryAddress" to "Address","primaryPort" to "Port","primaryMaxSplit" to "Max split"),::update)}
         item{Group("Irancell edge",fields("irancellAddress" to "Address","irancellPort" to "Port","irancellMaxSplit" to "Max split"),::update)}
@@ -53,7 +65,7 @@ private data class SettingField(val key:String,val label:String,val value:String
         item{Text(notice,color=if(notice.startsWith("Check"))UacColors.ErrorRed else accent,fontSize=12.sp,modifier=Modifier.fillMaxWidth().background(accent.copy(.08f),RoundedCornerShape(12.dp)).border(1.dp,accent.copy(.2f),RoundedCornerShape(12.dp)).padding(12.dp))}
         item{Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(10.dp)){OutlinedButton({resetDialog=true},Modifier.weight(1f)){Icon(Icons.Outlined.RestartAlt,null);Spacer(Modifier.width(5.dp));Text("Reset")};Button({val parsed=parse(text,data);if(parsed==null)notice="Check numeric fields: ports, splits and MTU" else {data=store.save(parsed);text=toText(data);notice="Saved — used on the next connection"}},Modifier.weight(1f),colors=ButtonDefaults.buttonColors(containerColor=accent)){Icon(Icons.Outlined.Save,null);Spacer(Modifier.width(5.dp));Text("Save")}}}
         item{Spacer(Modifier.height(20.dp))}
-    }}
+    }
     if(resetDialog)AlertDialog(onDismissRequest={resetDialog=false},title={Text("Reset all settings?")},text={Text("Restores the tested defaults for every runtime setting.")},confirmButton={TextButton({data=store.resetDefaults();text=toText(data);notice="All defaults restored — used on the next connection";resetDialog=false}){Text("Reset",color=UacColors.ErrorRed)}},dismissButton={TextButton({resetDialog=false}){Text("Cancel")}})
 }
 

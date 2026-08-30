@@ -85,12 +85,13 @@ internal fun LiveLogsScreen(onMenuClick: () -> Unit) {
             )
             .padding(WindowInsets.safeDrawing.asPaddingValues()),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 18.dp, vertical = 8.dp),
+        WideSplitColumn(
+            headerPadding = 18.dp,
+            header = {
+                Spacer(Modifier.height(8.dp))
+                LogsHeader(onMenuClick = onMenuClick)
+            },
         ) {
-            LogsHeader(onMenuClick = onMenuClick)
             Spacer(Modifier.height(16.dp))
             Text(
                 text = "Live Logs",
