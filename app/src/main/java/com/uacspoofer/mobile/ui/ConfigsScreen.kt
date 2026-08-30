@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,6 +37,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.QrCode
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
@@ -66,7 +68,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -77,6 +78,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -89,6 +91,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -104,6 +107,8 @@ import androidx.compose.ui.unit.sp
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.profiles.PhoneImportQr
+import com.uacspoofer.mobile.profiles.PhoneImportServer
 import com.uacspoofer.mobile.profiles.ProfileLibrary
 import com.uacspoofer.mobile.profiles.CountryMetadata
 import com.uacspoofer.mobile.profiles.ProfileEndpoint
@@ -142,6 +147,7 @@ internal fun ConfigsScreen(
     var editorName by rememberSaveable { mutableStateOf("") }
     var editorUri by rememberSaveable { mutableStateOf("") }
     var editorError by rememberSaveable { mutableStateOf<String?>(null) }
+    var phoneImportVisible by rememberSaveable { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<ProxyProfile?>(null) }
     var selectionMode by rememberSaveable { mutableStateOf(false) }
     var markedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -365,6 +371,7 @@ internal fun ConfigsScreen(
                     onMenuClick = onMenuClick,
                     onTestAll = { testDelay(library.allProfiles) },
                     onEnterSelection = { selectionMode = true; markedIds = emptySet() },
+                    onPhoneImport = { phoneImportVisible = true },
                     onCancelSelection = { selectionMode = false; markedIds = emptySet() },
                     onSelectAll = { markedIds = library.customProfiles.mapTo(linkedSetOf(), ProxyProfile::id) },
                     onExportSelected = ::exportMarkedProfiles,
@@ -466,6 +473,11 @@ internal fun ConfigsScreen(
                     editorError = null
                 }
             },
+            onPhoneImport = if (editingId == null) {
+                { editorVisible = false; phoneImportVisible = true }
+            } else {
+                null
+            },
             onImport = { importer.launch(arrayOf("text/*", "application/octet-stream")) },
             onSave = {
                 runCatching {
@@ -533,6 +545,20 @@ internal fun ConfigsScreen(
             dismissButton = { OutlinedButton(onClick = { bulkDeletePending = false }) { Text(homeText("Cancel", "لغو")) } },
         )
     }
+
+    if (phoneImportVisible) {
+        PhoneImportQrDialog(
+            onImported = { consumeImportedText(it) },
+            onDismiss = { phoneImportVisible = false },
+            onFailed = {
+                phoneImportVisible = false
+                notify(
+                    if (isPersian) "وای‌فای محلی پیدا نشد. موبایل و این دستگاه باید روی یک شبکه باشند."
+                    else "No local Wi-Fi address. Phone and this device must share the same network.",
+                )
+            },
+        )
+    }
     }
 }
 
@@ -546,6 +572,7 @@ private fun ConfigsTopBar(
     onSortOrderChange: (ConfigLatencySort) -> Unit,
     onMenuClick: () -> Unit,
     onTestAll: () -> Unit,
+    onPhoneImport: () -> Unit,
     onEnterSelection: () -> Unit,
     onCancelSelection: () -> Unit,
     onSelectAll: () -> Unit,
@@ -559,12 +586,13 @@ private fun ConfigsTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        IconButton(
+        RemoteIconButton(
             onClick = if (selectionMode) onCancelSelection else onMenuClick,
             modifier = Modifier
                 .size(46.dp)
                 .background(Color(0x99101C29), CircleShape)
-                .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape),
+                .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape)
+                .then(if (selectionMode) Modifier else Modifier.openDrawerOnDpadLeft(onMenuClick)),
         ) {
             Icon(
                 if (selectionMode) Icons.Outlined.Close else Icons.Outlined.Menu,
@@ -602,10 +630,10 @@ private fun ConfigsTopBar(
             )
         }
         if (selectionMode) {
-            IconButton(onClick = onSelectAll, enabled = count > 0) {
+            RemoteIconButton(onClick = onSelectAll, enabled = count > 0) {
                 Icon(Icons.Outlined.SelectAll, homeText("Select all", "انتخاب همه"), tint = UacColors.DisconnectedBlue)
             }
-            IconButton(
+            RemoteIconButton(
                 onClick = onExportSelected,
                 enabled = selectedCount > 0,
                 modifier = Modifier
@@ -630,7 +658,7 @@ private fun ConfigsTopBar(
                     modifier = Modifier.size(20.dp),
                 )
             }
-            IconButton(onClick = onDeleteSelected, enabled = selectedCount > 0) {
+            RemoteIconButton(onClick = onDeleteSelected, enabled = selectedCount > 0) {
                 Icon(
                     Icons.Outlined.DeleteOutline,
                     homeText("Delete selected", "حذف موارد انتخابی"),
@@ -639,7 +667,7 @@ private fun ConfigsTopBar(
             }
         } else {
             Box {
-                IconButton(onClick = { sortMenuExpanded = true }) {
+                RemoteIconButton(onClick = { sortMenuExpanded = true }) {
                     Icon(
                         when (sortOrder) {
                             ConfigLatencySort.DEFAULT -> Icons.Outlined.Sort
@@ -685,7 +713,14 @@ private fun ConfigsTopBar(
                     }
                 }
             }
-            IconButton(onClick = onTestAll, enabled = !testing) {
+            RemoteIconButton(onClick = onPhoneImport) {
+                Icon(
+                    Icons.Outlined.QrCode,
+                    homeText("Add configs from phone", "افزودن کانفیگ با موبایل"),
+                    tint = UacColors.DisconnectedBlue,
+                )
+            }
+            RemoteIconButton(onClick = onTestAll, enabled = !testing) {
                 if (testing) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
@@ -697,7 +732,7 @@ private fun ConfigsTopBar(
                 }
             }
             if (count > 0) {
-                IconButton(onClick = onEnterSelection) {
+                RemoteIconButton(onClick = onEnterSelection) {
                     Icon(Icons.Outlined.DeleteSweep, homeText("Select profiles to delete", "انتخاب کانفیگ‌ها برای حذف"), tint = UacColors.TextSecondary)
                 }
             }
@@ -812,7 +847,7 @@ private fun ProfileRow(
         }
         if (!selectionMode && onEdit != null && onDelete != null) {
             Box {
-                IconButton(onClick = { menuExpanded = true }) {
+                RemoteIconButton(onClick = { menuExpanded = true }) {
                     Icon(Icons.Outlined.MoreVert, homeText("More options for ${profile.name}", "گزینه‌های بیشتر برای ${profile.name}"), tint = UacColors.TextSecondary)
                 }
                 DropdownMenu(
@@ -884,8 +919,8 @@ private fun EmptyProfileHint() {
         Spacer(Modifier.height(4.dp))
         Text(
             homeText(
-                "Tap + to import VLESS, Trojan or VMess",
-                "برای افزودن ${configLtr("VLESS")}، ${configLtr("Trojan")} یا ${configLtr("VMess")} روی + بزن",
+                "Tap + or the QR icon to import VLESS, Trojan or VMess",
+                "برای افزودن ${configLtr("VLESS")}، ${configLtr("Trojan")} یا ${configLtr("VMess")} روی + یا ${configLtr("QR")} بزن",
             ),
             color = UacColors.TextSecondary,
             fontSize = 10.5.sp,
@@ -950,6 +985,7 @@ private fun ProfileEditorSheet(
     onUriChange: (String) -> Unit,
     onDismiss: () -> Unit,
     onPaste: () -> Unit,
+    onPhoneImport: (() -> Unit)? = null,
     onImport: () -> Unit,
     onSave: () -> Unit,
 ) {
@@ -991,6 +1027,13 @@ private fun ProfileEditorSheet(
                         Icon(Icons.Outlined.FileOpen, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.size(6.dp))
                         Text(homeText("Import file", "واردکردن فایل"))
+                    }
+                }
+                if (onPhoneImport != null) {
+                    OutlinedButton(onClick = onPhoneImport, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Outlined.QrCode, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text(homeText("Add from phone", "افزودن با موبایل"))
                     }
                 }
             }
@@ -1053,6 +1096,68 @@ private fun localizedConfigError(message: String): String = when {
     message.contains("unsupported", ignoreCase = true) -> "این نوع کانفیگ پشتیبانی نمی‌شه"
     message.contains("empty", ignoreCase = true) -> "لینک کانفیگ خالیه"
     else -> "کانفیگ وارد نشد: $message"
+}
+
+@Composable
+private fun PhoneImportQrDialog(
+    onImported: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onFailed: () -> Unit,
+) {
+    var url by remember { mutableStateOf<String?>(null) }
+    DisposableEffect(Unit) {
+        val server = PhoneImportServer(onImported)
+        val started = server.start()
+        if (!started) {
+            onFailed()
+            onDispose { }
+        } else {
+            url = server.url
+            onDispose { server.stop() }
+        }
+    }
+    val qr = remember(url) { url?.let { PhoneImportQr.bitmap(it)?.asImageBitmap() } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF101C29),
+        title = {
+            Text(homeText("Add configs from phone", "افزودن کانفیگ با موبایل"), color = Color.White)
+        },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    homeText(
+                        "Scan this QR with a phone on the same Wi-Fi. Paste VLESS, Trojan or VMess on the page.",
+                        "با موبایل روی همین وای‌فای این ${configLtr("QR")} را اسکن کن. در صفحه، کانفیگ ${configLtr("VLESS")}، ${configLtr("Trojan")} یا ${configLtr("VMess")} را بچسبان.",
+                    ),
+                    color = UacColors.TextSecondary,
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                if (qr != null) {
+                    Image(
+                        bitmap = qr,
+                        contentDescription = homeText("Import QR code", "کد QR ورود کانفیگ"),
+                        modifier = Modifier
+                            .size(220.dp)
+                            .background(Color.White, RoundedCornerShape(12.dp))
+                            .padding(10.dp),
+                    )
+                }
+                url?.let { address ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        address,
+                        color = UacColors.DisconnectedBlue,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            OutlinedButton(onClick = onDismiss) { Text(homeText("Close", "بستن")) }
+        },
+    )
 }
 
 @Composable

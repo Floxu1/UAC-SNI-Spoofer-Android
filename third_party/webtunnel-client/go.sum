@@ -1,0 +1,4 @@
+gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib v1.6.0 h1:KD9m+mRBwtEdqe94Sv72uiedMWeRdIr4sXbrRyzRiIo=
+gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib v1.6.0/go.mod h1:70bhd4JKW/+1HLfm+TMrgHJsUHG4coelMWwiVEJ2gAg=
+gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel v0.0.6 h1:E4MYh/SbdOYR+22H2rOzzSuNY/Jn5JS33cUnCuU3hos=
+gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel v0.0.6/go.mod h1:GlxU1bY/uoCOkbMJpmsiynfU20eL36CGitONPa3Z2gs=

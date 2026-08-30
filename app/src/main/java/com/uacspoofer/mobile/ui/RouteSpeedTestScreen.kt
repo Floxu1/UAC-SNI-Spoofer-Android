@@ -62,7 +62,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedButton
@@ -539,7 +538,7 @@ private fun RouteSpeedHeader(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(
+        RemoteIconButton(
             onClick = onBackClick,
             modifier = Modifier
                 .size(42.dp)
@@ -566,7 +565,7 @@ private fun RouteSpeedHeader(
                 maxLines = 1,
             )
         }
-        IconButton(
+        RemoteIconButton(
             onClick = onRefresh,
             enabled = !loading,
             modifier = Modifier

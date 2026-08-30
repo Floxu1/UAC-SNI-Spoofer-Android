@@ -9,6 +9,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -49,11 +51,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -63,6 +67,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import java.util.Locale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -80,6 +85,10 @@ import androidx.compose.material.icons.outlined.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material3.Icon
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.core.VpnController
+import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.tor.TorEngineStore
+import com.uacspoofer.mobile.engine.tor.TorExitCountry
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProfileLatencyCache
 import com.uacspoofer.mobile.profiles.CountryMetadata
@@ -95,6 +104,8 @@ import com.uacspoofer.mobile.update.AppUpdateManager
 import com.uacspoofer.mobile.update.InstallLaunchResult
 import com.uacspoofer.mobile.update.UpdateCheckResult
 import com.uacspoofer.mobile.update.UpdateUiState
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -113,6 +124,10 @@ fun MainScreen(
     val profileLatencyCache = remember(context) { ProfileLatencyCache(context) }
     val countryRepository = remember(context) { ProfileCountryRepository.get(context) }
     val advancedSettings = remember(context) { AdvancedSettingsStore(context) }
+    val engineModeStore = remember(context) { EngineModeStore.get(context) }
+    val engineMode by engineModeStore.mode.collectAsStateWithLifecycle()
+    val torEngineStore = remember(context) { TorEngineStore.get(context) }
+    val torSettings by torEngineStore.settings.collectAsStateWithLifecycle()
     val sniMakerController = remember(context.applicationContext) { SniMakerController(context) }
     val routeSpeedTestController = remember(context.applicationContext) { RouteSpeedTestController.get(context) }
     val updateManager = remember(context.applicationContext) { AppUpdateManager(context.applicationContext) }
@@ -132,11 +147,15 @@ fun MainScreen(
     }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
+    val homeRemoteFocus = remember { HomeRemoteFocus() }
+    val drawerOpen = drawerState.currentValue == DrawerValue.Open ||
+        drawerState.targetValue == DrawerValue.Open
     var drawerWidthPx by remember { mutableIntStateOf(0) }
     var homeMotionEnabled by remember { mutableStateOf(true) }
     var homeProfile by remember { mutableStateOf(profileStore.selectedProfile()) }
     var homeCountry by remember { mutableStateOf(homeProfile.country) }
     var homeConfigsVisible by remember { mutableStateOf(false) }
+    var homeTorCountriesVisible by remember { mutableStateOf(false) }
     var homeConfigsLibrary by remember { mutableStateOf(profileStore.snapshot()) }
     var homeConfigLatencies by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
@@ -233,9 +252,22 @@ fun MainScreen(
         }
     }
 
+    LaunchedEffect(engineMode, selectedDestination) {
+        if (selectedDestination == DrawerDestination.ENGINE_MODE) {
+            selectedDestination = DrawerDestination.SETTINGS
+            return@LaunchedEffect
+        }
+        if (!selectedDestination.visibleFor(engineMode)) {
+            selectedDestination = DrawerDestination.HOME
+        }
+        if (engineMode.isTor) homeConfigsVisible = false else homeTorCountriesVisible = false
+    }
     BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
     BackHandler(enabled = drawerState.isClosed && selectedDestination != DrawerDestination.HOME) {
-        selectedDestination = if (selectedDestination == DrawerDestination.ADVANCED_SETTINGS) {
+        selectedDestination = if (
+            selectedDestination == DrawerDestination.ADVANCED_SETTINGS ||
+            selectedDestination == DrawerDestination.ENGINE_MODE
+        ) {
             DrawerDestination.SETTINGS
         } else {
             DrawerDestination.HOME
@@ -245,6 +277,7 @@ fun MainScreen(
         enabled = drawerState.isClosed &&
             selectedDestination == DrawerDestination.HOME &&
             !homeConfigsVisible &&
+            !homeTorCountriesVisible &&
             !updateDialogVisible,
     ) {
         val connected = state == ConnectionState.CONNECTED
@@ -281,14 +314,38 @@ fun MainScreen(
         homeCountry = countryRepository.resolve(nextProfile, endpoint).country
     }
 
+    LaunchedEffect(drawerState.currentValue, selectedDestination, engineMode) {
+        if (drawerState.currentValue != DrawerValue.Closed) return@LaunchedEffect
+        if (selectedDestination != DrawerDestination.HOME) return@LaunchedEffect
+        if (!KeyboardNavigationState.value) return@LaunchedEffect
+        val guide = HomeGuideStore.get(context)
+        if (
+            HomeGuide.step(
+                engineSeen = guide.engineSeen(),
+                countrySeen = guide.countrySeen(),
+                torMode = engineMode.isTor,
+                drawerOpen = false,
+            ) != null
+        ) {
+            return@LaunchedEffect
+        }
+        delay(80)
+        runCatching { homeRemoteFocus.connect.requestFocus() }
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = true,
         scrimColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.66f),
         drawerContent = {
             AppDrawer(
-                selectedDestination = selectedDestination,
+                selectedDestination = when (selectedDestination) {
+                    DrawerDestination.ADVANCED_SETTINGS,
+                    DrawerDestination.ENGINE_MODE -> DrawerDestination.SETTINGS
+                    else -> selectedDestination
+                },
                 selectedLanguage = selectedLanguage,
+                drawerOpen = drawerOpen,
                 onDestinationSelected = {
                     selectedDestination = it
                     closeDrawer()
@@ -313,16 +370,22 @@ fun MainScreen(
     ) {
         CompositionLocalProvider(
             LocalHomePersian provides (selectedLanguage == DrawerLanguage.PERSIAN),
+            LocalHomeRemoteFocus provides homeRemoteFocus,
+            LocalDrawerOpen provides drawerOpen,
         ) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (selectedDestination) {
-                DrawerDestination.CONFIGS -> ConfigsScreen(
-                    onMenuClick = openDrawer,
-                    connectionState = state,
-                    activeProfileId = if (state == ConnectionState.CONNECTED) profileStore.activeProfile()?.id else null,
-                    activeEndpoint = if (state == ConnectionState.CONNECTED) profileStore.activeEndpoint() else null,
-                    onSwitchProfile = onSwitchProfile,
-                )
+                DrawerDestination.CONFIGS -> if (engineMode.isTor) {
+                    TorCountryScreen(onMenuClick = openDrawer)
+                } else {
+                    ConfigsScreen(
+                        onMenuClick = openDrawer,
+                        connectionState = state,
+                        activeProfileId = if (state == ConnectionState.CONNECTED) profileStore.activeProfile()?.id else null,
+                        activeEndpoint = if (state == ConnectionState.CONNECTED) profileStore.activeEndpoint() else null,
+                        onSwitchProfile = onSwitchProfile,
+                    )
+                }
                 DrawerDestination.SNI_MAKER -> SniMakerScreen(
                     onMenuClick = openDrawer,
                     controller = sniMakerController,
@@ -333,7 +396,8 @@ fun MainScreen(
                 )
                 DrawerDestination.LIVE_LOGS -> LiveLogsScreen(onMenuClick = openDrawer)
                 DrawerDestination.APP_BYPASS -> AppBypassScreen(onMenuClick = openDrawer)
-                DrawerDestination.SETTINGS -> SettingsScreen(
+                DrawerDestination.SETTINGS,
+                DrawerDestination.ENGINE_MODE -> SettingsScreen(
                     onMenuClick = openDrawer,
                     onAdvancedSettingsClick = { selectedDestination = DrawerDestination.ADVANCED_SETTINGS },
                 )
@@ -359,25 +423,31 @@ fun MainScreen(
                         },
                         onMenuClick = openDrawer,
                         onConfigClick = {
-                            val latestLibrary = profileStore.snapshot()
-                            homeConfigsLibrary = latestLibrary
-                            homeConfigLatencies = profileLatencyCache.snapshot(
-                                latestLibrary.allProfiles.mapTo(hashSetOf(), ProxyProfile::id),
-                            )
-                            homeConfigsVisible = true
+                            if (engineMode.isTor) {
+                                homeTorCountriesVisible = true
+                            } else {
+                                val latestLibrary = profileStore.snapshot()
+                                homeConfigsLibrary = latestLibrary
+                                homeConfigLatencies = profileLatencyCache.snapshot(
+                                    latestLibrary.allProfiles.mapTo(hashSetOf(), ProxyProfile::id),
+                                )
+                                homeConfigsVisible = true
+                            }
                         },
                     )
             }
-            ConnectRescueOverlay(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(WindowInsets.safeDrawing.asPaddingValues())
-                    .padding(bottom = 12.dp)
-                    .zIndex(20f),
-            )
+            if (engineMode.isXray) {
+                ConnectRescueOverlay(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(WindowInsets.safeDrawing.asPaddingValues())
+                        .padding(bottom = 12.dp)
+                        .zIndex(20f),
+                )
+            }
             HomeConfigsDialog(
-                visible = homeConfigsVisible,
+                visible = homeConfigsVisible && engineMode.isXray,
                 library = homeConfigsLibrary,
                 activeProfileId = if (state == ConnectionState.CONNECTED) profileStore.activeProfile()?.id else null,
                 latencies = homeConfigLatencies,
@@ -397,6 +467,34 @@ fun MainScreen(
                     selectedDestination = DrawerDestination.CONFIGS
                 },
                 onDismissRequest = { homeConfigsVisible = false },
+            )
+            HomeTorCountryDialog(
+                visible = homeTorCountriesVisible && engineMode.isTor,
+                selectedCode = torSettings.exitCountryCode,
+                connected = state == ConnectionState.CONNECTED,
+                onSelect = { code ->
+                    val next = torEngineStore.snapshot().copy(
+                        exitCountryCode = code,
+                        exitStrict = code.isNotEmpty(),
+                    ).validated()
+                    val changed = next.exitCountryCode != torSettings.exitCountryCode ||
+                        next.exitStrict != torSettings.exitStrict
+                    if (changed) {
+                        torEngineStore.save(next)
+                        if (
+                            state == ConnectionState.CONNECTED ||
+                            state == ConnectionState.CONNECTING
+                        ) {
+                            VpnController.applyTorExit(context)
+                        }
+                    }
+                    homeTorCountriesVisible = false
+                },
+                onManage = {
+                    homeTorCountriesVisible = false
+                    selectedDestination = DrawerDestination.CONFIGS
+                },
+                onDismissRequest = { homeTorCountriesVisible = false },
             )
             if (updateDialogVisible) {
                 AppUpdateDialog(
@@ -513,7 +611,46 @@ private fun HomeScreenContent(
 ) {
     val stateColors = colorsFor(state)
     val safeDrawingPadding = WindowInsets.safeDrawing.asPaddingValues()
+    val context = LocalContext.current.applicationContext
+    val engineStore = remember(context) { EngineModeStore.get(context) }
+    val engineMode by engineStore.mode.collectAsStateWithLifecycle()
+    val guideStore = remember(context) { HomeGuideStore.get(context) }
+    val drawerOpen = LocalDrawerOpen.current
+    var engineSeen by remember { mutableStateOf(guideStore.engineSeen()) }
+    var countrySeen by remember { mutableStateOf(guideStore.countrySeen()) }
+    var engineLayout by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var countryLayout by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    var guideReady by remember { mutableStateOf(false) }
+    val gotItFocus = remember { FocusRequester() }
+    val guideScope = rememberCoroutineScope()
+    val homeFocus = LocalHomeRemoteFocus.current
+    LaunchedEffect(Unit) {
+        delay(520)
+        guideReady = true
+    }
+    LaunchedEffect(engineMode.isTor) {
+        if (engineMode.isTor && !engineSeen) {
+            guideStore.markEngineSeen()
+            engineSeen = true
+        }
+    }
+    val guideStep = if (guideReady) {
+        HomeGuide.step(engineSeen, countrySeen, engineMode.isTor, drawerOpen)
+    } else {
+        null
+    }
+    val guideTarget = when (guideStep) {
+        HomeGuideStep.Engine -> engineLayout
+        HomeGuideStep.Country -> countryLayout
+        null -> null
+    }
+    val showGuide = guideStep != null && guideTarget?.isAttached == true
+    val guideSession = guideStep?.takeIf { showGuide }?.let { HomeGuideSession(it, gotItFocus) }
 
+    CompositionLocalProvider(
+        LocalHomeGuideActive provides showGuide,
+        LocalHomeGuideSession provides guideSession,
+    ) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
@@ -525,16 +662,19 @@ private fun HomeScreenContent(
                         UacColors.BackgroundBottom,
                     ),
                 ),
-            ),
+            )
+            .homeRemoteDpad(onMenuClick),
     ) {
-        val compact = maxHeight < 700.dp
-        val buttonDiameter = minOf(
-            maxWidth * 0.54f,
-            maxHeight * 0.30f,
-            if (compact) 200.dp else 220.dp,
-        ).coerceAtLeast(168.dp)
-        val topSpacing = (maxHeight * 0.035f).coerceIn(12.dp, 28.dp)
+        val innerHeight = maxHeight -
+            safeDrawingPadding.calculateTopPadding() -
+            safeDrawingPadding.calculateBottomPadding()
+        val compact = innerHeight < 700.dp
+        val tight = innerHeight < 620.dp
         val selectorMaxWidth = maxWidth * 0.80f
+        val topSpacing = (innerHeight * 0.028f).coerceIn(
+            if (tight) 6.dp else 10.dp,
+            if (compact) 18.dp else 28.dp,
+        )
 
         Canvas(modifier = Modifier.fillMaxSize()) {
             val radius = size.width * 0.70f
@@ -564,50 +704,137 @@ private fun HomeScreenContent(
                 accent = stateColors.accent,
                 compact = compact,
                 onMenuClick = onMenuClick,
+                engineToggleEnabled = true,
+                onEngineLaidOut = { engineLayout = it },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = if (compact) 20.dp else 24.dp),
             )
             Spacer(Modifier.height(if (compact) 2.dp else 6.dp))
-            AppTitle(compact = compact, accent = stateColors.accent)
-            Spacer(Modifier.height(if (compact) 20.dp else 22.dp))
-            ConnectButton(
-                state = state,
-                accent = stateColors.accent,
-                diameter = buttonDiameter,
-                onClick = onPrimaryAction,
-            )
-            Spacer(Modifier.height(if (compact) 7.dp else 11.dp))
-            ConnectionStatus(state = state, accent = stateColors.accent)
-            Spacer(Modifier.height(if (compact) 5.dp else 7.dp))
-            SelectedProfileRow(
-                profile = profile,
-                onClick = onConfigClick,
-                maxWidth = selectorMaxWidth,
-            )
-            Spacer(Modifier.height(if (compact) 6.dp else 9.dp))
-            TrafficStatsRow(
-                accent = stateColors.accent,
-                compact = compact,
-                modifier = Modifier.fillMaxWidth(0.86f),
-            )
-            Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
-            ConnectionAwareFeatureCard(
-                state = state,
-                profile = profile,
-                accent = stateColors.accent,
-                compact = compact,
-                modifier = Modifier.fillMaxWidth(0.86f),
-            )
-            Spacer(Modifier.height(if (compact) 3.dp else 6.dp))
-            AnimatedDottedWave(
-                accent = stateColors.accent,
-                motionEnabled = motionEnabled,
+            Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
+            ) {
+                AnimatedContent(
+                    targetState = engineMode,
+                    modifier = Modifier.fillMaxSize(),
+                    transitionSpec = { engineSwitchTransition() },
+                    contentAlignment = Alignment.TopCenter,
+                    label = "engine-home-switch",
+                ) { mode ->
+                    CompositionLocalProvider(LocalDisplayedEngineMode provides mode) {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            AppTitle(compact = compact, accent = stateColors.accent)
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                BoxWithConstraints(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxWidth(),
+                                ) {
+                                    val halo = when {
+                                        tight || maxHeight < 280.dp -> 22.dp
+                                        compact -> 36.dp
+                                        else -> 54.dp
+                                    }
+                                    val diameter = minOf(
+                                        maxWidth * 0.54f,
+                                        (maxHeight - halo).coerceAtLeast(0.dp),
+                                        if (compact) 200.dp else 220.dp,
+                                    )
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        if (diameter > 0.dp) {
+                                            ConnectButton(
+                                                state = state,
+                                                accent = stateColors.accent,
+                                                diameter = diameter,
+                                                halo = halo,
+                                                onClick = onPrimaryAction,
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(if (tight) 4.dp else if (compact) 7.dp else 11.dp))
+                                ConnectionStatus(state = state, accent = stateColors.accent)
+                                Spacer(Modifier.height(if (tight) 2.dp else if (compact) 5.dp else 7.dp))
+                                SelectedProfileRow(
+                                    profile = profile,
+                                    onClick = onConfigClick,
+                                    maxWidth = selectorMaxWidth,
+                                    modifier = Modifier.onGloballyPositioned { countryLayout = it },
+                                )
+                            }
+                            Spacer(Modifier.height(if (compact) 6.dp else 9.dp))
+                            TrafficStatsRow(
+                                accent = stateColors.accent,
+                                compact = compact,
+                                modifier = Modifier.fillMaxWidth(0.86f),
+                            )
+                            Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
+                            ConnectionAwareFeatureCard(
+                                state = state,
+                                profile = profile,
+                                accent = stateColors.accent,
+                                compact = compact,
+                                modifier = Modifier.fillMaxWidth(0.86f),
+                            )
+                            Spacer(Modifier.height(if (tight) 2.dp else if (compact) 3.dp else 6.dp))
+                            AnimatedDottedWave(
+                                accent = stateColors.accent,
+                                motionEnabled = motionEnabled,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(if (tight) 14.dp else if (compact) 22.dp else 32.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (showGuide) {
+            val step = checkNotNull(guideStep)
+            HomeGuideOverlay(
+                step = step,
+                target = guideTarget,
+                gotIt = gotItFocus,
+                onDismiss = {
+                    val nextEngineSeen = engineSeen || step == HomeGuideStep.Engine
+                    val nextCountrySeen = countrySeen || step == HomeGuideStep.Country
+                    when (step) {
+                        HomeGuideStep.Engine -> {
+                            guideStore.markEngineSeen()
+                            engineSeen = true
+                        }
+                        HomeGuideStep.Country -> {
+                            guideStore.markCountrySeen()
+                            countrySeen = true
+                        }
+                    }
+                    val next = HomeGuide.step(
+                        engineSeen = nextEngineSeen,
+                        countrySeen = nextCountrySeen,
+                        torMode = engineMode.isTor,
+                        drawerOpen = false,
+                    )
+                    if (next == null && homeFocus != null) {
+                        homeFocus.suppressConfirmUp = true
+                        guideScope.launch {
+                            delay(120)
+                            runCatching { homeFocus.connect.requestFocus() }
+                        }
+                    }
+                },
             )
         }
+    }
     }
 }
 
@@ -619,8 +846,27 @@ private fun SelectedProfileRow(
     modifier: Modifier = Modifier,
 ) {
     val localizedFont = homeLocalizedFont()
+    val context = LocalContext.current
+    val engineMode = rememberDisplayedEngineMode()
+    val torStore = remember(context) { TorEngineStore.get(context) }
+    val torSettings by torStore.settings.collectAsStateWithLifecycle()
+    val isPersian = LocalHomePersian.current
+    val selectedLabel = if (engineMode.isTor) {
+        if (torSettings.exitCountryCode.isEmpty()) {
+            homeText("Automatic", "خودکار")
+        } else {
+            TorExitCountry.displayName(
+                torSettings.exitCountryCode,
+                if (isPersian) Locale("fa") else Locale.ENGLISH,
+            )
+        }
+    } else {
+        profile.name
+    }
+    val selectionKey = if (engineMode.isTor) "tor:${torSettings.exitCountryCode}" else profile.id
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
+    val guideSession = LocalHomeGuideSession.current
     val density = androidx.compose.ui.platform.LocalDensity.current
     val pressedOffset = remember(density) { with(density) { 2.dp.toPx() } }
     val slideDistancePx = remember(density) { with(density) { 4.dp.roundToPx() } }
@@ -634,6 +880,14 @@ private fun SelectedProfileRow(
             .widthIn(max = maxWidth)
             .height(44.dp)
             .semantics(mergeDescendants = true) { role = Role.Button }
+            .then(
+                if (guideSession?.step == HomeGuideStep.Country) {
+                    Modifier.guideTargetDpad(guideSession.gotIt)
+                } else {
+                    Modifier
+                },
+            )
+            .trackHomeSlot(HomeRemoteSlot.Profile)
             .clickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,
@@ -655,7 +909,7 @@ private fun SelectedProfileRow(
         Box(Modifier.size(width = 1.dp, height = 16.dp).background(Color.White.copy(alpha = 0.13f)))
         Spacer(Modifier.size(9.dp))
         AnimatedContent(
-            targetState = profile,
+            targetState = selectedLabel,
             modifier = Modifier.widthIn(max = (maxWidth - 128.dp).coerceAtLeast(88.dp)),
             contentAlignment = Alignment.CenterStart,
             transitionSpec = {
@@ -664,11 +918,11 @@ private fun SelectedProfileRow(
                     .togetherWith(fadeOut(tween(120)))
                     .using(SizeTransform(clip = false))
             },
-            contentKey = ProxyProfile::id,
+            contentKey = { selectionKey },
             label = "selected-config",
         ) { current ->
             Text(
-                current.name,
+                current,
                 color = UacColors.DisconnectedBlue,
                 fontSize = 13.5.sp,
                 fontWeight = FontWeight.Medium,
@@ -715,10 +969,18 @@ private fun ConnectedPreview() {
     }
 }
 
-@Preview(name = "Home - Error", showBackground = true, widthDp = 390, heightDp = 844)
+@Preview(name = "Home - Compact 640", showBackground = true, widthDp = 360, heightDp = 640)
 @Composable
-private fun ErrorPreview() {
+private fun CompactHomePreview() {
     UacSniSpooferTheme {
-        HomeScreenContent(ConnectionState.ERROR, onPrimaryAction = {}, onMenuClick = {})
+        HomeScreenContent(ConnectionState.CONNECTED, onPrimaryAction = {}, onMenuClick = {})
+    }
+}
+
+@Preview(name = "Home - Short 568", showBackground = true, widthDp = 360, heightDp = 568)
+@Composable
+private fun ShortHomePreview() {
+    UacSniSpooferTheme {
+        HomeScreenContent(ConnectionState.CONNECTED, onPrimaryAction = {}, onMenuClick = {})
     }
 }

@@ -28,7 +28,6 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -173,7 +172,10 @@ private fun LogsHeader(onMenuClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        IconButton(onClick = onMenuClick) {
+        RemoteIconButton(
+            onClick = onMenuClick,
+            modifier = Modifier.openDrawerOnDpadLeft(onMenuClick),
+        ) {
             Icon(Icons.Rounded.Menu, "Open navigation menu", tint = Color.White)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -227,7 +229,7 @@ private fun LogActionButton(
     active: Boolean = false,
     onClick: () -> Unit,
 ) {
-    IconButton(onClick = onClick, modifier = Modifier.size(38.dp)) {
+    RemoteIconButton(onClick = onClick, modifier = Modifier.size(38.dp)) {
         Icon(
             icon,
             description,

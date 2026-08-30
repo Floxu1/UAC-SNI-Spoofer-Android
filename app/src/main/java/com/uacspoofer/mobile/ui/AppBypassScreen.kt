@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -31,7 +31,6 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -50,6 +49,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -112,6 +113,7 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var searchFocused by remember { mutableStateOf(false) }
     val appListState = rememberLazyListState()
+    val listStartFocus = remember { FocusRequester() }
     val searchMode = searchFocused || query.isNotBlank()
 
     LaunchedEffect(Unit) {
@@ -219,7 +221,16 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(58.dp)
-                        .onFocusChanged { searchFocused = it.isFocused },
+                        .onFocusChanged { searchFocused = it.isFocused }
+                        .then(
+                            if (filteredApps.isNotEmpty()) {
+                                Modifier.dpadDownMovesFocus(listStartFocus) {
+                                    keyboardController?.hide()
+                                }
+                            } else {
+                                Modifier
+                            }
+                        ),
                     singleLine = true,
                     shape = RoundedCornerShape(15.dp),
                     textStyle = LocalTextStyle.current.copy(fontSize = 14.sp),
@@ -236,7 +247,7 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                     },
                     trailingIcon = if (searchMode) {
                         {
-                            IconButton(
+                            RemoteIconButton(
                                 onClick = {
                                     query = ""
                                     keyboardController?.hide()
@@ -296,19 +307,19 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                             .weight(1f),
                         verticalArrangement = Arrangement.spacedBy(7.dp),
                     ) {
-                        items(filteredApps, key = InstalledVpnApp::packageName) { app ->
+                        itemsIndexed(filteredApps, key = { _, app -> app.packageName }) { index, app ->
                             AppSelectionRow(
                                 app = app,
                                 selected = app.packageName in settings.selectedPackages,
                                 onSelectedChange = { selected ->
                                     keyboardController?.hide()
-                                    focusManager.clearFocus()
                                     AppRoutingPreferences.setPackageSelected(
                                         context,
                                         app.packageName,
                                         selected,
                                     )
                                 },
+                                modifier = if (index == 0) Modifier.focusRequester(listStartFocus) else Modifier,
                             )
                         }
                         item { Spacer(Modifier.height(12.dp)) }
@@ -402,6 +413,7 @@ private fun AppSelectionRow(
     app: InstalledVpnApp,
     selected: Boolean,
     onSelectedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     var icon by remember(app.packageName) { mutableStateOf<ImageBitmap?>(null) }
@@ -416,18 +428,29 @@ private fun AppSelectionRow(
     }
     val shape = RoundedCornerShape(15.dp)
     val isPersian = LocalHomePersian.current
+    val focusRequester = remember { FocusRequester() }
+    var restoreFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(selected) {
+        if (!restoreFocus) return@LaunchedEffect
+        restoreFocus = false
+        runCatching { focusRequester.requestFocus() }
+    }
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
+            .focusRequester(focusRequester)
             .clip(shape)
             .background(if (selected) Color(0xCC0B2940) else Color(0xA30D1926))
             .border(1.dp, if (selected) Color(0xAA299EFF) else UacColors.CardBorder, shape)
-            .clickable { onSelectedChange(!selected) }
+            .clickable {
+                restoreFocus = true
+                onSelectedChange(!selected)
+            }
             .padding(horizontal = 13.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (isPersian) {
-            AppSelectionControl(selected = selected, onClick = { onSelectedChange(!selected) })
+            AppSelectionControl(selected = selected)
             Spacer(Modifier.width(8.dp))
             AppIdentity(app = app, modifier = Modifier.weight(1f))
             Spacer(Modifier.width(12.dp))
@@ -437,7 +460,7 @@ private fun AppSelectionRow(
             Spacer(Modifier.width(12.dp))
             AppIdentity(app = app, modifier = Modifier.weight(1f))
             Spacer(Modifier.width(8.dp))
-            AppSelectionControl(selected = selected, onClick = { onSelectedChange(!selected) })
+            AppSelectionControl(selected = selected)
         }
     }
 }
@@ -483,10 +506,10 @@ private fun AppIdentity(app: InstalledVpnApp, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun AppSelectionControl(selected: Boolean, onClick: () -> Unit) {
+private fun AppSelectionControl(selected: Boolean) {
     RadioButton(
         selected = selected,
-        onClick = onClick,
+        onClick = null,
         colors = RadioButtonDefaults.colors(
             selectedColor = UacColors.DisconnectedBlue,
             unselectedColor = UacColors.TextSecondary,

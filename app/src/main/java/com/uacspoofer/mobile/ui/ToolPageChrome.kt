@@ -80,7 +80,8 @@ internal fun ToolPageHeader(
                 .size(44.dp)
                 .background(Color(0x99101C29), CircleShape)
                 .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape)
-                .clickable(onClick = onMenuClick),
+                .clickable(onClick = onMenuClick)
+                .openDrawerOnDpadLeft(onMenuClick),
             contentAlignment = Alignment.Center,
         ) {
             Icon(

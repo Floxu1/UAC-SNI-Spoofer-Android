@@ -21,6 +21,17 @@ class ConnectionStateMachineTest {
     }
 
     @Test
+    fun connectedCountrySwitchGoesThroughConnectingAgain() {
+        val machine = ConnectionStateMachine()
+        assertTrue(machine.tryBeginConnect())
+        assertTrue(machine.markConnected())
+        machine.markConnecting()
+        assertEquals(ConnectionState.CONNECTING, machine.state.value)
+        assertTrue(machine.markConnected())
+        assertEquals(ConnectionState.CONNECTED, machine.state.value)
+    }
+
+    @Test
     fun errorCanRetryButCannotBecomeConnectedWithoutConnecting() {
         val machine = ConnectionStateMachine()
         machine.markError()

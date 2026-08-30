@@ -38,6 +38,12 @@ object AppLogRepository {
         "${entry.timestamp}  ${entry.level.label.padEnd(5)}  ${entry.source.label.padEnd(7)}  ${entry.message}"
     }
 
+    fun entryCount(): Int = entries.value.size
+
+    fun estimatedBytes(): Long = entries.value.sumOf { entry ->
+        80L + (entry.message.length + entry.timestamp.length + entry.source.label.length) * 2L
+    }
+
     private fun append(level: LogLevel, source: LogSource, rawMessage: String) {
         val message = rawMessage
             .replace('\r', ' ')
@@ -94,4 +100,5 @@ enum class LogSource(val label: String) {
     XRAY("XRAY"),
     PROXY("PROXY"),
     TUN("TUN"),
+    TOR("TOR"),
 }

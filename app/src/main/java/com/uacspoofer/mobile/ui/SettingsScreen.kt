@@ -20,7 +20,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import android.os.SystemClock
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -72,6 +77,14 @@ internal fun SettingsScreen(
         "ویرایش پنل تنظیمات سریع رو باز کن و UAC SNI Spoofer رو به پنل بکش",
     )
     val tileErrorMessage = homeText("Could not request the tile", "درخواست افزودن دکمه انجام نشد")
+    val diagnosticsOpen = remember { mutableStateOf(false) }
+    val secretTaps = remember { mutableIntStateOf(0) }
+    val lastSecretTapAt = remember { mutableLongStateOf(0L) }
+
+    if (diagnosticsOpen.value) {
+        RuntimeDiagnosticsScreen(onClose = { diagnosticsOpen.value = false })
+        return
+    }
 
     CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
         ToolPageBackground(accent) {
@@ -168,7 +181,28 @@ internal fun SettingsScreen(
                         }
                     }
                 }
-                item { Spacer(Modifier.height(20.dp)) }
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(168.dp)
+                            .pointerInput(Unit) {
+                                detectTapGestures {
+                                    val now = SystemClock.elapsedRealtime()
+                                    if (now - lastSecretTapAt.longValue < 500L) {
+                                        secretTaps.intValue += 1
+                                    } else {
+                                        secretTaps.intValue = 1
+                                    }
+                                    lastSecretTapAt.longValue = now
+                                    if (secretTaps.intValue >= 3) {
+                                        secretTaps.intValue = 0
+                                        diagnosticsOpen.value = true
+                                    }
+                                }
+                            },
+                    )
+                }
             }
         }
     }

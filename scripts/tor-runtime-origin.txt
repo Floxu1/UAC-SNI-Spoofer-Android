@@ -1,0 +1,18 @@
+libtor.so
+  Source: Guardian Project tor-android 0.4.9.11 (Maven Central)
+  Artifact: info.guardianproject:tor-android:0.4.9.11
+  URL: https://repo1.maven.org/maven2/info/guardianproject/tor-android/0.4.9.11/tor-android-0.4.9.11.aar
+  SHA256(aar): 018a0b0bc28f83364595cdc729fc1e2a559d408bf91b9f4cef0f7f9b907c73a4
+
+libwebtunnel.so
+  Source: Tor Project webtunnel client v0.0.6
+  Module: gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel@v0.0.6
+  Built with NDK clang, GOOS=android, -buildmode=pie
+  arm64-v8a: GOARCH=arm64
+  x86_64: GOARCH=amd64 (requires CGO/NDK)
+  armeabi-v7a: GOARCH=arm GOARM=7
+  x86: GOARCH=386
+
+assets/tor/bridges-webtunnel.txt
+  Source: OnionHop built-in webtunnel list (center2055/OnionHop)
+  Path: OnionHop/tor/pluggable_transports/bridges-webtunnel.txt

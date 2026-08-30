@@ -38,7 +38,11 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Speed
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.engine.EngineMode
+import com.uacspoofer.mobile.engine.EngineModeStore
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SupportAgent
@@ -48,10 +52,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -60,10 +68,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.update.AppUpdateManager
+import kotlinx.coroutines.delay
 
 internal enum class DrawerDestination {
     HOME,
@@ -73,6 +83,7 @@ internal enum class DrawerDestination {
     LIVE_LOGS,
     APP_BYPASS,
     SETTINGS,
+    ENGINE_MODE,
     ADVANCED_SETTINGS,
     SUPPORT,
 }
@@ -93,16 +104,26 @@ private val DrawerText = Color(0xFFE7EEF8)
 private val DrawerMuted = Color(0xFF98A9BF)
 private val DrawerDivider = Color(0x263E5874)
 
-private val DrawerItems = listOf(
-    DrawerItem(DrawerDestination.HOME, "Home", Icons.Outlined.Home),
-    DrawerItem(DrawerDestination.CONFIGS, "Configs", Icons.Outlined.Description),
-    DrawerItem(DrawerDestination.SNI_MAKER, "Config Maker", Icons.Outlined.Code),
-    DrawerItem(DrawerDestination.ROUTE_SPEED_TEST, "Route Speed Test", Icons.Outlined.Speed),
-    DrawerItem(DrawerDestination.LIVE_LOGS, "Logs", Icons.AutoMirrored.Outlined.ListAlt),
-    DrawerItem(DrawerDestination.APP_BYPASS, "App Bypass", Icons.Outlined.Block),
-    DrawerItem(DrawerDestination.SETTINGS, "Settings", Icons.Outlined.Settings),
-    DrawerItem(DrawerDestination.SUPPORT, "Support", Icons.Outlined.SupportAgent),
-)
+internal fun DrawerDestination.visibleFor(mode: EngineMode): Boolean = when (this) {
+    DrawerDestination.SNI_MAKER,
+    DrawerDestination.ROUTE_SPEED_TEST -> mode.isXray
+    else -> true
+}
+
+private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
+    add(DrawerItem(DrawerDestination.HOME, "Home", Icons.Outlined.Home))
+    if (mode.isTor) {
+        add(DrawerItem(DrawerDestination.CONFIGS, "Select country", Icons.Outlined.Public))
+    } else {
+        add(DrawerItem(DrawerDestination.CONFIGS, "Configs", Icons.Outlined.Description))
+        add(DrawerItem(DrawerDestination.SNI_MAKER, "Config Maker", Icons.Outlined.Code))
+        add(DrawerItem(DrawerDestination.ROUTE_SPEED_TEST, "Route Speed Test", Icons.Outlined.Speed))
+    }
+    add(DrawerItem(DrawerDestination.LIVE_LOGS, "Logs", Icons.AutoMirrored.Outlined.ListAlt))
+    add(DrawerItem(DrawerDestination.APP_BYPASS, "App Bypass", Icons.Outlined.Block))
+    add(DrawerItem(DrawerDestination.SETTINGS, "Settings", Icons.Outlined.Settings))
+    add(DrawerItem(DrawerDestination.SUPPORT, "Support", Icons.Outlined.SupportAgent))
+}
 
 @Composable
 internal fun DrawerOverlay(
@@ -165,10 +186,26 @@ internal fun AppDrawer(
     selectedLanguage: DrawerLanguage,
     onDestinationSelected: (DrawerDestination) -> Unit,
     onLanguageSelected: (DrawerLanguage) -> Unit,
+    drawerOpen: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val panelShape = RoundedCornerShape(28.dp)
     val isPersian = selectedLanguage == DrawerLanguage.PERSIAN
+    val context = LocalContext.current.applicationContext
+    val engineStore = remember(context) { EngineModeStore.get(context) }
+    val engineMode by engineStore.mode.collectAsStateWithLifecycle()
+    val items = remember(engineMode) { drawerItemsFor(engineMode) }
+    val firstItemFocus = remember { FocusRequester() }
+    val lastNavFocus = remember { FocusRequester() }
+    val githubFocus = remember { FocusRequester() }
+    val languageFocus = remember { FocusRequester() }
+    val navBottomFocus = if (items.size <= 1) firstItemFocus else lastNavFocus
+
+    LaunchedEffect(drawerOpen, items.firstOrNull()?.destination) {
+        if (!drawerOpen) return@LaunchedEffect
+        delay(80)
+        runCatching { firstItemFocus.requestFocus() }
+    }
 
     CompositionLocalProvider(LocalHomePersian provides isPersian) {
         BoxWithConstraints(
@@ -203,24 +240,49 @@ internal fun AppDrawer(
                 .padding(horizontal = 17.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                DrawerHeader(compact = compact)
+                DrawerHeader(compact = compact, torMenu = engineMode.isTor)
             HorizontalDivider(color = DrawerDivider, thickness = 1.dp)
             Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
 
-            DrawerItems.forEach { item ->
+            items.forEachIndexed { index, item ->
                 DrawerNavItem(
                     item = item,
                     selected = item.destination == selectedDestination,
                     compact = compact,
+                    torMenu = engineMode.isTor,
                     onClick = { onDestinationSelected(item.destination) },
+                    enabled = drawerOpen,
+                    modifier = Modifier
+                        .then(if (index == 0) Modifier.focusRequester(firstItemFocus) else Modifier)
+                        .then(
+                            if (index == items.lastIndex && index != 0) {
+                                Modifier.focusRequester(lastNavFocus)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .then(
+                            if (index == items.lastIndex) {
+                                Modifier.dpadMovesFocus(down = githubFocus)
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .keepFocusInDrawerHorizontally(consumeUp = index == 0),
                 )
-                if (item != DrawerItems.last()) {
+                if (index != items.lastIndex) {
                     Spacer(Modifier.height(if (compact) 1.dp else 3.dp))
                 }
             }
 
             Spacer(Modifier.weight(1f))
-            DrawerSupportCard(compact = compact)
+            DrawerSupportCard(
+                compact = compact,
+                enabled = drawerOpen,
+                githubFocus = githubFocus,
+                downFocus = languageFocus,
+                upFocus = navBottomFocus,
+            )
             Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
             HorizontalDivider(color = DrawerDivider, thickness = 1.dp)
             Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
@@ -228,6 +290,9 @@ internal fun AppDrawer(
                 selectedLanguage = selectedLanguage,
                 onLanguageSelected = onLanguageSelected,
                 compact = compact,
+                enabled = drawerOpen,
+                languageFocus = languageFocus,
+                upFocus = githubFocus,
             )
             Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
             }
@@ -236,7 +301,7 @@ internal fun AppDrawer(
 }
 
 @Composable
-private fun DrawerHeader(compact: Boolean) {
+private fun DrawerHeader(compact: Boolean, torMenu: Boolean) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -254,7 +319,7 @@ private fun DrawerHeader(compact: Boolean) {
         )
         Spacer(Modifier.height(if (compact) 4.dp else 9.dp))
         Text(
-            text = "UAC SNI Spoofer",
+            text = if (torMenu) "UAC TOR BRIDGE" else "UAC SNI Spoofer",
             color = DrawerText,
             fontSize = if (compact) 16.sp else 19.sp,
             fontWeight = FontWeight.SemiBold,
@@ -279,7 +344,10 @@ private fun DrawerNavItem(
     item: DrawerItem,
     selected: Boolean,
     compact: Boolean,
+    torMenu: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(16.dp)
     val background = if (selected) {
@@ -294,7 +362,7 @@ private fun DrawerNavItem(
     }
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .height(if (compact) 35.dp else 46.dp)
             .clip(shape)
@@ -303,7 +371,7 @@ private fun DrawerNavItem(
                 if (selected) Modifier.border(1.dp, DrawerBlue.copy(alpha = 0.19f), shape)
                 else Modifier,
             )
-            .clickable(role = Role.Button, onClick = onClick),
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
     ) {
         if (selected) {
             Box(
@@ -335,12 +403,13 @@ private fun DrawerNavItem(
                     item.label,
                     when (item.destination) {
                         DrawerDestination.HOME -> "خانه"
-                        DrawerDestination.CONFIGS -> "کانفیگ‌ها"
+                        DrawerDestination.CONFIGS -> if (torMenu) "انتخاب کشور" else "کانفیگ‌ها"
                         DrawerDestination.SNI_MAKER -> "ساخت کانفیگ"
                         DrawerDestination.ROUTE_SPEED_TEST -> "تست سرعت مسیر"
                         DrawerDestination.LIVE_LOGS -> "لاگ‌ها"
                         DrawerDestination.APP_BYPASS -> "عبور انتخابی برنامه‌ها"
                         DrawerDestination.SETTINGS -> "تنظیمات"
+                        DrawerDestination.ENGINE_MODE -> "موتور اتصال"
                         DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات پیشرفته"
                         DrawerDestination.SUPPORT -> "پشتیبانی"
                     },
@@ -355,7 +424,13 @@ private fun DrawerNavItem(
 }
 
 @Composable
-private fun DrawerSupportCard(compact: Boolean) {
+private fun DrawerSupportCard(
+    compact: Boolean,
+    enabled: Boolean = true,
+    githubFocus: FocusRequester,
+    downFocus: FocusRequester,
+    upFocus: FocusRequester,
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val shape = RoundedCornerShape(19.dp)
     Column(
@@ -412,7 +487,11 @@ private fun DrawerSupportCard(compact: Boolean) {
                     ),
                 )
                 .border(1.dp, Color(0xFFB28AFF).copy(alpha = 0.42f), RoundedCornerShape(13.dp))
+                .focusRequester(githubFocus)
+                .dpadMovesFocus(down = downFocus, up = upFocus)
+                .keepFocusInDrawerHorizontally()
                 .clickable(
+                    enabled = enabled,
                     role = Role.Button,
                     onClick = { openExternalLink(context, AppUpdateManager.REPOSITORY_URL) },
                 ),
@@ -442,7 +521,12 @@ private fun DrawerLanguageRow(
     selectedLanguage: DrawerLanguage,
     onLanguageSelected: (DrawerLanguage) -> Unit,
     compact: Boolean,
+    enabled: Boolean = true,
+    languageFocus: FocusRequester,
+    upFocus: FocusRequester,
 ) {
+    val persianFocus = remember { FocusRequester() }
+    val englishFocus = remember { FocusRequester() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -482,7 +566,19 @@ private fun DrawerLanguageRow(
                 compact = compact,
                 localizedFont = true,
                 onClick = { onLanguageSelected(DrawerLanguage.PERSIAN) },
-                modifier = Modifier.weight(1f),
+                enabled = enabled,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(persianFocus)
+                    .then(
+                        if (selectedLanguage == DrawerLanguage.PERSIAN) {
+                            Modifier.focusRequester(languageFocus)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .drawerLanguageDpad(right = englishFocus)
+                    .dpadMovesFocus(up = upFocus),
             )
             LanguageSegment(
                 text = "English",
@@ -490,7 +586,19 @@ private fun DrawerLanguageRow(
                 compact = compact,
                 localizedFont = false,
                 onClick = { onLanguageSelected(DrawerLanguage.ENGLISH) },
-                modifier = Modifier.weight(1f),
+                enabled = enabled,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(englishFocus)
+                    .then(
+                        if (selectedLanguage == DrawerLanguage.ENGLISH) {
+                            Modifier.focusRequester(languageFocus)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .drawerLanguageDpad(left = persianFocus)
+                    .dpadMovesFocus(up = upFocus),
             )
         }
     }
@@ -503,6 +611,7 @@ private fun LanguageSegment(
     compact: Boolean,
     localizedFont: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -510,7 +619,7 @@ private fun LanguageSegment(
             .fillMaxHeight()
             .clip(RoundedCornerShape(9.dp))
             .background(if (selected) DrawerBlue.copy(alpha = 0.88f) else Color.Transparent)
-            .clickable(role = Role.RadioButton, onClick = onClick),
+            .clickable(enabled = enabled, role = Role.RadioButton, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(

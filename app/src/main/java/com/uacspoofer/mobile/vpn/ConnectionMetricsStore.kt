@@ -54,8 +54,10 @@ object ConnectionMetricsStore {
         mutableMetrics.value = ConnectionMetrics()
     }
 
-    private fun medianLatency(): Long? = latencySamples.sorted().let { samples ->
-        samples.takeIf { it.isNotEmpty() }?.get(samples.size / 2)
+    private fun medianLatency(): Long? {
+        val samples = latencySamples.sorted()
+        if (samples.isEmpty()) return null
+        return samples[(samples.size - 1) / 2]
     }
 
     private fun buildMetrics(isMeasuring: Boolean): ConnectionMetrics {

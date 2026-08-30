@@ -42,6 +42,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.vpn.ConnectRescuePhase
 import com.uacspoofer.mobile.vpn.ConnectRescueSnapshot
@@ -65,7 +67,13 @@ private val RescueFailRed = UacColors.ErrorRed
 
 @Composable
 internal fun ConnectRescueOverlay(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val engineStore = remember(context) { EngineModeStore.get(context) }
+    val engineMode by engineStore.mode.collectAsStateWithLifecycle()
     val snapshot by ConnectRescueStore.snapshot.collectAsStateWithLifecycle()
+    LaunchedEffect(engineMode) {
+        if (engineMode.isTor) ConnectRescueStore.hide()
+    }
     LaunchedEffect(snapshot.generation, snapshot.phase) {
         if (snapshot.phase == ConnectRescuePhase.SUCCEEDED || snapshot.phase == ConnectRescuePhase.FAILED) {
             delay(2_600L)
@@ -73,7 +81,7 @@ internal fun ConnectRescueOverlay(modifier: Modifier = Modifier) {
         }
     }
     AnimatedVisibility(
-        visible = snapshot.visible,
+        visible = snapshot.visible && engineMode.isXray,
         modifier = modifier,
         enter = fadeIn(tween(180)) + slideInVertically(
             tween(240, easing = FastOutSlowInEasing),

@@ -5,6 +5,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.ui.ProvideFixedFontScale
 
 object UacColors {
     val BackgroundTop = Color(0xFF020913)
@@ -48,8 +49,10 @@ private val UacDarkColorScheme = darkColorScheme(
 
 @Composable
 fun UacSniSpooferTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = UacDarkColorScheme,
-        content = content,
-    )
+    ProvideFixedFontScale {
+        MaterialTheme(
+            colorScheme = UacDarkColorScheme,
+            content = content,
+        )
+    }
 }

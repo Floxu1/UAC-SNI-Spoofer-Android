@@ -26,6 +26,18 @@ data class InstalledVpnApp(
     val packageName: String,
 )
 
+data class AppRoutingPlan(
+    val mode: AppRoutingMode,
+    val allowed: List<String>? = null,
+    val disallowed: List<String>? = null,
+) {
+    init {
+        require(allowed == null || disallowed == null) {
+            "VpnService cannot mix allowed and disallowed applications"
+        }
+    }
+}
+
 
 object AppRoutingPreferences {
     private const val PREFS = "app_routing"
@@ -97,38 +109,53 @@ object AppRoutingPreferences {
     
     fun applyTo(builder: android.net.VpnService.Builder, context: Context) {
         val current = snapshot(context)
-        when (current.mode) {
-            AppRoutingMode.ALL_APPS -> builder.addDisallowedApplication(context.packageName)
-
-            AppRoutingMode.BYPASS_SELECTED -> {
-                builder.addDisallowedApplication(context.packageName)
-                current.selectedPackages.forEach { packageName ->
-                    runCatching { builder.addDisallowedApplication(packageName) }
-                        .onFailure { Log.w(TAG, "Ignoring unavailable bypass package: $packageName") }
-                }
-            }
-
-            AppRoutingMode.VPN_ONLY_SELECTED -> {
-                
-                var allowedCount = 0
-                current.selectedPackages.asSequence()
-                    .filterNot { it == context.packageName }
-                    .forEach { packageName ->
-                    runCatching { builder.addAllowedApplication(packageName) }
-                        .onSuccess { allowedCount++ }
-                        .onFailure { Log.w(TAG, "Ignoring unavailable VPN-only package: $packageName") }
-                }
-                if (allowedCount == 0) {
-                    
-                    builder.addDisallowedApplication(context.packageName)
-                    Log.w(TAG, "VPN-only mode has no selected apps; using all-app routing for this session")
-                }
-            }
+        val plan = planFor(context.packageName, current)
+        var allowedCount = 0
+        var disallowedCount = 0
+        plan.allowed?.forEach { packageName ->
+            runCatching { builder.addAllowedApplication(packageName) }
+                .onSuccess { allowedCount++ }
+                .onFailure { Log.w(TAG, "Ignoring unavailable VPN-only package: $packageName") }
+        }
+        plan.disallowed?.forEach { packageName ->
+            runCatching { builder.addDisallowedApplication(packageName) }
+                .onSuccess { disallowedCount++ }
+                .onFailure { Log.w(TAG, "Ignoring unavailable bypass package: $packageName") }
+        }
+        if (plan.mode == AppRoutingMode.VPN_ONLY_SELECTED && allowedCount == 0 && disallowedCount == 0) {
+            runCatching { builder.addDisallowedApplication(context.packageName) }
+                .onFailure { Log.w(TAG, "Could not exclude VPN app from TUN") }
+            Log.w(TAG, "VPN-only mode has no selected apps; using all-app routing for this session")
         }
         Log.i(
             TAG,
-            "Applied ${current.mode.name.lowercase(Locale.US)} with ${current.selectedPackages.size} selected apps",
+            "Applied ${plan.mode.name.lowercase(Locale.US)} allowed=$allowedCount " +
+                "disallowed=$disallowedCount selected=${current.selectedPackages.size}",
         )
+    }
+
+    fun planFor(ownPackage: String, settings: AppRoutingSettings = AppRoutingSettings()): AppRoutingPlan {
+        val selected = settings.selectedPackages
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it != ownPackage }
+            .distinct()
+            .toList()
+        return when (settings.mode) {
+            AppRoutingMode.ALL_APPS -> AppRoutingPlan(
+                mode = settings.mode,
+                disallowed = listOf(ownPackage),
+            )
+            AppRoutingMode.BYPASS_SELECTED -> AppRoutingPlan(
+                mode = settings.mode,
+                disallowed = listOf(ownPackage) + selected,
+            )
+            AppRoutingMode.VPN_ONLY_SELECTED -> if (selected.isEmpty()) {
+                AppRoutingPlan(mode = settings.mode, disallowed = listOf(ownPackage))
+            } else {
+                AppRoutingPlan(mode = settings.mode, allowed = selected)
+            }
+        }
     }
 
     private fun read(context: Context): AppRoutingSettings {

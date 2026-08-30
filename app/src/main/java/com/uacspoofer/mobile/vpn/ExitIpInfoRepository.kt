@@ -1,8 +1,11 @@
 package com.uacspoofer.mobile.vpn
 
 import android.content.Context
+import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.mci.MciConfig
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
@@ -46,6 +49,8 @@ class ExitIpInfoRepository private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val settingsStore = AdvancedSettingsStore(appContext)
+    private val engineModeStore = EngineModeStore.get(appContext)
+    private val torEngineStore = TorEngineStore.get(appContext)
     private val refreshMutex = Mutex()
     private val mutableState = MutableStateFlow(ExitIpInfoState())
 
@@ -53,31 +58,48 @@ class ExitIpInfoRepository private constructor(context: Context) {
 
     suspend fun refresh(profileId: String, force: Boolean = false) {
         refreshMutex.withLock {
+            val engine = engineModeStore.snapshot()
+            val exitCountry = if (engine.isTor) torEngineStore.snapshot().exitCountryCode else ""
+            val lookupId = lookupId(profileId, engine.isTor, exitCountry)
             val now = System.currentTimeMillis()
             val memoryInfo = mutableState.value
-                .takeIf { it.profileId == profileId }
+                .takeIf { it.profileId == lookupId }
                 ?.info
-            val cachedInfo = memoryInfo ?: readCache(profileId)
+            val cachedInfo = memoryInfo ?: readCache(lookupId)
             if (!force && cachedInfo != null && now - cachedInfo.fetchedAtMs <= CACHE_TTL_MS) {
-                mutableState.value = ExitIpInfoState(profileId = profileId, info = cachedInfo)
+                mutableState.value = ExitIpInfoState(profileId = lookupId, info = cachedInfo)
                 return
             }
 
             mutableState.value = ExitIpInfoState(
-                profileId = profileId,
+                profileId = lookupId,
                 info = cachedInfo,
                 isLoading = true,
             )
-            val settings = settingsStore.snapshot().validated()
+            val socks = if (engine.isTor) {
+                val tor = torEngineStore.snapshot()
+                MciConfig.LOCAL_SOCKS_ADDRESS to tor.socksPort
+            } else {
+                val settings = settingsStore.snapshot().validated()
+                settings.socksAddress to settings.socksPort
+            }
+            val timeoutMs = if (engine.isTor) TOR_LOOKUP_TIMEOUT_MS else LOOKUP_TIMEOUT_MS
+            val via = if (engine.isTor) "Tor SOCKS" else "Xray SOCKS"
             try {
                 val result = withContext(Dispatchers.IO) {
-                    lookupThroughXray(settings.socksAddress, settings.socksPort)
+                    lookupThroughSocks(socks.first, socks.second, timeoutMs)
                 }
-                writeCache(profileId, result)
-                mutableState.value = ExitIpInfoState(profileId = profileId, info = result)
+                val wanted = exitCountry.trim().lowercase()
+                val got = result.countryCode.trim().lowercase()
+                val mismatch = engine.isTor && wanted.isNotEmpty() && got.isNotEmpty() && got != wanted
+                if (!mismatch) {
+                    writeCache(lookupId, result)
+                }
+                mutableState.value = ExitIpInfoState(profileId = lookupId, info = result)
                 AppLogRepository.info(
                     LogSource.APP,
-                    "Exit IP info refreshed via Xray SOCKS: ip=${result.ipAddress} country=${result.countryCode} provider=${result.provider}",
+                    "Exit IP info refreshed via $via: ip=${result.ipAddress} country=${result.countryCode} " +
+                        "provider=${result.provider}" + if (mismatch) " (waiting for ExitNodes {$wanted})" else "",
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -85,35 +107,35 @@ class ExitIpInfoRepository private constructor(context: Context) {
                 val detail = error.message.orEmpty().replace(Regex("\\s+"), " ").trim().take(120)
                 val message = if (detail.isBlank()) error.javaClass.simpleName else detail
                 mutableState.value = ExitIpInfoState(
-                    profileId = profileId,
+                    profileId = lookupId,
                     info = cachedInfo,
                     errorMessage = message,
                 )
-                AppLogRepository.warning(LogSource.APP, "Exit IP lookup through Xray SOCKS failed", error)
+                AppLogRepository.warning(LogSource.APP, "Exit IP lookup through $via failed", error)
             }
         }
     }
 
-    private fun lookupThroughXray(socksAddress: String, socksPort: Int): ExitIpInfo {
+    private fun lookupThroughSocks(socksAddress: String, socksPort: Int, timeoutMs: Int): ExitIpInfo {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(socksAddress, socksPort))
         val primary = runCatchingNonCancellation {
-            parseIpWhoIs(fetchJson("https://ipwho.is/", proxy))
+            parseIpWhoIs(fetchJson("https://ipwho.is/", proxy, timeoutMs))
         }
         if (primary.isSuccess) return primary.getOrThrow()
         return runCatchingNonCancellation {
-            parseIpApi(fetchJson("https://ipapi.co/json/", proxy))
+            parseIpApi(fetchJson("https://ipapi.co/json/", proxy, timeoutMs))
         }.getOrElse { fallbackError ->
             primary.exceptionOrNull()?.let { fallbackError.addSuppressed(it) }
             throw fallbackError
         }
     }
 
-    private fun fetchJson(url: String, proxy: Proxy): String {
+    private fun fetchJson(url: String, proxy: Proxy, timeoutMs: Int): String {
         val connection = URL(url).openConnection(proxy) as HttpsURLConnection
         return try {
             connection.requestMethod = "GET"
-            connection.connectTimeout = LOOKUP_TIMEOUT_MS
-            connection.readTimeout = LOOKUP_TIMEOUT_MS
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = timeoutMs
             connection.useCaches = false
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Cache-Control", "no-cache")
@@ -218,8 +240,18 @@ class ExitIpInfoRepository private constructor(context: Context) {
         private const val PREFS = "exit_ip_info_cache_v1"
         private const val CACHE_PREFIX = "profile:"
         private const val LOOKUP_TIMEOUT_MS = 5_000
+        private const val TOR_LOOKUP_TIMEOUT_MS = 15_000
         private const val MAX_RESPONSE_BYTES = 128 * 1_024
         private const val CACHE_TTL_MS = 10L * 60L * 1_000L
+        const val TOR_LOOKUP_ID = "engine:tor_webtunnel"
+
+        fun lookupId(profileId: String, torEngine: Boolean, exitCountryCode: String = ""): String =
+            if (torEngine) {
+                val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
+                "$TOR_LOOKUP_ID:$country"
+            } else {
+                profileId
+            }
 
         @Volatile private var instance: ExitIpInfoRepository? = null
 

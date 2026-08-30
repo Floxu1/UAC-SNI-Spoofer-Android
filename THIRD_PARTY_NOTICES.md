@@ -31,3 +31,10 @@ x86_64      494154A10429A43494D14AC1A78F44870206121D6E8AFBEE6ED94CF3CF68999A
 - License: SIL Open Font License 1.1
 - Bundled license: `third_party/vazirmatn-OFL.txt`
 - Upstream: https://github.com/rastikerdar/vazirmatn
+
+## hev-socks5-tunnel
+
+- Purpose: lightweight TUN-to-SOCKS pipe for Tor engine device tunnel
+- License: MIT
+- Bundled license: `third_party/hev-socks5-tunnel-LICENSE.txt`
+- Upstream: https://github.com/heiher/hev-socks5-tunnel

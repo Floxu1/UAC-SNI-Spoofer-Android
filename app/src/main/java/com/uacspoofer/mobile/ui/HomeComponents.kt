@@ -32,7 +32,6 @@ import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,6 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -59,14 +61,26 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
+import com.uacspoofer.mobile.core.VpnController
+import com.uacspoofer.mobile.engine.EngineMode
+import com.uacspoofer.mobile.engine.EngineModeChangeResult
+import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.canChangeEngineMode
+import com.uacspoofer.mobile.engine.tor.TorStatusStore
+import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.ui.theme.UacColors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 @Composable
 internal fun HomeHeader(
@@ -74,37 +88,133 @@ internal fun HomeHeader(
     compact: Boolean,
     onMenuClick: () -> Unit,
     modifier: Modifier = Modifier,
+    engineToggleEnabled: Boolean = false,
+    onEngineLaidOut: ((LayoutCoordinates) -> Unit)? = null,
 ) {
+    val context = LocalContext.current.applicationContext
+    val engineStore = remember(context) { EngineModeStore.get(context) }
+    val engineMode by engineStore.mode.collectAsStateWithLifecycle()
+    var pendingEngine by remember { mutableStateOf<EngineMode?>(null) }
+    var spinNonce by remember { mutableStateOf(0) }
+    val iconSize = if (compact) 22.dp else 24.dp
+    val buttonSize = if (compact) 38.dp else 42.dp
+    val switchSize = if (compact) 42.dp else 46.dp
+    val drawerOpen = LocalDrawerOpen.current
+    val guideSession = LocalHomeGuideSession.current
+
+    LaunchedEffect(pendingEngine) {
+        val target = pendingEngine ?: return@LaunchedEffect
+        if (target == engineStore.snapshot()) {
+            pendingEngine = null
+            return@LaunchedEffect
+        }
+        val state = ConnectionStateStore.state.value
+        val reconnect = state == ConnectionState.CONNECTED || state == ConnectionState.CONNECTING
+        if (reconnect) {
+            ConnectionStateStore.tryBeginDisconnect()
+            runCatching { VpnController.stop(context) }
+            val settled = withTimeoutOrNull(15_000L) {
+                ConnectionStateStore.state.first { canChangeEngineMode(it) }
+            }
+            if (settled == null) {
+                pendingEngine = null
+                return@LaunchedEffect
+            }
+        }
+        if (engineStore.setMode(target) == EngineModeChangeResult.APPLIED && reconnect) {
+            delay(250)
+            VpnController.start(context)
+        }
+        pendingEngine = null
+    }
+
     Row(
-        modifier = modifier.height(if (compact) 40.dp else 46.dp),
+        modifier = modifier.height(if (compact) 44.dp else 48.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(
+        RemoteIconButton(
             onClick = onMenuClick,
-            modifier = Modifier.size(if (compact) 38.dp else 42.dp),
+            modifier = Modifier
+                .size(buttonSize)
+                .focusProperties { canFocus = !drawerOpen }
+                .trackHomeSlot(HomeRemoteSlot.Menu)
+                .openDrawerOnDpadLeft(onMenuClick),
         ) {
             Icon(
                 imageVector = Icons.Rounded.Menu,
                 contentDescription = "Open navigation menu",
                 tint = UacColors.TextPrimary,
-                modifier = Modifier.size(if (compact) 22.dp else 24.dp),
+                modifier = Modifier.size(iconSize),
             )
         }
-        Icon(
-            imageVector = Icons.Outlined.VerifiedUser,
+        if (engineToggleEnabled) {
+            Box(
+                modifier = Modifier
+                    .size(switchSize)
+                    .then(
+                        if (onEngineLaidOut != null) {
+                            Modifier.onGloballyPositioned(onEngineLaidOut)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .then(
+                        if (guideSession?.step == HomeGuideStep.Engine) {
+                            Modifier.guideTargetDpad(guideSession.gotIt)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .trackHomeSlot(HomeRemoteSlot.Engine)
+                    .clickable(
+                        enabled = pendingEngine == null,
+                        role = Role.Button,
+                        onClick = {
+                            if (pendingEngine != null) return@clickable
+                            spinNonce += 1
+                            val target = engineMode.toggled()
+                            if (canChangeEngineMode(ConnectionStateStore.state.value)) {
+                                engineStore.setMode(target)
+                            } else {
+                                pendingEngine = target
+                            }
+                        },
+                    )
+                    .semantics {
+                        contentDescription = if (engineMode.isTor) {
+                            "Switch to UAC SNI Spoofer"
+                        } else {
+                            "Switch to UAC TOR BRIDGE"
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                EngineSwitchGlyph(
+                    accent = accent,
+                    spinning = pendingEngine != null,
+                    spinNonce = spinNonce,
+                    compact = compact,
+                    modifier = Modifier.size(switchSize),
+                )
+            }
+        } else {
+            Icon(
+                imageVector = Icons.Outlined.VerifiedUser,
                 contentDescription = "Connection status",
-            tint = accent,
-            modifier = Modifier.size(if (compact) 22.dp else 24.dp),
-        )
+                tint = accent,
+                modifier = Modifier.size(iconSize),
+            )
+        }
     }
 }
 
 @Composable
 internal fun AppTitle(compact: Boolean, accent: Color) {
+    val engineMode = rememberDisplayedEngineMode()
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
-            text = "UAC SNI SPOOFER",
+            text = if (engineMode.isTor) "UAC TOR BRIDGE" else "UAC SNI SPOOFER",
             fontSize = if (compact) 20.sp else 23.sp,
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = 0.55.sp,
@@ -145,6 +255,7 @@ internal fun ConnectButton(
     accent: Color,
     diameter: Dp,
     onClick: () -> Unit,
+    halo: Dp = 54.dp,
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
@@ -188,13 +299,17 @@ internal fun ConnectButton(
     }
 
     Box(
-        modifier = Modifier.size(diameter + 54.dp),
+        modifier = Modifier
+            .size(diameter + halo)
+            .trackHomeSlot(HomeRemoteSlot.Connect)
+            .clickable(enabled = !interactionDisabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.matchParentSize()) {
             val center = Offset(size.width / 2f, size.height / 2f)
             val surfaceRadius = diameter.toPx() / 2f
             val atmosphericRadius = size.minDimension / 2f
+            val haloPx = halo.toPx()
 
             drawCircle(
                 brush = Brush.radialGradient(
@@ -214,30 +329,30 @@ internal fun ConnectButton(
             )
             drawCircle(
                 color = accent.copy(alpha = 0.075f * glowIntensity),
-                radius = surfaceRadius + 27.dp.toPx(),
+                radius = surfaceRadius + haloPx * 0.50f,
                 center = center,
                 style = Stroke(width = 1.dp.toPx()),
             )
             drawCircle(
                 color = accent.copy(alpha = 0.13f * glowIntensity),
-                radius = surfaceRadius + 18.dp.toPx(),
+                radius = surfaceRadius + haloPx * 0.33f,
                 center = center,
                 style = Stroke(width = 1.4.dp.toPx()),
             )
             drawCircle(
                 color = accent.copy(alpha = 0.29f * glowIntensity),
-                radius = surfaceRadius + 8.dp.toPx(),
+                radius = surfaceRadius + haloPx * 0.15f,
                 center = center,
-                style = Stroke(width = 7.dp.toPx()),
+                style = Stroke(width = (7.dp.toPx() * (haloPx / 54.dp.toPx()).coerceIn(0.55f, 1f))),
             )
             drawCircle(
                 color = Color.White.copy(alpha = 0.10f * glowIntensity),
-                radius = surfaceRadius + 4.dp.toPx(),
+                radius = surfaceRadius + haloPx * 0.07f,
                 center = center,
                 style = Stroke(width = 1.2.dp.toPx()),
             )
             if (state == ConnectionState.CONNECTING) {
-                val progressRadius = surfaceRadius + 8.dp.toPx()
+                val progressRadius = surfaceRadius + haloPx * 0.15f
                 val progressTopLeft = Offset(center.x - progressRadius, center.y - progressRadius)
                 val progressSize = Size(progressRadius * 2f, progressRadius * 2f)
                 drawArc(
@@ -297,8 +412,7 @@ internal fun ConnectButton(
                     ),
                     shape = CircleShape,
                 )
-                .semantics { contentDescription = buttonLabel }
-                .clickable(enabled = !interactionDisabled, role = Role.Button, onClick = onClick),
+                .semantics { contentDescription = buttonLabel },
             contentAlignment = Alignment.Center,
         ) {
             Canvas(modifier = Modifier.matchParentSize()) {
@@ -352,11 +466,12 @@ internal fun ConnectButton(
                     tint = accent,
                     modifier = Modifier.size(diameter * 0.21f),
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(if (diameter < 150.dp) 4.dp else 8.dp))
                 Text(
                     text = buttonLabel,
                     color = accent,
                     fontSize = when {
+                        emphasizePersianLabel && diameter < 150.dp -> 14.sp
                         emphasizePersianLabel -> 18.sp
                         buttonLabel.length > 11 -> 10.5.sp
                         else -> 13.sp
@@ -365,6 +480,8 @@ internal fun ConnectButton(
                     fontFamily = localizedFont,
                     letterSpacing = if (isPersian) 0.sp else 0.55.sp,
                     textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     style = TextStyle(
                         textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
                         shadow = if (emphasizePersianLabel) {
@@ -383,6 +500,11 @@ internal fun ConnectButton(
 internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
+    val context = LocalContext.current
+    val engineMode = rememberDisplayedEngineMode()
+    val advancedStore = remember(context) { AdvancedSettingsStore(context) }
+    val advanced by advancedStore.state.collectAsStateWithLifecycle()
+    val torStatus by TorStatusStore.status.collectAsStateWithLifecycle()
     val routeProgress by ConnectionStateStore.routeProgress.collectAsStateWithLifecycle()
     var showRouteProgress by remember(state) { mutableStateOf(false) }
     LaunchedEffect(state) {
@@ -401,20 +523,53 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
         ConnectionState.DISCONNECTING -> homeText("Disconnecting...", "در حال قطع...")
         ConnectionState.ERROR -> homeText("Connection failed", "اتصال برقرار نشد")
     }
-    val connectingHint = if (showRouteProgress && routeProgress.isActive) {
+    val connectingHint = if (engineMode.isTor) {
         homeText(
-            "Connecting with route ${routeProgress.current}/${routeProgress.total}",
-            "اتصال با مسیر ${routeProgress.current}/${routeProgress.total}",
+            TorStatusCopy.connectingHint(
+                persian = false,
+                percent = torStatus.bootstrapPercent,
+                phase = torStatus.phase,
+                detail = torStatus.detail,
+                showRouteProgress = showRouteProgress,
+            ),
+            TorStatusCopy.connectingHint(
+                persian = true,
+                percent = torStatus.bootstrapPercent,
+                phase = torStatus.phase,
+                detail = torStatus.detail,
+                showRouteProgress = showRouteProgress,
+            ),
         )
     } else {
-        homeText("Establishing a secure tunnel", "در حال ساخت اتصال امن")
+        when {
+            showRouteProgress && routeProgress.isActive -> homeText(
+                "Connecting with route ${routeProgress.current}/${routeProgress.total}",
+                "اتصال با مسیر ${routeProgress.current}/${routeProgress.total}",
+            )
+            else -> homeText("Establishing a secure tunnel", "در حال ساخت اتصال امن")
+        }
     }
     val hint = when (state) {
         ConnectionState.DISCONNECTED -> homeText("Tap the button to connect", "برای وصل شدن، دکمه رو بزن")
         ConnectionState.CONNECTING -> connectingHint
-        ConnectionState.CONNECTED -> homeText("Your connection is secure", "اتصال شما امنه")
+        ConnectionState.CONNECTED -> if (engineMode.isTor) {
+            if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
+                homeText("Local Tor SOCKS only · no device VPN", "فقط SOCKS محلی Tor · بدون VPN دستگاه")
+            } else {
+                homeText("Device VPN is routing through Tor", "VPN دستگاه از Tor می‌گذره")
+            }
+        } else {
+            homeText("Your connection is secure", "اتصال شما امنه")
+        }
         ConnectionState.DISCONNECTING -> homeText("Closing the secure tunnel", "در حال بستن اتصال امن")
-        ConnectionState.ERROR -> homeText("Tap retry to try again", "دوباره امتحان کن")
+        ConnectionState.ERROR -> if (engineMode.isTor && torStatus.detail.isNotBlank()) {
+            homeText(
+                torStatus.detail,
+                TorStatusCopy.errorHint(true, torStatus.detail) ?: torStatus.detail,
+            )
+        } else {
+            homeText("Tap retry to try again", "دوباره امتحان کن")
+        }
     }
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -443,6 +598,9 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             style = TextStyle(
                 textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
             ),
+            modifier = Modifier.padding(horizontal = 28.dp),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

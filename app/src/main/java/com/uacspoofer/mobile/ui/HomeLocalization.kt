@@ -28,7 +28,9 @@ internal fun homeText(english: String, persian: String): String =
 internal fun homeLocalizedFont(): FontFamily? =
     if (LocalHomePersian.current) VazirmatnUiFd else null
 
-private fun isolateUnwrappedLtrRuns(text: String): String {
+internal fun homeLtr(value: String): String = "\u2066$value\u2069"
+
+internal fun isolateUnwrappedLtrRuns(text: String): String {
     val output = StringBuilder(text.length + 12)
     var explicitIsolationDepth = 0
     var index = 0

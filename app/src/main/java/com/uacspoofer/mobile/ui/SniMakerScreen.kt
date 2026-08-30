@@ -61,7 +61,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.ModalBottomSheet
@@ -263,7 +262,8 @@ private fun MakerTopBar(
                 .clip(CircleShape)
                 .background(Color(0x99101C29), CircleShape)
                 .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape)
-                .clickable(onClick = onMenuClick),
+                .clickable(onClick = onMenuClick)
+                .openDrawerOnDpadLeft(onMenuClick),
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Outlined.Menu, homeText("Open navigation", "بازکردن منو"), tint = Color.White, modifier = Modifier.size(22.dp))
@@ -413,7 +413,7 @@ private fun MakerProgressStrip(
                     fontWeight = FontWeight.Bold,
                 )
             }
-            IconButton(
+            RemoteIconButton(
                 onClick = onSaveClick,
                 enabled = healthyCount > 0 && !testing && !loading && !saving,
                 modifier = Modifier.size(38.dp),
@@ -1111,7 +1111,7 @@ private fun ImportSourceSheet(
                     colors = toolTextFieldColors(Color(0xFF35D6FF)),
                     textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, textDirection = TextDirection.Ltr),
                 )
-                IconButton(
+                RemoteIconButton(
                     onClick = controller::resetSubscriptionUrl,
                     modifier = Modifier
                         .size(48.dp)
@@ -1342,7 +1342,7 @@ private fun SettingStepper(
                 Text(title, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
                 Text(subtitle, color = UacColors.TextSecondary, fontSize = 11.sp, maxLines = 2, lineHeight = 15.sp)
             }
-            IconButton(onClick = onDecrease, enabled = canDecrease, modifier = Modifier.size(38.dp)) {
+            RemoteIconButton(onClick = onDecrease, enabled = canDecrease, modifier = Modifier.size(38.dp)) {
                 Icon(Icons.Outlined.Remove, homeText("Decrease", "کم‌کردن"), tint = if (canDecrease) Color(0xFF35D6FF) else UacColors.TextSecondary.copy(alpha = 0.35f))
             }
             Text(
@@ -1353,7 +1353,7 @@ private fun SettingStepper(
                 modifier = Modifier.width(48.dp),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
-            IconButton(onClick = onIncrease, enabled = canIncrease, modifier = Modifier.size(38.dp)) {
+            RemoteIconButton(onClick = onIncrease, enabled = canIncrease, modifier = Modifier.size(38.dp)) {
                 Icon(Icons.Outlined.Add, homeText("Increase", "بیشترکردن"), tint = if (canIncrease) Color(0xFF35D6FF) else UacColors.TextSecondary.copy(alpha = 0.35f))
             }
         }

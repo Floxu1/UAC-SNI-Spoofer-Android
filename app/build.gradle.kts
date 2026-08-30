@@ -27,7 +27,7 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 242
+        versionCode = 285
         versionName = "2.0.3"
 
         buildConfigField("boolean", "TV_MODE", "false")
@@ -96,7 +96,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += setOf("**/libxray.so")
+            keepDebugSymbols += setOf("**/libxray.so", "**/libtor.so", "**/libwebtunnel.so", "**/libhev-socks5-tunnel.so")
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -136,6 +136,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("com.google.zxing:core:3.5.3")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 

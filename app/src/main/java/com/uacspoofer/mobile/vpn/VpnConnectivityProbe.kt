@@ -49,15 +49,21 @@ class VpnConnectivityProbe(
 
 
 
-    suspend fun verifyRuntime(): ProbeResult = verifyTargets(
+    suspend fun verifyRuntime(
+        socksAddress: String = MciConfig.LOCAL_SOCKS_ADDRESS,
+        socksPort: Int = MciConfig.LOCAL_SOCKS_PORT,
+        totalTimeoutMs: Long = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
+        socketTimeoutMs: Int = 4_000,
+    ): ProbeResult = verifyTargets(
         requireAllTargets = false,
         attemptAllTargets = false,
-        socksAddress = MciConfig.LOCAL_SOCKS_ADDRESS,
-        socksPort = MciConfig.LOCAL_SOCKS_PORT,
+        socksAddress = socksAddress,
+        socksPort = socksPort,
         requireTrafficGrowth = false,
-        totalTimeoutMs = MciConfig.PROBE_TOTAL_TIMEOUT_MS,
+        totalTimeoutMs = totalTimeoutMs,
         readBytesPerTarget = MciConfig.PROBE_READ_BYTES_PER_TARGET,
         network = null,
+        socketTimeoutMs = socketTimeoutMs,
     )
 
     suspend fun verifyCandidate(
@@ -128,6 +134,7 @@ class VpnConnectivityProbe(
         totalTimeoutMs: Long,
         readBytesPerTarget: Int,
         network: Network?,
+        socketTimeoutMs: Int = 4_000,
     ): ProbeResult =
         withTimeoutOrNull(totalTimeoutMs) {
             val startedNs = System.nanoTime()
@@ -148,6 +155,7 @@ class VpnConnectivityProbe(
                                 socksPort,
                                 readBytesPerTarget,
                                 network,
+                                socketTimeoutMs,
                             )
                         }
                     }.awaitAll()
@@ -163,6 +171,7 @@ class VpnConnectivityProbe(
                         socksPort,
                         readBytesPerTarget,
                         network,
+                        socketTimeoutMs,
                     )
                     sequential += outcome
                     if (outcome.bytes >= MciConfig.PROBE_MIN_BYTES_PER_TARGET) break
@@ -233,6 +242,7 @@ class VpnConnectivityProbe(
         socksPort: Int,
         readBytes: Int,
         network: Network?,
+        socketTimeoutMs: Int,
     ): TargetOutcome {
         val startedNs = System.nanoTime()
         return try {
@@ -243,6 +253,7 @@ class VpnConnectivityProbe(
                     socksPort = socksPort,
                     readBytes = readBytes,
                     network = network,
+                    socketTimeoutMs = socketTimeoutMs,
                 )
             }
             TargetOutcome(
@@ -269,6 +280,7 @@ class VpnConnectivityProbe(
         socksPort: Int,
         readBytes: Int,
         network: Network?,
+        socketTimeoutMs: Int = 4_000,
     ): Int {
         val target = URL(url)
         val connection = if (socksAddress == null) {
@@ -281,8 +293,8 @@ class VpnConnectivityProbe(
             target.openConnection(socks) as HttpsURLConnection
         }
         try {
-            connection.connectTimeout = 4_000
-            connection.readTimeout = 4_000
+            connection.connectTimeout = socketTimeoutMs
+            connection.readTimeout = socketTimeoutMs
             connection.instanceFollowRedirects = true
             connection.useCaches = false
             connection.defaultUseCaches = false

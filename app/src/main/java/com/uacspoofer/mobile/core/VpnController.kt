@@ -25,4 +25,11 @@ object VpnController {
         val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_SWITCH_PROFILE)
         context.startService(intent)
     }
+
+    fun applyTorExit(context: Context) {
+        val state = ConnectionStateStore.state.value
+        if (state != ConnectionState.CONNECTED && state != ConnectionState.CONNECTING) return
+        val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_APPLY_TOR_EXIT)
+        context.startService(intent)
+    }
 }

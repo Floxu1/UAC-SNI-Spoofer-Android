@@ -15,7 +15,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,7 +47,6 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,10 +56,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
@@ -71,8 +75,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.uacspoofer.mobile.engine.tor.TorExitCountry
 import com.uacspoofer.mobile.logging.AppLogEntry
 import com.uacspoofer.mobile.logging.LogLevel
+import com.uacspoofer.mobile.profiles.CountryMetadata
 import com.uacspoofer.mobile.profiles.ProfileLibrary
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.ProxyProtocol
@@ -81,6 +87,7 @@ import com.uacspoofer.mobile.vpn.ConnectionMetrics
 import com.uacspoofer.mobile.vpn.ExitIpInfoState
 import java.text.DateFormat
 import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.delay
 
 private val DialogSurface = Color(0xFF0A1623)
@@ -141,6 +148,7 @@ internal fun HomeLogsDialog(
 internal fun HomeCountryDialog(
     visible: Boolean,
     state: ExitIpInfoState,
+    throughTor: Boolean,
     onRefresh: () -> Unit,
     onDismissRequest: () -> Unit,
 ) {
@@ -150,7 +158,11 @@ internal fun HomeCountryDialog(
     AnimatedHomeMetricDialog(
         visible = visible,
         title = homeText("My IP Information", "اطلاعات IP من"),
-        subtitle = homeText("Public exit details through Xray", "مشخصات IP خروجی از طریق Xray"),
+        subtitle = if (throughTor) {
+            homeText("Public exit details through Tor", "مشخصات IP خروجی از طریق Tor")
+        } else {
+            homeText("Public exit details through Xray", "مشخصات IP خروجی از طریق Xray")
+        },
         icon = Icons.Outlined.Public,
         onDismissRequest = onDismissRequest,
     ) {
@@ -231,7 +243,7 @@ internal fun HomeCountryDialog(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "${info.provider} • ${formatTime(info.fetchedAtMs)} • Xray SOCKS",
+                    text = "${info.provider} • ${formatTime(info.fetchedAtMs)} • ${if (throughTor) "Tor SOCKS" else "Xray SOCKS"}",
                     color = UacColors.TextSecondary.copy(alpha = 0.78f),
                     fontSize = 9.5.sp,
                     modifier = Modifier.weight(1f),
@@ -275,6 +287,7 @@ internal fun HomeCountryDialog(
 internal fun HomePingDialog(
     visible: Boolean,
     metrics: ConnectionMetrics,
+    throughTor: Boolean,
     onRefresh: () -> Unit,
     onDismissRequest: () -> Unit,
 ) {
@@ -284,7 +297,11 @@ internal fun HomePingDialog(
     AnimatedHomeMetricDialog(
         visible = visible,
         title = homeText("Ping details", "جزئیات پینگ"),
-        subtitle = homeText("Live HTTPS route measurement", "سنجش زنده مسیر HTTPS"),
+        subtitle = if (throughTor) {
+            homeText("Live HTTPS measurement through Tor", "سنجش زنده مسیر HTTPS از Tor")
+        } else {
+            homeText("Live HTTPS route measurement", "سنجش زنده مسیر HTTPS")
+        },
         icon = Icons.Outlined.Speed,
         onDismissRequest = onDismissRequest,
     ) {
@@ -304,7 +321,7 @@ internal fun HomePingDialog(
                 )
                 .padding(16.dp),
         ) {
-            IconButton(
+            RemoteIconButton(
                 onClick = onRefresh,
                 enabled = !metrics.isMeasuringLatency,
                 modifier = Modifier
@@ -437,10 +454,17 @@ internal fun HomePingDialog(
 
             MetricDetailRow(
                 homeText("Method", "روش تست"),
-                homeText(
-                    "HTTPS payload through Xray tunnel",
-                    "ارسال HTTPS از تونل Xray",
-                ),
+                if (throughTor) {
+                    homeText(
+                        "HTTPS payload through Tor SOCKS",
+                        "ارسال HTTPS از SOCKS مربوط به Tor",
+                    )
+                } else {
+                    homeText(
+                        "HTTPS payload through Xray tunnel",
+                        "ارسال HTTPS از تونل Xray",
+                    )
+                },
             )
         }
     }
@@ -458,6 +482,7 @@ internal fun HomeConfigsDialog(
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
+    val firstRowFocus = remember { FocusRequester() }
     AnimatedHomeMetricDialog(
         visible = visible,
         title = homeText("Configurations", "کانفیگ‌ها"),
@@ -470,6 +495,7 @@ internal fun HomeConfigsDialog(
         onDismissRequest = onDismissRequest,
         expanded = true,
         panelModifier = Modifier.fillMaxWidth().fillMaxHeight(0.72f),
+        initialFocus = firstRowFocus,
     ) {
         LazyColumn(
             modifier = Modifier
@@ -480,20 +506,23 @@ internal fun HomeConfigsDialog(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            items(library.allProfiles, key = ProxyProfile::id) { profile ->
+            itemsIndexed(library.allProfiles, key = { _, profile -> profile.id }) { index, profile ->
                 HomeConfigDialogRow(
                     profile = profile,
                     selected = profile.id == library.selectedId,
                     active = profile.id == activeProfileId,
                     latencyMs = latencies[profile.id],
                     onClick = { onSelect(profile) },
+                    modifier = if (index == 0) Modifier.focusRequester(firstRowFocus) else Modifier,
                 )
             }
         }
         Spacer(Modifier.height(7.dp))
         TextButton(
             onClick = onManage,
-            modifier = Modifier.align(Alignment.End),
+            modifier = Modifier
+                .align(Alignment.End)
+                .keyboardFocusRing(),
         ) {
             Icon(Icons.Outlined.Tune, null, tint = DialogBlue, modifier = Modifier.size(17.dp))
             Spacer(Modifier.size(6.dp))
@@ -508,34 +537,251 @@ internal fun HomeConfigsDialog(
 }
 
 @Composable
-private fun HomeConfigDialogRow(
-    profile: ProxyProfile,
-    selected: Boolean,
-    active: Boolean,
-    latencyMs: Long?,
-    onClick: () -> Unit,
+internal fun HomeTorCountryDialog(
+    visible: Boolean,
+    selectedCode: String,
+    connected: Boolean,
+    onSelect: (String) -> Unit,
+    onManage: () -> Unit,
+    onDismissRequest: () -> Unit,
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
-    val accent = if (active) UacColors.ConnectedGreen else DialogBlue
+    val nameLocale = if (isPersian) Locale("fa") else Locale.ENGLISH
+    val current = TorExitCountry.normalize(selectedCode)
+    val codes = remember(current) {
+        val recommended = TorExitCountry.RECOMMENDED
+        val extra = current.takeIf { it.isNotEmpty() && it !in recommended }
+        listOf(TorExitCountry.AUTOMATIC) + recommended + listOfNotNull(extra)
+    }
+    val firstRowFocus = remember { FocusRequester() }
+    AnimatedHomeMetricDialog(
+        visible = visible,
+        title = homeText("Select country", "انتخاب کشور"),
+        subtitle = if (isPersian) {
+            "${codes.size} کشور • برای انتخاب ضربه بزن"
+        } else {
+            "${codes.size} available • tap to select"
+        },
+        icon = Icons.Outlined.Public,
+        onDismissRequest = onDismissRequest,
+        expanded = true,
+        panelModifier = Modifier.fillMaxWidth().fillMaxHeight(0.72f),
+        initialFocus = firstRowFocus,
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(DialogInnerSurface, RoundedCornerShape(16.dp))
+                .border(1.dp, DialogBorder.copy(alpha = 0.55f), RoundedCornerShape(16.dp)),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            itemsIndexed(codes, key = { _, code -> code.ifEmpty { "auto" } }) { index, code ->
+                val selected = code == current
+                HomeTorCountryDialogRow(
+                    code = code,
+                    nameLocale = nameLocale,
+                    selected = selected,
+                    connected = connected && selected,
+                    onClick = { onSelect(code) },
+                    modifier = if (index == 0) Modifier.focusRequester(firstRowFocus) else Modifier,
+                )
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        TextButton(
+            onClick = onManage,
+            modifier = Modifier
+                .align(Alignment.End)
+                .keyboardFocusRing(),
+        ) {
+            Icon(Icons.Outlined.Tune, null, tint = DialogBlue, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.size(6.dp))
+            Text(
+                homeText("Manage countries", "مدیریت کشورها"),
+                color = DialogBlue,
+                fontSize = 11.sp,
+                fontFamily = localizedFont,
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeTorCountryDialogRow(
+    code: String,
+    nameLocale: Locale,
+    selected: Boolean,
+    connected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isPersian = LocalHomePersian.current
+    val localizedFont = homeLocalizedFont()
+    val automatic = code.isEmpty()
+    val title = if (automatic) {
+        homeText("Automatic", "خودکار")
+    } else {
+        TorExitCountry.displayName(code, nameLocale)
+    }
+    val subtitle = if (automatic) {
+        homeText("Tor picks the best exit", "خروجی را Tor انتخاب می‌کند")
+    } else {
+        val iso = code.uppercase(Locale.US)
+        homeText("TOR EXIT • $iso", "خروجی Tor • $iso")
+    }
+    val accent = if (connected) UacColors.ConnectedGreen else DialogBlue
+    val highlighted = selected || connected
     val shape = RoundedCornerShape(14.dp)
+    val country = if (automatic) null else CountryMetadata.resolve(code, null)
+    val (interaction, remoteFocused) = rememberRemoteRowFocus()
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(
-                if (selected || active) accent.copy(alpha = 0.085f) else Color(0xA90A1623),
+                when {
+                    remoteFocused -> UacColors.DisconnectedBlue.copy(alpha = 0.18f)
+                    highlighted -> accent.copy(alpha = 0.085f)
+                    else -> Color(0xA90A1623)
+                },
                 shape,
             )
             .border(
-                1.dp,
-                if (selected || active) accent.copy(alpha = 0.36f) else DialogBorder.copy(alpha = 0.38f),
+                width = if (remoteFocused) 2.dp else 1.dp,
+                color = when {
+                    remoteFocused -> UacColors.DisconnectedBlue
+                    highlighted -> accent.copy(alpha = 0.36f)
+                    else -> DialogBorder.copy(alpha = 0.38f)
+                },
                 shape,
             )
             .semantics {
                 this.selected = selected
                 role = Role.RadioButton
             }
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+                onClick = onClick,
+            )
+            .padding(horizontal = 11.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HomeTorCountryBadge(country, highlighted)
+        Spacer(Modifier.size(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = UacColors.TextPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = localizedFont,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                subtitle,
+                color = UacColors.TextSecondary,
+                fontSize = 9.5.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (selected) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    when {
+                        connected -> if (isPersian) "وصل است" else "Connected"
+                        else -> if (isPersian) "برای اتصال بعدی انتخاب شده" else "Selected for next connection"
+                    },
+                    color = accent,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = localizedFont,
+                )
+            }
+        }
+        if (selected) {
+            Spacer(Modifier.size(8.dp))
+            Box(
+                modifier = Modifier.size(27.dp).background(accent.copy(alpha = 0.13f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Check,
+                    homeText("Selected", "انتخاب‌شده"),
+                    tint = accent,
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeTorCountryBadge(country: CountryMetadata?, emphasized: Boolean) {
+    val color = if (country?.isKnown == true) Color(0xFF8D7CFF) else DialogBlue
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .background(color.copy(alpha = if (emphasized) 0.18f else 0.10f), RoundedCornerShape(12.dp))
+            .border(1.dp, color.copy(alpha = 0.25f), RoundedCornerShape(12.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (country?.isKnown == true) {
+            CountryFlagIcon(country, size = 27.dp)
+        } else {
+            Icon(Icons.Outlined.Public, contentDescription = null, tint = color, modifier = Modifier.size(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun HomeConfigDialogRow(
+    profile: ProxyProfile,
+    selected: Boolean,
+    active: Boolean,
+    latencyMs: Long?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isPersian = LocalHomePersian.current
+    val localizedFont = homeLocalizedFont()
+    val accent = if (active) UacColors.ConnectedGreen else DialogBlue
+    val shape = RoundedCornerShape(14.dp)
+    val highlighted = selected || active
+    val (interaction, remoteFocused) = rememberRemoteRowFocus()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                when {
+                    remoteFocused -> UacColors.DisconnectedBlue.copy(alpha = 0.18f)
+                    highlighted -> accent.copy(alpha = 0.085f)
+                    else -> Color(0xA90A1623)
+                },
+                shape,
+            )
+            .border(
+                width = if (remoteFocused) 2.dp else 1.dp,
+                color = when {
+                    remoteFocused -> UacColors.DisconnectedBlue
+                    highlighted -> accent.copy(alpha = 0.36f)
+                    else -> DialogBorder.copy(alpha = 0.38f)
+                },
+                shape,
+            )
+            .semantics {
+                this.selected = selected
+                role = Role.RadioButton
+            }
+            .clickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+                onClick = onClick,
+            )
             .padding(horizontal = 11.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -644,6 +890,7 @@ private fun AnimatedHomeMetricDialog(
     onDismissRequest: () -> Unit,
     expanded: Boolean = false,
     panelModifier: Modifier = Modifier.fillMaxWidth(),
+    initialFocus: FocusRequester? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val localizedFont = homeLocalizedFont()
@@ -662,9 +909,6 @@ private fun AnimatedHomeMetricDialog(
     }
     if (!mounted) return
 
-    val scrimInteraction = remember { MutableInteractionSource() }
-    val panelInteraction = remember { MutableInteractionSource() }
-
     Dialog(
         onDismissRequest = onDismissRequest,
         properties = DialogProperties(
@@ -678,15 +922,18 @@ private fun AnimatedHomeMetricDialog(
             animationSpec = tween(if (panelVisible) 180 else DIALOG_EXIT_MS),
             label = "home-metric-scrim",
         )
+        LaunchedEffect(panelVisible, initialFocus) {
+            if (!panelVisible || initialFocus == null) return@LaunchedEffect
+            delay(80)
+            runCatching { initialFocus.requestFocus() }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = scrimAlpha))
-                .clickable(
-                    interactionSource = scrimInteraction,
-                    indication = null,
-                    onClick = onDismissRequest,
-                )
+                .pointerInput(onDismissRequest) {
+                    detectTapGestures { onDismissRequest() }
+                }
                 .padding(horizontal = 20.dp, vertical = 28.dp),
             contentAlignment = Alignment.Center,
         ) {
@@ -700,13 +947,7 @@ private fun AnimatedHomeMetricDialog(
                     slideOutVertically(tween(DIALOG_EXIT_MS)) { it / 28 },
             ) {
                 Surface(
-                    modifier = panelModifier
-                        .widthIn(max = 420.dp)
-                        .clickable(
-                            interactionSource = panelInteraction,
-                            indication = null,
-                            onClick = {},
-                        ),
+                    modifier = panelModifier.widthIn(max = 420.dp),
                     shape = RoundedCornerShape(24.dp),
                     color = DialogSurface,
                     border = BorderStroke(1.dp, DialogBorder),
@@ -743,7 +984,7 @@ private fun AnimatedHomeMetricDialog(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            IconButton(onClick = onDismissRequest, modifier = Modifier.size(36.dp)) {
+                            RemoteIconButton(onClick = onDismissRequest, modifier = Modifier.size(36.dp)) {
                                 Icon(
                                     Icons.Rounded.Close,
                                     homeText("Close", "بستن"),

@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogLevel
 import com.uacspoofer.mobile.profiles.CountryMetadata
@@ -61,6 +62,7 @@ import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.vpn.ConnectionMetricsStore
 import com.uacspoofer.mobile.vpn.ExitIpInfoRepository
 import com.uacspoofer.mobile.vpn.ExitIpInfoState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -72,28 +74,34 @@ internal fun ConnectionAwareFeatureCard(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current.applicationContext
+    val engineMode = rememberDisplayedEngineMode()
+    val torStore = remember(context) { TorEngineStore.get(context) }
+    val torSettings by torStore.settings.collectAsStateWithLifecycle()
     val metrics by ConnectionMetricsStore.metrics.collectAsStateWithLifecycle()
     val entries by AppLogRepository.entries.collectAsStateWithLifecycle()
     val exitInfoRepository = remember(context) { ExitIpInfoRepository.get(context) }
     val rawExitInfoState by exitInfoRepository.state.collectAsStateWithLifecycle()
-    val exitInfoState = if (rawExitInfoState.profileId == profile.id) {
+    val lookupId = ExitIpInfoRepository.lookupId(profile.id, engineMode.isTor, torSettings.exitCountryCode)
+    val exitInfoState = if (rawExitInfoState.profileId == lookupId) {
         rawExitInfoState
     } else {
-        ExitIpInfoState(profileId = profile.id, isLoading = state == ConnectionState.CONNECTED)
+        ExitIpInfoState(profileId = lookupId, isLoading = state == ConnectionState.CONNECTED)
     }
     val resolvedExitCountry = remember(exitInfoState.info) {
         exitInfoState.info
             ?.let { CountryMetadata.resolve(it.countryCode, it.country) }
             ?.takeIf { it.isKnown }
     }
-    val displayedCountry = resolvedExitCountry ?: profile.country
+    val displayedCountry = resolvedExitCountry
+        ?: if (engineMode.isTor) CountryMetadata.UNKNOWN else profile.country
     val errorCount = remember(entries) { entries.count { it.level == LogLevel.ERROR } }
     val scope = rememberCoroutineScope()
     var activeDialog by remember { mutableStateOf<HomeMetricDialog?>(null) }
 
-    LaunchedEffect(state, profile.id) {
+    LaunchedEffect(state, lookupId) {
         if (state == ConnectionState.CONNECTED) {
-            exitInfoRepository.refresh(profile.id)
+            if (engineMode.isTor) delay(8_000)
+            exitInfoRepository.refresh(profile.id, force = engineMode.isTor)
         } else {
             activeDialog = null
         }
@@ -137,6 +145,7 @@ internal fun ConnectionAwareFeatureCard(
     HomePingDialog(
         visible = activeDialog == HomeMetricDialog.PING,
         metrics = metrics,
+        throughTor = engineMode.isTor,
         onRefresh = {
             context.startService(
                 Intent(context, UacVpnService::class.java)
@@ -148,6 +157,7 @@ internal fun ConnectionAwareFeatureCard(
     HomeCountryDialog(
         visible = activeDialog == HomeMetricDialog.COUNTRY,
         state = exitInfoState,
+        throughTor = engineMode.isTor,
         onRefresh = { scope.launch { exitInfoRepository.refresh(profile.id, force = true) } },
         onDismissRequest = { activeDialog = null },
     )
@@ -196,6 +206,7 @@ private fun ConnectedInsightsCard(
             loading = measuringLatency,
             compact = compact,
             onClick = onPingClick,
+            remoteSlot = HomeRemoteSlot.Ping,
             modifier = Modifier.weight(1f),
         )
         InsightDivider()
@@ -209,6 +220,7 @@ private fun ConnectedInsightsCard(
             leadingValue = if (country.isKnown) ({ CountryFlagIcon(country, size = 14.dp) }) else null,
             compact = compact,
             onClick = onCountryClick,
+            remoteSlot = HomeRemoteSlot.Country,
             modifier = Modifier.weight(1f),
         )
         InsightDivider()
@@ -225,6 +237,7 @@ private fun ConnectedInsightsCard(
             icon = Icons.Outlined.Description,
             compact = compact,
             onClick = onLogClick,
+            remoteSlot = HomeRemoteSlot.Log,
             modifier = Modifier.weight(1f),
         )
     }
@@ -242,11 +255,14 @@ private fun InsightItem(
     compact: Boolean,
     onClick: () -> Unit,
     modifier: Modifier,
+    remoteSlot: HomeRemoteSlot? = null,
     leadingValue: (@Composable () -> Unit)? = null,
 ) {
     val localizedFont = homeLocalizedFont()
     Column(
         modifier = modifier
+            .fillMaxHeight()
+            .then(if (remoteSlot != null) Modifier.trackHomeSlot(remoteSlot) else Modifier)
             .clip(RoundedCornerShape(12.dp))
             .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 4.dp, vertical = 3.dp),

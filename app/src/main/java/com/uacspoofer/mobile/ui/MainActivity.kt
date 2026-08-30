@@ -2,8 +2,12 @@ package com.uacspoofer.mobile.ui
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.content.res.Resources
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -14,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.BuildConfig
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.core.VpnController
@@ -40,8 +45,30 @@ class MainActivity : ComponentActivity() {
         continueConnectionStart()
     }
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppFontScale.wrap(newBase))
+    }
+
+    override fun applyOverrideConfiguration(overrideConfiguration: Configuration?) {
+        super.applyOverrideConfiguration(overrideConfiguration?.let(AppFontScale::lock))
+    }
+
+    override fun getResources(): Resources {
+        val resources = super.getResources()
+        AppFontScale.lock(resources)
+        return resources
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(AppFontScale.lock(newConfig))
+        AppFontScale.lock(resources)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!BuildConfig.TV_MODE) {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
