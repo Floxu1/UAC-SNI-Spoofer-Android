@@ -32,6 +32,12 @@ internal object TorControlClient {
         }
     }
 
+    fun openWatch(controlPort: Int, controlSocket: File?): TorControlWatch? {
+        tcpWatch(controlPort)?.let { return it }
+        if (controlSocket != null) unixWatch(controlSocket)?.let { return it }
+        return null
+    }
+
     fun setExitCountry(
         controlPort: Int,
         controlSocket: File?,
@@ -206,6 +212,37 @@ internal object TorControlClient {
         }.getOrNull()
     }
 
+    private fun tcpWatch(port: Int): TorControlWatch? = runCatching {
+        val socket = Socket()
+        socket.connect(InetSocketAddress("127.0.0.1", port), 400)
+        socket.soTimeout = 800
+        val writer = socket.getOutputStream()
+        val reader = socket.getInputStream().bufferedReader()
+        if (!authenticate(writer, reader)) {
+            socket.close()
+            return@runCatching null
+        }
+        TorControlWatch(socket, writer, reader)
+    }.getOrNull()
+
+    private fun unixWatch(file: File): TorControlWatch? {
+        if (!file.exists()) return null
+        return runCatching {
+            val socket = LocalSocket()
+            socket.connect(
+                LocalSocketAddress(file.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM),
+            )
+            socket.soTimeout = 800
+            val writer = socket.outputStream
+            val reader = BufferedReader(InputStreamReader(socket.inputStream))
+            if (!authenticate(writer, reader)) {
+                socket.close()
+                return@runCatching null
+            }
+            TorControlWatch(socket, writer, reader)
+        }.getOrNull()
+    }
+
     private fun authenticate(output: OutputStream, reader: BufferedReader): Boolean {
         output.write("AUTHENTICATE\r\n".toByteArray())
         output.flush()
@@ -217,7 +254,7 @@ internal object TorControlClient {
         return line.startsWith("250")
     }
 
-    private fun readUntilComplete(reader: BufferedReader): String? {
+    internal fun readUntilComplete(reader: BufferedReader): String? {
         val text = StringBuilder()
         var inData = false
         while (true) {
@@ -235,5 +272,23 @@ internal object TorControlClient {
                 return text.toString()
             }
         }
+    }
+}
+
+internal class TorControlWatch(
+    private val closeable: AutoCloseable,
+    private val writer: OutputStream,
+    private val reader: BufferedReader,
+) : AutoCloseable {
+    fun bootstrapPercent(): Int? = runCatching {
+        writer.write("GETINFO status/bootstrap-phase\r\n".toByteArray())
+        writer.flush()
+        TorControlClient.parseBootstrapProgress(
+            TorControlClient.readUntilComplete(reader).orEmpty(),
+        )
+    }.getOrNull()
+
+    override fun close() {
+        runCatching { closeable.close() }
     }
 }

@@ -359,6 +359,10 @@ internal class CloudflareEdgeDiscovery(
             addAddress(edge.address, edge.port, CloudflareEdgeSource.CURRENT, reserved = true)
         }
         addAddress(originalAddress, originalPort, CloudflareEdgeSource.ORIGINAL, reserved = true)
+        val edgeTlsPort = cloudflareEdgeTlsPort(originalPort)
+        if (edgeTlsPort != originalPort) {
+            addAddress(originalAddress, edgeTlsPort, CloudflareEdgeSource.ORIGINAL, reserved = true)
+        }
         savedEdges.forEach { edge ->
             addAddress(edge.address, edge.port, CloudflareEdgeSource.SAVED_EXACT, reserved = true, historyScore = 100)
         }
@@ -377,9 +381,9 @@ internal class CloudflareEdgeDiscovery(
             }
 
         val dnsNames = listOf(
-            Triple(originalAddress, originalPort, CloudflareEdgeSource.DNS_SERVER),
-            Triple(identity.sni, originalPort, CloudflareEdgeSource.DNS_SNI),
-            Triple(identity.host, originalPort, CloudflareEdgeSource.DNS_HOST),
+            Triple(originalAddress, edgeTlsPort, CloudflareEdgeSource.DNS_SERVER),
+            Triple(identity.sni, edgeTlsPort, CloudflareEdgeSource.DNS_SNI),
+            Triple(identity.host, edgeTlsPort, CloudflareEdgeSource.DNS_HOST),
         )
         dnsNames.forEach { (rawHost, port, source) ->
             val host = normalizeDiscoveryHostname(rawHost) ?: return@forEach
@@ -414,7 +418,7 @@ internal class CloudflareEdgeDiscovery(
                     mergeCandidate(
                         builders,
                         sampled.canonical,
-                        originalPort,
+                        edgeTlsPort,
                         sampled,
                         CloudflareEdgeSource.OFFICIAL_CIDR,
                         reserved = false,
@@ -540,9 +544,11 @@ internal fun evaluateCloudflareSuitability(
     if (normalizeDiscoveryHostname(identity.sni) == null) {
         return CloudflareSuitabilityDecision(CloudflareSuitability.INELIGIBLE, "a DNS TLS SNI is required")
     }
+    val evidence = hasCloudflareRangeEvidence(candidates, ranges)
     val network = identity.network.lowercase(Locale.ROOT)
     val protocolCompatible = when (network) {
-        "ws", "httpupgrade", "xhttp" -> port in CLOUDFLARE_HTTPS_PORTS
+        "ws", "httpupgrade", "xhttp" ->
+            port in CLOUDFLARE_HTTPS_PORTS || (port in CLOUDFLARE_HTTP_PORTS && evidence)
         "grpc" -> port == 443 && "h2" in effectiveDiscoveryAlpn(identity)
         "tcp" -> false
         else -> false
@@ -559,6 +565,20 @@ internal fun evaluateCloudflareSuitability(
             "trusted built-in TLS transport",
         )
     }
+    return if (evidence) {
+        CloudflareSuitabilityDecision(CloudflareSuitability.ELIGIBLE, "configured, saved or DNS edge is in an official range")
+    } else {
+        CloudflareSuitabilityDecision(CloudflareSuitability.UNKNOWN, "no Cloudflare range evidence on the selected network")
+    }
+}
+
+internal fun cloudflareEdgeTlsPort(port: Int): Int =
+    if (port in CLOUDFLARE_HTTP_PORTS) 443 else port
+
+private fun hasCloudflareRangeEvidence(
+    candidates: Collection<Any>,
+    ranges: List<IpCidr>,
+): Boolean {
     val evidenceSources = setOf(
         CloudflareEdgeSource.ORIGINAL,
         CloudflareEdgeSource.DNS_SERVER,
@@ -568,7 +588,7 @@ internal fun evaluateCloudflareSuitability(
         CloudflareEdgeSource.SAVED_ASN,
         CloudflareEdgeSource.SAVED_CARRIER,
     )
-    val evidence = candidates.asSequence()
+    return candidates.asSequence()
         .mapNotNull { candidate ->
             when (candidate) {
                 is CloudflareEdgeCandidate -> candidate.ip?.takeIf { candidate.sources.any(evidenceSources::contains) }
@@ -577,11 +597,6 @@ internal fun evaluateCloudflareSuitability(
             }
         }
         .any { address -> ranges.any { it.contains(address) } }
-    return if (evidence) {
-        CloudflareSuitabilityDecision(CloudflareSuitability.ELIGIBLE, "configured, saved or DNS edge is in an official range")
-    } else {
-        CloudflareSuitabilityDecision(CloudflareSuitability.UNKNOWN, "no Cloudflare range evidence on the selected network")
-    }
 }
 
 internal fun shouldSampleOfficialCloudflareRanges(decision: CloudflareSuitabilityDecision): Boolean =
@@ -952,6 +967,7 @@ private fun discoveryHash(values: List<String>): String = MessageDigest.getInsta
     .joinToString("") { "%02x".format(Locale.ROOT, it.toInt() and 0xff) }
 
 private val CLOUDFLARE_HTTPS_PORTS = setOf(443, 2053, 2083, 2087, 2096, 8443)
+private val CLOUDFLARE_HTTP_PORTS = setOf(80, 8080, 8880, 2052, 2082, 2086, 2095)
 
 private val BUNDLED_IPV4_RANGES = listOf(
     "173.245.48.0/20",

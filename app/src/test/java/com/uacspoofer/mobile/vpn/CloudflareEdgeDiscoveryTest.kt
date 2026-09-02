@@ -142,6 +142,44 @@ class CloudflareEdgeDiscoveryTest {
     }
 
     @Test
+    fun websocketTlsOnCloudflareHttpPortWithRangeEvidenceIsEligible() {
+        val identity = websocketIdentity()
+        val ip = requireNotNull(IpAddress.parse("172.67.206.219"))
+        val candidate = CloudflareEdgeCandidate(
+            key = ip.key,
+            address = ip.canonical,
+            port = 2086,
+            ip = ip,
+            sources = setOf(CloudflareEdgeSource.ORIGINAL),
+            reserved = true,
+        )
+        val decision = evaluateCloudflareSuitability(
+            identity,
+            2086,
+            listOf(candidate),
+            bundledCloudflareRanges().ranges,
+        )
+        assertEquals(CloudflareSuitability.ELIGIBLE, decision.status)
+        assertTrue(shouldSampleOfficialCloudflareRanges(decision))
+        assertEquals(443, cloudflareEdgeTlsPort(2086))
+        assertEquals(443, cloudflareEdgeTlsPort(80))
+        assertEquals(2053, cloudflareEdgeTlsPort(2053))
+    }
+
+    @Test
+    fun websocketTlsOnCloudflareHttpPortWithoutEvidenceStaysIneligible() {
+        val identity = websocketIdentity()
+        val decision = evaluateCloudflareSuitability(
+            identity = identity,
+            port = 2086,
+            candidates = emptyList(),
+            ranges = bundledCloudflareRanges().ranges,
+        )
+        assertEquals(CloudflareSuitability.INELIGIBLE, decision.status)
+        assertFalse(shouldSampleOfficialCloudflareRanges(decision))
+    }
+
+    @Test
     fun trustedBuiltInProfileIsEligibleWithoutDnsEvidence() {
         val identity = websocketIdentity()
         val untrusted = evaluateCloudflareSuitability(

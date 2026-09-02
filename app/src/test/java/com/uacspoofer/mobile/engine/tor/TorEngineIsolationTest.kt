@@ -257,6 +257,45 @@ class TorControlClientTest {
     }
 }
 
+class TorBootstrapWatchTest {
+    @Test
+    fun directoryPhaseWaitsLongerOnlyAfterHandshake() {
+        assertEquals(TorBootstrapWatch.STALL_MS, TorBootstrapWatch.stallBudgetMs(10, reachedHandshake = false))
+        assertEquals(TorBootstrapWatch.STALL_MS, TorBootstrapWatch.stallBudgetMs(50, reachedHandshake = false))
+        assertEquals(TorBootstrapWatch.STALL_MS, TorBootstrapWatch.stallBudgetMs(80, reachedHandshake = true))
+        assertEquals(
+            TorBootstrapWatch.DIRECTORY_STALL_MS,
+            TorBootstrapWatch.stallBudgetMs(50, reachedHandshake = true),
+        )
+        assertTrue(TorBootstrapWatch.marksHandshake(15))
+        assertFalse(TorBootstrapWatch.marksHandshake(10))
+    }
+
+    @Test
+    fun progressLinesIgnoreControlSpam() {
+        assertFalse(
+            TorBootstrapWatch.isProgressLine(
+                "Aug 31 17:36:40.000 [notice] {CONTROL} New control connection opened from 127.0.0.1.",
+            ),
+        )
+        assertFalse(
+            TorBootstrapWatch.isProgressLine(
+                "Aug 31 17:36:27.000 [notice] {DIR} Ignoring directory request, since no bridge nodes are available yet.",
+            ),
+        )
+        assertTrue(
+            TorBootstrapWatch.isProgressLine(
+                "Aug 31 17:36:30.000 [notice] {CONTROL} Bootstrapped 50% (loading_descriptors): Loading relay descriptors",
+            ),
+        )
+        assertTrue(
+            TorBootstrapWatch.isProgressLine(
+                "Aug 31 17:36:31.000 [notice] {DIR} new bridge descriptor 'whiskey00' (fresh)",
+            ),
+        )
+    }
+}
+
 class TorLaunchArgsTest {
     @Test
     fun guardianStyleArgvHasNoVerifyLogOrControlPort() {

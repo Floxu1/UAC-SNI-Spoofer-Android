@@ -424,7 +424,10 @@ class TorDaemon(context: Context) {
                 var lastPercent = 0
                 var lastChangeAt = System.currentTimeMillis()
                 var lastProblem = ""
-                while (true) {
+                var reachedHandshake = false
+                var controlWatch: TorControlWatch? = null
+                try {
+                    while (true) {
                     coroutineContext.ensureActive()
                     var line = logLines.poll()
                     if (line == null && stdout?.ready() == true) {
@@ -443,10 +446,14 @@ class TorDaemon(context: Context) {
                             lastProblem = sanitize(line)
                             AppLogRepository.warning(LogSource.TOR, lastProblem)
                         }
+                        if (TorBootstrapWatch.isProgressLine(line)) {
+                            lastChangeAt = System.currentTimeMillis()
+                        }
                         val percent = bootstrapPercent(line)
                         if (percent != null && percent != lastPercent) {
                             lastPercent = percent
                             lastChangeAt = System.currentTimeMillis()
+                            if (TorBootstrapWatch.marksHandshake(percent)) reachedHandshake = true
                             TorStatusStore.update(
                                 phase = if (percent >= 100) TorPhase.CONNECTED else TorPhase.BOOTSTRAPPING,
                                 bootstrapPercent = percent,
@@ -463,10 +470,18 @@ class TorDaemon(context: Context) {
                         }
                         line = logLines.poll() ?: if (stdout?.ready() == true) stdout.readLine() else null
                     }
-                    val controlPercent = TorControlClient.bootstrapPercent(lastControlPort, lastControlSocket)
+                    if (controlWatch == null) {
+                        controlWatch = TorControlClient.openWatch(lastControlPort, lastControlSocket)
+                    }
+                    val controlPercent = controlWatch?.bootstrapPercent()
+                    if (controlPercent == null && controlWatch != null) {
+                        runCatching { controlWatch.close() }
+                        controlWatch = null
+                    }
                     if (controlPercent != null && controlPercent != lastPercent) {
                         lastPercent = controlPercent
                         lastChangeAt = System.currentTimeMillis()
+                        if (TorBootstrapWatch.marksHandshake(controlPercent)) reachedHandshake = true
                         TorStatusStore.update(
                             phase = if (controlPercent >= 100) TorPhase.CONNECTED else TorPhase.BOOTSTRAPPING,
                             bootstrapPercent = controlPercent,
@@ -497,7 +512,8 @@ class TorDaemon(context: Context) {
                         )
                     }
                     val stalled = lastPercent in 1..99 &&
-                        System.currentTimeMillis() - lastChangeAt >= STALL_TIMEOUT_MS
+                        System.currentTimeMillis() - lastChangeAt >=
+                        TorBootstrapWatch.stallBudgetMs(lastPercent, reachedHandshake)
                     if (stalled) {
                         error(
                             lastProblem.ifBlank {
@@ -506,6 +522,9 @@ class TorDaemon(context: Context) {
                         )
                     }
                     kotlinx.coroutines.delay(150)
+                    }
+                } finally {
+                    runCatching { controlWatch?.close() }
                 }
             }
         }
@@ -602,7 +621,6 @@ class TorDaemon(context: Context) {
         private val BOOTSTRAP_PATTERN = Regex("Bootstrapped (\\d+)%")
         internal const val DIRECT_BOOTSTRAP_TIMEOUT_MS = 30_000L
         internal const val BRIDGE_BOOTSTRAP_TIMEOUT_MS = 90_000L
-        private const val STALL_TIMEOUT_MS = 18_000L
         private const val MODE_0700 = 448
     }
 }
