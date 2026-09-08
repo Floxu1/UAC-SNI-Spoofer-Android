@@ -2,11 +2,14 @@ package com.uacspoofer.mobile.vpn
 
 import android.content.Context
 import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.pow.PowCoreConfig
+import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciConfig
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -51,6 +54,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
     private val settingsStore = AdvancedSettingsStore(appContext)
     private val engineModeStore = EngineModeStore.get(appContext)
     private val torEngineStore = TorEngineStore.get(appContext)
+    private val powEngineStore = PowEngineStore.get(appContext)
     private val refreshMutex = Mutex()
     private val mutableState = MutableStateFlow(ExitIpInfoState())
 
@@ -59,8 +63,17 @@ class ExitIpInfoRepository private constructor(context: Context) {
     suspend fun refresh(profileId: String, force: Boolean = false) {
         refreshMutex.withLock {
             val engine = engineModeStore.snapshot()
-            val exitCountry = if (engine.isTor) torEngineStore.snapshot().exitCountryCode else ""
-            val lookupId = lookupId(profileId, engine.isTor, exitCountry)
+            val exitCountry = when {
+                engine.isTor -> torEngineStore.snapshot().exitCountryCode
+                engine.isPow -> powEngineStore.snapshot().exitCountryCode
+                else -> ""
+            }
+            val lookupId = lookupId(
+                profileId = profileId,
+                torEngine = engine.isTor,
+                exitCountryCode = exitCountry,
+                powEngine = engine.isPow,
+            )
             val now = System.currentTimeMillis()
             val memoryInfo = mutableState.value
                 .takeIf { it.profileId == lookupId }
@@ -76,22 +89,38 @@ class ExitIpInfoRepository private constructor(context: Context) {
                 info = cachedInfo,
                 isLoading = true,
             )
-            val socks = if (engine.isTor) {
-                val tor = torEngineStore.snapshot()
-                MciConfig.LOCAL_SOCKS_ADDRESS to tor.socksPort
-            } else {
-                val settings = settingsStore.snapshot().validated()
-                settings.socksAddress to settings.socksPort
+            val socks = when {
+                engine.isTor -> {
+                    val tor = torEngineStore.snapshot()
+                    MciConfig.LOCAL_SOCKS_ADDRESS to tor.socksPort
+                }
+                engine.isPow -> {
+                    val settings = settingsStore.snapshot().validated()
+                    val port = if (settings.connectionMode == CONNECTION_MODE_PROXY) {
+                        settings.socksPort
+                    } else {
+                        PowCoreConfig.SOCKS_PORT
+                    }
+                    MciConfig.LOCAL_SOCKS_ADDRESS to port
+                }
+                else -> {
+                    val settings = settingsStore.snapshot().validated()
+                    settings.socksAddress to settings.socksPort
+                }
             }
-            val timeoutMs = if (engine.isTor) TOR_LOOKUP_TIMEOUT_MS else LOOKUP_TIMEOUT_MS
-            val via = if (engine.isTor) "Tor SOCKS" else "Xray SOCKS"
+            val timeoutMs = if (engine.isTor || engine.isPow) TOR_LOOKUP_TIMEOUT_MS else LOOKUP_TIMEOUT_MS
+            val via = when {
+                engine.isTor -> "Tor SOCKS"
+                engine.isPow -> "UAC PoW SOCKS"
+                else -> "Xray SOCKS"
+            }
             try {
                 val result = withContext(Dispatchers.IO) {
                     lookupThroughSocks(socks.first, socks.second, timeoutMs)
                 }
                 val wanted = exitCountry.trim().lowercase()
                 val got = result.countryCode.trim().lowercase()
-                val mismatch = engine.isTor && wanted.isNotEmpty() && got.isNotEmpty() && got != wanted
+                val mismatch = (engine.isTor || engine.isPow) && wanted.isNotEmpty() && got.isNotEmpty() && got != wanted
                 if (!mismatch) {
                     writeCache(lookupId, result)
                 }
@@ -244,14 +273,24 @@ class ExitIpInfoRepository private constructor(context: Context) {
         private const val MAX_RESPONSE_BYTES = 128 * 1_024
         private const val CACHE_TTL_MS = 10L * 60L * 1_000L
         const val TOR_LOOKUP_ID = "engine:tor_webtunnel"
+        const val POW_LOOKUP_ID = "engine:uac_pow"
 
-        fun lookupId(profileId: String, torEngine: Boolean, exitCountryCode: String = ""): String =
-            if (torEngine) {
+        fun lookupId(
+            profileId: String,
+            torEngine: Boolean,
+            exitCountryCode: String = "",
+            powEngine: Boolean = false,
+        ): String = when {
+            torEngine -> {
                 val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
                 "$TOR_LOOKUP_ID:$country"
-            } else {
-                profileId
             }
+            powEngine -> {
+                val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
+                "$POW_LOOKUP_ID:$country"
+            }
+            else -> profileId
+        }
 
         @Volatile private var instance: ExitIpInfoRepository? = null
 

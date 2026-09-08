@@ -1,5 +1,6 @@
 package com.uacspoofer.mobile.mci
 
+import com.uacspoofer.mobile.ai.AiRoutePlan
 import com.uacspoofer.mobile.profiles.ProfileNetworks
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.ProxyProtocol
@@ -35,10 +36,21 @@ internal object MciXrayConfigBuilder {
         profile: ProxyProfile,
         nativeTun: Boolean,
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
+        aiRoute: AiRoutePlan? = null,
     ): String {
         val s = settings.validated()
         val identity = runtimeOptions.identityOverride ?: profile.runtimeIdentity(s)
         validateIdentity(identity, runtimeOptions)
+        // Built first so an unusable AI exit drops the outbound and its routing rule
+        // together, leaving a config byte-identical to one without this feature.
+        val aiOutbound = aiRoute?.takeIf(AiRoutePlan::isUsable)?.let { plan ->
+            runCatching {
+                val aiIdentity = plan.profile.runtimeIdentity(s)
+                validateIdentity(aiIdentity, runtimeOptions)
+                proxyOutbound("ai-out", aiIdentity, plan.edge, s, nativeTun, runtimeOptions, false)
+            }.getOrNull()
+        }
+        val cleanHop = aiRoute?.takeIf { aiOutbound != null }
 
         val outbounds = buildList {
             add(
@@ -53,6 +65,7 @@ internal object MciXrayConfigBuilder {
                 ),
             )
             add(proxyOutbound("probe-proxy", identity, edge, s, nativeTun, runtimeOptions, false))
+            aiOutbound?.let(::add)
             add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp","rules":[{"action":"hijack"}]}}""")
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
         }.joinToString(",\n")
@@ -67,6 +80,10 @@ internal object MciXrayConfigBuilder {
             }
             if (s.blockUdp443) {
                 add("""{"type":"field","network":"udp","port":"443","outboundTag":"block"}""")
+            }
+            cleanHop?.let { plan ->
+                val domains = plan.domains.joinToString(",") { "\"${q(it)}\"" }
+                add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[$domains],"outboundTag":"ai-out"}""")
             }
             add("""{"type":"field","inboundTag":["socks-in"],"network":"tcp,udp","outboundTag":"probe-proxy"}""")
         }.joinToString(",\n")
@@ -234,7 +251,13 @@ internal object MciXrayConfigBuilder {
             ?.let { ",\"fingerprint\":\"${q(it)}\"" }.orEmpty()
         val serverName = identity.sni.takeIf(String::isNotBlank)
             ?.let { "\"serverName\":\"${q(it)}\"," }.orEmpty()
-        val tls = """"tlsSettings":{$serverName"allowInsecure":${identity.allowInsecure}$alpnField$fingerprint}"""
+        // A plain config has no TLS layer, so emitting tlsSettings would make Xray negotiate a
+        // handshake the server never offers.
+        val tls = if (identity.usesTls) {
+            """"tlsSettings":{$serverName"allowInsecure":${identity.allowInsecure}$alpnField$fingerprint}"""
+        } else {
+            ""
+        }
         val transport = when (identity.network) {
             "ws" -> if (runtimeOptions.preserveTransportFields) {
                 val fields = buildList {
@@ -277,7 +300,7 @@ internal object MciXrayConfigBuilder {
                 }.joinToString(",")
                 "\"xhttpSettings\":{$fields}"
             }
-            "tcp" -> ""
+            "tcp" -> if (identity.headerType == "http") httpObfsHeader(identity) else ""
             else -> error("Unsupported transport ${identity.network}")
         }
         val compatibilityArrays = if (nativeTun) {
@@ -285,7 +308,9 @@ internal object MciXrayConfigBuilder {
         } else {
             ""
         }
-        val finalmask = if (runtimeOptions.finalmaskEnabled) {
+        // Fragmentation splits the TLS ClientHello. A plain config has none, so the fragmenter
+        // would find nothing to cut and only add a code path that was never exercised.
+        val finalmask = if (runtimeOptions.finalmaskEnabled && identity.usesTls) {
             """"finalmask":{"tcp":[{"type":"fragment","settings":{"packets":"${q(settings.finalmaskPacket)}","length":"${settings.finalmaskLength}","delay":"${settings.finalmaskDelayMs}"$compatibilityArrays,"maxSplit":"$maxSplit"}}]}"""
         } else {
             ""
@@ -303,14 +328,36 @@ internal object MciXrayConfigBuilder {
 
     private fun validateIdentity(identity: RuntimeProxyIdentity, runtimeOptions: MciXrayRuntimeOptions) {
         require(identity.credential.isNotBlank()) { "Selected profile credential is missing" }
-        require(identity.security == "tls") { "Selected profile must use TLS" }
-        if (!runtimeOptions.preserveTransportFields) {
+        require(identity.security == "tls" || identity.security == "none") {
+            "Selected profile must use TLS or no security"
+        }
+        // SNI only exists in a TLS handshake; demanding it would reject every plain config.
+        if (!runtimeOptions.preserveTransportFields && identity.usesTls) {
             require(identity.sni.isNotBlank()) { "Selected profile SNI is missing" }
         }
         require(identity.network in ProfileNetworks.SUPPORTED) {
             "Unsupported selected profile transport"
         }
         if (identity.network == "grpc") require(identity.serviceName.isNotBlank()) { "gRPC serviceName is missing" }
+    }
+
+    /**
+     * The `http` disguise the server expects on a plain TCP stream. The request has to look
+     * like an ordinary GET to the fronted host, so the Host header carries the config's host
+     * rather than the address actually dialled.
+     */
+    private fun httpObfsHeader(identity: RuntimeProxyIdentity): String {
+        val host = identity.host.takeIf(String::isNotBlank) ?: identity.sni
+        val path = identity.path.takeIf(String::isNotBlank) ?: "/"
+        val headers = buildList {
+            if (host.isNotBlank()) add("\"Host\":[\"${q(host)}\"]")
+            add("\"User-Agent\":[\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\"]")
+            add("\"Accept-Encoding\":[\"gzip, deflate\"]")
+            add("\"Connection\":[\"keep-alive\"]")
+            add("\"Pragma\":\"no-cache\"")
+        }.joinToString(",")
+        return """"tcpSettings":{"header":{"type":"http","request":{"version":"1.1","method":"GET",""" +
+            """"path":["${q(path)}"],"headers":{$headers}}}}"""
     }
 
     private fun vnextSettings(

@@ -37,7 +37,8 @@ internal object ProcMemoryMaps {
         return when {
             "libtor.so" in lower -> "tor"
             "libwebtunnel.so" in lower -> "webtunnel"
-            "libhev-socks5-tunnel.so" in lower -> "tun2socks"
+            "libhev-socks5-tunnel.so" in lower || "libtun2socks.so" in lower -> "tun2socks"
+            "libaether" in lower || "libgopsi" in lower -> "pow"
             "libgojni" in lower || "libv2ray" in lower || "libxray" in lower -> "xray"
             "dalvik" in lower || lower == "[heap]" || "anon:dalvik" in lower -> "art"
             "kgsl" in lower || "mali" in lower || "renderengine" in lower ||

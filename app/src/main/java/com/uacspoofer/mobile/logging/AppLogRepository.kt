@@ -101,4 +101,5 @@ enum class LogSource(val label: String) {
     PROXY("PROXY"),
     TUN("TUN"),
     TOR("TOR"),
+    POW("POW"),
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.ai.AiRoutePlan
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciNativeXrayConfig
 import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
@@ -29,6 +30,7 @@ class XrayNativeTunEngine(private val context: Context) {
         settings: AdvancedSettingsData,
         profile: ProxyProfile = ProxyProfile.UAC_SNI_BUILT_IN,
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
+        aiRoute: AiRoutePlan? = null,
         establishTun: () -> ParcelFileDescriptor?,
     ) {
         stopLocked()
@@ -51,11 +53,15 @@ class XrayNativeTunEngine(private val context: Context) {
         totalProbeUplink = 0L
         totalProbeDownlink = 0L
         try {
-            core.startLoop(MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions), tun.fd)
+            core.startLoop(
+                MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions, aiRoute),
+                tun.fd,
+            )
             check(core.isRunning) { "Native Xray core did not enter running state" }
             AppLogRepository.info(
                 LogSource.TUN,
-                "Xray Native TUN started for ${edge.role} (MTU ${settings.tunMtu})",
+                "Xray Native TUN started for ${edge.role} (MTU ${settings.tunMtu})" +
+                    if (aiRoute != null) " with the AI exit via ${aiRoute.profile.name}" else "",
             )
         } catch (error: Throwable) {
             stopLocked()

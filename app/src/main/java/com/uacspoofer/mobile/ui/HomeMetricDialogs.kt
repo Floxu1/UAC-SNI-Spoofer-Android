@@ -75,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.uacspoofer.mobile.engine.pow.PowRegions
 import com.uacspoofer.mobile.engine.tor.TorExitCountry
 import com.uacspoofer.mobile.logging.AppLogEntry
 import com.uacspoofer.mobile.logging.LogLevel
@@ -151,6 +152,7 @@ internal fun HomeCountryDialog(
     throughTor: Boolean,
     onRefresh: () -> Unit,
     onDismissRequest: () -> Unit,
+    throughPow: Boolean = false,
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
@@ -158,10 +160,10 @@ internal fun HomeCountryDialog(
     AnimatedHomeMetricDialog(
         visible = visible,
         title = homeText("My IP Information", "اطلاعات IP من"),
-        subtitle = if (throughTor) {
-            homeText("Public exit details through Tor", "مشخصات IP خروجی از طریق Tor")
-        } else {
-            homeText("Public exit details through Xray", "مشخصات IP خروجی از طریق Xray")
+        subtitle = when {
+            throughPow -> homeText("Public exit details through UAC PoW", "مشخصات IP خروجی از طریق UAC PoW")
+            throughTor -> homeText("Public exit details through Tor", "مشخصات IP خروجی از طریق Tor")
+            else -> homeText("Public exit details through Xray", "مشخصات IP خروجی از طریق Xray")
         },
         icon = Icons.Outlined.Public,
         onDismissRequest = onDismissRequest,
@@ -243,7 +245,11 @@ internal fun HomeCountryDialog(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "${info.provider} • ${formatTime(info.fetchedAtMs)} • ${if (throughTor) "Tor SOCKS" else "Xray SOCKS"}",
+                    text = "${info.provider} • ${formatTime(info.fetchedAtMs)} • ${when {
+                        throughPow -> "UAC PoW SOCKS"
+                        throughTor -> "Tor SOCKS"
+                        else -> "Xray SOCKS"
+                    }}",
                     color = UacColors.TextSecondary.copy(alpha = 0.78f),
                     fontSize = 9.5.sp,
                     modifier = Modifier.weight(1f),
@@ -290,6 +296,7 @@ internal fun HomePingDialog(
     throughTor: Boolean,
     onRefresh: () -> Unit,
     onDismissRequest: () -> Unit,
+    throughPow: Boolean = false,
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
@@ -297,10 +304,10 @@ internal fun HomePingDialog(
     AnimatedHomeMetricDialog(
         visible = visible,
         title = homeText("Ping details", "جزئیات پینگ"),
-        subtitle = if (throughTor) {
-            homeText("Live HTTPS measurement through Tor", "سنجش زنده مسیر HTTPS از Tor")
-        } else {
-            homeText("Live HTTPS route measurement", "سنجش زنده مسیر HTTPS")
+        subtitle = when {
+            throughPow -> homeText("Live HTTPS measurement through UAC PoW", "سنجش زنده مسیر HTTPS از UAC PoW")
+            throughTor -> homeText("Live HTTPS measurement through Tor", "سنجش زنده مسیر HTTPS از Tor")
+            else -> homeText("Live HTTPS route measurement", "سنجش زنده مسیر HTTPS")
         },
         icon = Icons.Outlined.Speed,
         onDismissRequest = onDismissRequest,
@@ -454,13 +461,16 @@ internal fun HomePingDialog(
 
             MetricDetailRow(
                 homeText("Method", "روش تست"),
-                if (throughTor) {
-                    homeText(
+                when {
+                    throughPow -> homeText(
+                        "HTTPS payload through UAC PoW SOCKS",
+                        "ارسال HTTPS از SOCKS مربوط به UAC PoW",
+                    )
+                    throughTor -> homeText(
                         "HTTPS payload through Tor SOCKS",
                         "ارسال HTTPS از SOCKS مربوط به Tor",
                     )
-                } else {
-                    homeText(
+                    else -> homeText(
                         "HTTPS payload through Xray tunnel",
                         "ارسال HTTPS از تونل Xray",
                     )
@@ -605,6 +615,190 @@ internal fun HomeTorCountryDialog(
                 fontSize = 11.sp,
                 fontFamily = localizedFont,
             )
+        }
+    }
+}
+
+@Composable
+internal fun HomePowCountryDialog(
+    visible: Boolean,
+    selectedCode: String,
+    connected: Boolean,
+    onSelect: (String) -> Unit,
+    onManage: () -> Unit,
+    onDismissRequest: () -> Unit,
+) {
+    val isPersian = LocalHomePersian.current
+    val localizedFont = homeLocalizedFont()
+    val nameLocale = if (isPersian) Locale("fa") else Locale.ENGLISH
+    val current = PowRegions.normalize(selectedCode)
+    val codes = remember(current) {
+        val recommended = PowRegions.RECOMMENDED
+        val extra = current.takeIf { it.isNotEmpty() && it !in recommended }
+        listOf(PowRegions.AUTOMATIC) + recommended + listOfNotNull(extra)
+    }
+    val firstRowFocus = remember { FocusRequester() }
+    AnimatedHomeMetricDialog(
+        visible = visible,
+        title = homeText("Select country", "انتخاب کشور"),
+        subtitle = if (isPersian) {
+            "${codes.size} کشور • برای انتخاب ضربه بزن"
+        } else {
+            "${codes.size} available • tap to select"
+        },
+        icon = Icons.Outlined.Public,
+        onDismissRequest = onDismissRequest,
+        expanded = true,
+        panelModifier = Modifier.fillMaxWidth().fillMaxHeight(0.72f),
+        initialFocus = firstRowFocus,
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .background(DialogInnerSurface, RoundedCornerShape(16.dp))
+                .border(1.dp, DialogBorder.copy(alpha = 0.55f), RoundedCornerShape(16.dp)),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            itemsIndexed(codes, key = { _, code -> code.ifEmpty { "auto" } }) { index, code ->
+                val selected = code == current
+                HomePowCountryDialogRow(
+                    code = code,
+                    nameLocale = nameLocale,
+                    selected = selected,
+                    connected = connected && selected,
+                    onClick = { onSelect(code) },
+                    modifier = if (index == 0) Modifier.focusRequester(firstRowFocus) else Modifier,
+                )
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        TextButton(
+            onClick = onManage,
+            modifier = Modifier
+                .align(Alignment.End)
+                .keyboardFocusRing(),
+        ) {
+            Icon(Icons.Outlined.Tune, null, tint = DialogBlue, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.size(6.dp))
+            Text(
+                homeText("Manage countries", "مدیریت کشورها"),
+                color = DialogBlue,
+                fontSize = 11.sp,
+                fontFamily = localizedFont,
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomePowCountryDialogRow(
+    code: String,
+    nameLocale: Locale,
+    selected: Boolean,
+    connected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val isPersian = LocalHomePersian.current
+    val localizedFont = homeLocalizedFont()
+    val automatic = code.isEmpty()
+    val title = if (automatic) {
+        homeText("Automatic", "خودکار")
+    } else {
+        PowRegions.name(code, nameLocale)
+    }
+    val subtitle = if (automatic) {
+        homeText("Psiphon picks the best exit", "خروجی را Psiphon انتخاب می‌کند")
+    } else {
+        val iso = code.uppercase(Locale.US)
+        homeText("UAC PoW EXIT • $iso", "خروجی UAC PoW • $iso")
+    }
+    val accent = if (connected) UacColors.ConnectedGreen else DialogBlue
+    val highlighted = selected || connected
+    val shape = RoundedCornerShape(14.dp)
+    val country = if (automatic) null else CountryMetadata.resolve(code, null)
+    val (interaction, remoteFocused) = rememberRemoteRowFocus()
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(
+                when {
+                    remoteFocused -> UacColors.DisconnectedBlue.copy(alpha = 0.18f)
+                    highlighted -> accent.copy(alpha = 0.085f)
+                    else -> Color(0xA90A1623)
+                },
+                shape,
+            )
+            .border(
+                width = if (remoteFocused) 2.dp else 1.dp,
+                color = when {
+                    remoteFocused -> UacColors.DisconnectedBlue
+                    highlighted -> accent.copy(alpha = 0.36f)
+                    else -> DialogBorder.copy(alpha = 0.38f)
+                },
+                shape,
+            )
+            .semantics {
+                this.selected = selected
+                role = Role.RadioButton
+            }
+            .clickable(
+                interactionSource = interaction,
+                indication = LocalIndication.current,
+                onClick = onClick,
+            )
+            .padding(horizontal = 11.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        HomeTorCountryBadge(country, highlighted)
+        Spacer(Modifier.size(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = UacColors.TextPrimary,
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = localizedFont,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                subtitle,
+                color = UacColors.TextSecondary,
+                fontSize = 9.5.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (selected) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    when {
+                        connected -> if (isPersian) "وصل است" else "Connected"
+                        else -> if (isPersian) "برای اتصال بعدی انتخاب شده" else "Selected for next connection"
+                    },
+                    color = accent,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = localizedFont,
+                )
+            }
+        }
+        if (selected) {
+            Spacer(Modifier.size(8.dp))
+            Box(
+                modifier = Modifier.size(27.dp).background(accent.copy(alpha = 0.13f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Check,
+                    homeText("Selected", "انتخاب‌شده"),
+                    tint = accent,
+                    modifier = Modifier.size(17.dp),
+                )
+            }
         }
     }
 }

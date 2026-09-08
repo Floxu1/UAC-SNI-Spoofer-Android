@@ -23,14 +23,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,7 +79,9 @@ internal fun ToolPageScaffold(
     content: LazyListScope.() -> Unit,
 ) {
     val wide = LocalWideShell.current
+    val localizedTextStyle = homeLocalizedTextStyle()
     ToolPageBackground(accent) {
+        CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -106,6 +111,7 @@ internal fun ToolPageScaffold(
                     content = content,
                 )
             }
+        }
         }
     }
 }
@@ -157,11 +163,13 @@ internal fun ToolPageHeader(
                 color = UacColors.TextPrimary,
                 fontSize = 21.sp,
                 fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Start,
             )
             Text(
                 text = subtitle,
                 color = UacColors.TextSecondary,
                 fontSize = 11.sp,
+                textAlign = TextAlign.Start,
             )
         }
     }
@@ -169,13 +177,17 @@ internal fun ToolPageHeader(
 
 @Composable
 internal fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    val persian = LocalHomePersian.current
     Text(
-        text = text.uppercase(),
+        text = if (persian) text else text.uppercase(),
         color = UacColors.TextSecondary,
         fontSize = 10.sp,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.2.sp,
-        modifier = modifier.padding(start = 3.dp),
+        letterSpacing = if (persian) 0.sp else 1.2.sp,
+        textAlign = if (persian) TextAlign.End else TextAlign.Start,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 3.dp),
     )
 }
 

@@ -331,7 +331,7 @@ internal fun TorCountryScreen(onMenuClick: () -> Unit) {
 }
 
 @Composable
-private fun TorCountryTopBar(
+internal fun TorCountryTopBar(
     subtitle: String,
     onMenuClick: () -> Unit,
     compact: Boolean = false,
@@ -383,7 +383,7 @@ private fun TorCountryTopBar(
 }
 
 @Composable
-private fun CountrySectionLabel(text: String) {
+internal fun CountrySectionLabel(text: String) {
     Text(
         text,
         color = UacColors.TextSecondary,
@@ -394,7 +394,7 @@ private fun CountrySectionLabel(text: String) {
 }
 
 @Composable
-private fun TorCountryRow(
+internal fun TorCountryRow(
     title: String,
     subtitle: String,
     country: CountryMetadata?,

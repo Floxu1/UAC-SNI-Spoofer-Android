@@ -4,12 +4,20 @@ import com.uacspoofer.mobile.core.ConnectionState
 
 enum class EngineMode(val id: String) {
     XRAY_CF("xray_cf"),
-    TOR_WEBTUNNEL("tor_webtunnel");
+    TOR_WEBTUNNEL("tor_webtunnel"),
+    UAC_POW("uac_pow");
 
     val isTor: Boolean get() = this == TOR_WEBTUNNEL
     val isXray: Boolean get() = this == XRAY_CF
+    val isPow: Boolean get() = this == UAC_POW
 
-    fun toggled(): EngineMode = if (isTor) XRAY_CF else TOR_WEBTUNNEL
+    fun next(): EngineMode = when (this) {
+        XRAY_CF -> TOR_WEBTUNNEL
+        TOR_WEBTUNNEL -> UAC_POW
+        UAC_POW -> XRAY_CF
+    }
+
+    fun toggled(): EngineMode = next()
 
     companion object {
         fun fromStored(raw: String?): EngineMode =

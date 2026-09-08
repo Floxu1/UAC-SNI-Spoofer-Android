@@ -23,7 +23,8 @@ class EngineModeStore private constructor(context: Context) {
         }
         prefs.edit().putString(KEY_MODE, mode.id).apply()
         mutableMode.value = mode
-        if (mode.isXray) TorStatusStore.reset()
+        if (!mode.isTor) TorStatusStore.reset()
+        if (!mode.isPow) com.uacspoofer.mobile.engine.pow.PowStatusStore.reset()
         return EngineModeChangeResult.APPLIED
     }
 

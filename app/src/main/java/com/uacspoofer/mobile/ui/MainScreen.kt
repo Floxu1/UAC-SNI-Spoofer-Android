@@ -87,6 +87,8 @@ import androidx.compose.material3.Icon
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.VpnController
 import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.pow.PowRegions
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.engine.tor.TorExitCountry
 import com.uacspoofer.mobile.profiles.ProfileStore
@@ -128,6 +130,8 @@ fun MainScreen(
     val engineMode by engineModeStore.mode.collectAsStateWithLifecycle()
     val torEngineStore = remember(context) { TorEngineStore.get(context) }
     val torSettings by torEngineStore.settings.collectAsStateWithLifecycle()
+    val powEngineStore = remember(context) { PowEngineStore.get(context) }
+    val powSettings by powEngineStore.settings.collectAsStateWithLifecycle()
     val sniMakerController = remember(context.applicationContext) { SniMakerController(context) }
     val routeSpeedTestController = remember(context.applicationContext) { RouteSpeedTestController.get(context) }
     val updateManager = remember(context.applicationContext) { AppUpdateManager(context.applicationContext) }
@@ -156,6 +160,7 @@ fun MainScreen(
     var homeCountry by remember { mutableStateOf(homeProfile.country) }
     var homeConfigsVisible by remember { mutableStateOf(false) }
     var homeTorCountriesVisible by remember { mutableStateOf(false) }
+    var homePowCountriesVisible by remember { mutableStateOf(false) }
     var homeConfigsLibrary by remember { mutableStateOf(profileStore.snapshot()) }
     var homeConfigLatencies by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
@@ -253,20 +258,28 @@ fun MainScreen(
     }
 
     LaunchedEffect(engineMode, selectedDestination) {
-        if (selectedDestination == DrawerDestination.ENGINE_MODE) {
-            selectedDestination = DrawerDestination.SETTINGS
-            return@LaunchedEffect
-        }
         if (!selectedDestination.visibleFor(engineMode)) {
-            selectedDestination = DrawerDestination.HOME
+            selectedDestination = when (selectedDestination) {
+                DrawerDestination.ADVANCED_SETTINGS,
+                DrawerDestination.POW_SETTINGS,
+                DrawerDestination.TOR_SETTINGS -> DrawerDestination.SETTINGS
+                else -> DrawerDestination.HOME
+            }
         }
-        if (engineMode.isTor) homeConfigsVisible = false else homeTorCountriesVisible = false
+        if (engineMode.isXray) {
+            homeTorCountriesVisible = false
+            homePowCountriesVisible = false
+        } else {
+            homeConfigsVisible = false
+            if (engineMode.isTor) homePowCountriesVisible = false else homeTorCountriesVisible = false
+        }
     }
     BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
     BackHandler(enabled = drawerState.isClosed && selectedDestination != DrawerDestination.HOME) {
         selectedDestination = if (
             selectedDestination == DrawerDestination.ADVANCED_SETTINGS ||
-            selectedDestination == DrawerDestination.ENGINE_MODE
+            selectedDestination == DrawerDestination.POW_SETTINGS ||
+            selectedDestination == DrawerDestination.TOR_SETTINGS
         ) {
             DrawerDestination.SETTINGS
         } else {
@@ -278,6 +291,7 @@ fun MainScreen(
             selectedDestination == DrawerDestination.HOME &&
             !homeConfigsVisible &&
             !homeTorCountriesVisible &&
+            !homePowCountriesVisible &&
             !updateDialogVisible,
     ) {
         val connected = state == ConnectionState.CONNECTED
@@ -323,7 +337,7 @@ fun MainScreen(
             HomeGuide.step(
                 engineSeen = guide.engineSeen(),
                 countrySeen = guide.countrySeen(),
-                torMode = engineMode.isTor,
+                torMode = engineMode.isTor || engineMode.isPow,
                 drawerOpen = false,
             ) != null
         ) {
@@ -341,7 +355,8 @@ fun MainScreen(
             AppDrawer(
                 selectedDestination = when (selectedDestination) {
                     DrawerDestination.ADVANCED_SETTINGS,
-                    DrawerDestination.ENGINE_MODE -> DrawerDestination.SETTINGS
+                    DrawerDestination.POW_SETTINGS,
+                    DrawerDestination.TOR_SETTINGS -> DrawerDestination.SETTINGS
                     else -> selectedDestination
                 },
                 selectedLanguage = selectedLanguage,
@@ -376,10 +391,10 @@ fun MainScreen(
         ) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (selectedDestination) {
-                DrawerDestination.CONFIGS -> if (engineMode.isTor) {
-                    TorCountryScreen(onMenuClick = openDrawer)
-                } else {
-                    ConfigsScreen(
+                DrawerDestination.CONFIGS -> when {
+                    engineMode.isTor -> TorCountryScreen(onMenuClick = openDrawer)
+                    engineMode.isPow -> PowCountryScreen(onMenuClick = openDrawer)
+                    else -> ConfigsScreen(
                         onMenuClick = openDrawer,
                         connectionState = state,
                         activeProfileId = if (state == ConnectionState.CONNECTED) profileStore.activeProfile()?.id else null,
@@ -397,13 +412,20 @@ fun MainScreen(
                 )
                 DrawerDestination.LIVE_LOGS -> LiveLogsScreen(onMenuClick = openDrawer)
                 DrawerDestination.APP_BYPASS -> AppBypassScreen(onMenuClick = openDrawer)
-                DrawerDestination.SETTINGS,
-                DrawerDestination.ENGINE_MODE -> SettingsScreen(
+                DrawerDestination.SETTINGS -> SettingsScreen(
                     onMenuClick = openDrawer,
                     onAdvancedSettingsClick = { selectedDestination = DrawerDestination.ADVANCED_SETTINGS },
+                    onPowSettingsClick = { selectedDestination = DrawerDestination.POW_SETTINGS },
+                    onTorSettingsClick = { selectedDestination = DrawerDestination.TOR_SETTINGS },
                 )
                 DrawerDestination.ADVANCED_SETTINGS -> AdvancedSettingsScreen(
                     onBackClick = { selectedDestination = DrawerDestination.SETTINGS },
+                )
+                DrawerDestination.POW_SETTINGS -> PowSettingsScreen(
+                    onBack = { selectedDestination = DrawerDestination.SETTINGS },
+                )
+                DrawerDestination.TOR_SETTINGS -> TorSettingsScreen(
+                    onBack = { selectedDestination = DrawerDestination.SETTINGS },
                 )
                 DrawerDestination.SUPPORT -> SupportScreen(
                     onMenuClick = openDrawer,
@@ -424,15 +446,17 @@ fun MainScreen(
                         },
                         onMenuClick = openDrawer,
                         onConfigClick = {
-                            if (engineMode.isTor) {
-                                homeTorCountriesVisible = true
-                            } else {
-                                val latestLibrary = profileStore.snapshot()
-                                homeConfigsLibrary = latestLibrary
-                                homeConfigLatencies = profileLatencyCache.snapshot(
-                                    latestLibrary.allProfiles.mapTo(hashSetOf(), ProxyProfile::id),
-                                )
-                                homeConfigsVisible = true
+                            when {
+                                engineMode.isTor -> homeTorCountriesVisible = true
+                                engineMode.isPow -> homePowCountriesVisible = true
+                                else -> {
+                                    val latestLibrary = profileStore.snapshot()
+                                    homeConfigsLibrary = latestLibrary
+                                    homeConfigLatencies = profileLatencyCache.snapshot(
+                                        latestLibrary.allProfiles.mapTo(hashSetOf(), ProxyProfile::id),
+                                    )
+                                    homeConfigsVisible = true
+                                }
                             }
                         },
                     )
@@ -496,6 +520,30 @@ fun MainScreen(
                     selectedDestination = DrawerDestination.CONFIGS
                 },
                 onDismissRequest = { homeTorCountriesVisible = false },
+            )
+            HomePowCountryDialog(
+                visible = homePowCountriesVisible && engineMode.isPow,
+                selectedCode = powSettings.exitCountryCode,
+                connected = state == ConnectionState.CONNECTED,
+                onSelect = { code ->
+                    val next = powEngineStore.snapshot().copy(exitCountryCode = code)
+                    val changed = next.exitCountryCode != powSettings.exitCountryCode
+                    if (changed) {
+                        powEngineStore.save(next)
+                        if (
+                            state == ConnectionState.CONNECTED ||
+                            state == ConnectionState.CONNECTING
+                        ) {
+                            VpnController.applyPowExit(context)
+                        }
+                    }
+                    homePowCountriesVisible = false
+                },
+                onManage = {
+                    homePowCountriesVisible = false
+                    selectedDestination = DrawerDestination.CONFIGS
+                },
+                onDismissRequest = { homePowCountriesVisible = false },
             )
             if (updateDialogVisible) {
                 AppUpdateDialog(
@@ -629,14 +677,14 @@ private fun HomeScreenContent(
         delay(520)
         guideReady = true
     }
-    LaunchedEffect(engineMode.isTor) {
-        if (engineMode.isTor && !engineSeen) {
+    LaunchedEffect(engineMode.isTor, engineMode.isPow) {
+        if ((engineMode.isTor || engineMode.isPow) && !engineSeen) {
             guideStore.markEngineSeen()
             engineSeen = true
         }
     }
     val guideStep = if (guideReady) {
-        HomeGuide.step(engineSeen, countrySeen, engineMode.isTor, drawerOpen)
+        HomeGuide.step(engineSeen, countrySeen, engineMode.isTor || engineMode.isPow, drawerOpen)
     } else {
         null
     }
@@ -833,7 +881,7 @@ private fun HomeScreenContent(
                     val next = HomeGuide.step(
                         engineSeen = nextEngineSeen,
                         countrySeen = nextCountrySeen,
-                        torMode = engineMode.isTor,
+                        torMode = engineMode.isTor || engineMode.isPow,
                         drawerOpen = false,
                     )
                     if (next == null && homeFocus != null) {
@@ -862,20 +910,28 @@ private fun SelectedProfileRow(
     val engineMode = rememberDisplayedEngineMode()
     val torStore = remember(context) { TorEngineStore.get(context) }
     val torSettings by torStore.settings.collectAsStateWithLifecycle()
+    val powStore = remember(context) { PowEngineStore.get(context) }
+    val powSettings by powStore.settings.collectAsStateWithLifecycle()
     val isPersian = LocalHomePersian.current
-    val selectedLabel = if (engineMode.isTor) {
-        if (torSettings.exitCountryCode.isEmpty()) {
+    val nameLocale = if (isPersian) Locale("fa") else Locale.ENGLISH
+    val selectedLabel = when {
+        engineMode.isTor -> if (torSettings.exitCountryCode.isEmpty()) {
             homeText("Automatic", "خودکار")
         } else {
-            TorExitCountry.displayName(
-                torSettings.exitCountryCode,
-                if (isPersian) Locale("fa") else Locale.ENGLISH,
-            )
+            TorExitCountry.displayName(torSettings.exitCountryCode, nameLocale)
         }
-    } else {
-        profile.name
+        engineMode.isPow -> if (powSettings.exitCountryCode.isEmpty()) {
+            homeText("Automatic", "خودکار")
+        } else {
+            PowRegions.name(powSettings.exitCountryCode, nameLocale)
+        }
+        else -> profile.name
     }
-    val selectionKey = if (engineMode.isTor) "tor:${torSettings.exitCountryCode}" else profile.id
+    val selectionKey = when {
+        engineMode.isTor -> "tor:${torSettings.exitCountryCode}"
+        engineMode.isPow -> "pow:${powSettings.exitCountryCode}"
+        else -> profile.id
+    }
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val guideSession = LocalHomeGuideSession.current

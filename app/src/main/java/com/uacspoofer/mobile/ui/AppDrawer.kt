@@ -83,8 +83,9 @@ internal enum class DrawerDestination {
     LIVE_LOGS,
     APP_BYPASS,
     SETTINGS,
-    ENGINE_MODE,
     ADVANCED_SETTINGS,
+    POW_SETTINGS,
+    TOR_SETTINGS,
     SUPPORT,
 }
 
@@ -106,13 +107,16 @@ private val DrawerDivider = Color(0x263E5874)
 
 internal fun DrawerDestination.visibleFor(mode: EngineMode): Boolean = when (this) {
     DrawerDestination.SNI_MAKER,
-    DrawerDestination.ROUTE_SPEED_TEST -> mode.isXray
+    DrawerDestination.ROUTE_SPEED_TEST,
+    DrawerDestination.ADVANCED_SETTINGS -> mode.isXray
+    DrawerDestination.POW_SETTINGS -> mode.isPow
+    DrawerDestination.TOR_SETTINGS -> mode.isTor
     else -> true
 }
 
 private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
     add(DrawerItem(DrawerDestination.HOME, "Home", Icons.Outlined.Home))
-    if (mode.isTor) {
+    if (mode.isTor || mode.isPow) {
         add(DrawerItem(DrawerDestination.CONFIGS, "Select country", Icons.Outlined.Public))
     } else {
         add(DrawerItem(DrawerDestination.CONFIGS, "Configs", Icons.Outlined.Description))
@@ -240,7 +244,7 @@ internal fun AppDrawer(
                 .padding(horizontal = 17.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                DrawerHeader(compact = compact, torMenu = engineMode.isTor)
+                DrawerHeader(compact = compact, engineMode = engineMode)
             HorizontalDivider(color = DrawerDivider, thickness = 1.dp)
             Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
 
@@ -249,7 +253,7 @@ internal fun AppDrawer(
                     item = item,
                     selected = item.destination == selectedDestination,
                     compact = compact,
-                    torMenu = engineMode.isTor,
+                    engineMode = engineMode,
                     onClick = { onDestinationSelected(item.destination) },
                     enabled = drawerOpen,
                     modifier = Modifier
@@ -301,7 +305,7 @@ internal fun AppDrawer(
 }
 
 @Composable
-private fun DrawerHeader(compact: Boolean, torMenu: Boolean) {
+private fun DrawerHeader(compact: Boolean, engineMode: EngineMode) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -319,7 +323,11 @@ private fun DrawerHeader(compact: Boolean, torMenu: Boolean) {
         )
         Spacer(Modifier.height(if (compact) 4.dp else 9.dp))
         Text(
-            text = if (torMenu) "UAC TOR BRIDGE" else "UAC SNI Spoofer",
+            text = when {
+                engineMode.isTor -> "UAC TOR BRIDGE"
+                engineMode.isPow -> "UAC PoW"
+                else -> "UAC SNI Spoofer"
+            },
             color = DrawerText,
             fontSize = if (compact) 16.sp else 19.sp,
             fontWeight = FontWeight.SemiBold,
@@ -344,7 +352,7 @@ private fun DrawerNavItem(
     item: DrawerItem,
     selected: Boolean,
     compact: Boolean,
-    torMenu: Boolean,
+    engineMode: EngineMode,
     onClick: () -> Unit,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
@@ -403,14 +411,15 @@ private fun DrawerNavItem(
                     item.label,
                     when (item.destination) {
                         DrawerDestination.HOME -> "خانه"
-                        DrawerDestination.CONFIGS -> if (torMenu) "انتخاب کشور" else "کانفیگ‌ها"
+                        DrawerDestination.CONFIGS -> if (engineMode.isTor || engineMode.isPow) "انتخاب کشور" else "کانفیگ‌ها"
                         DrawerDestination.SNI_MAKER -> "ساخت کانفیگ"
                         DrawerDestination.ROUTE_SPEED_TEST -> "تست سرعت مسیر"
                         DrawerDestination.LIVE_LOGS -> "لاگ‌ها"
                         DrawerDestination.APP_BYPASS -> "عبور انتخابی برنامه‌ها"
                         DrawerDestination.SETTINGS -> "تنظیمات"
-                        DrawerDestination.ENGINE_MODE -> "موتور اتصال"
                         DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات پیشرفته"
+                        DrawerDestination.POW_SETTINGS -> "UAC PoW"
+                        DrawerDestination.TOR_SETTINGS -> "Tor"
                         DrawerDestination.SUPPORT -> "پشتیبانی"
                     },
                 ),

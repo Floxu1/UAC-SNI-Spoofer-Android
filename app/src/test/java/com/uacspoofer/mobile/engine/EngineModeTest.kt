@@ -16,14 +16,21 @@ class EngineModeTest {
         assertEquals(EngineMode.XRAY_CF, EngineMode.fromStored("xray_cf"))
         assertEquals(EngineMode.TOR_WEBTUNNEL, EngineMode.fromStored("tor_webtunnel"))
         assertEquals(EngineMode.TOR_WEBTUNNEL, EngineMode.fromStored("TOR_WEBTUNNEL"))
+        assertEquals(EngineMode.UAC_POW, EngineMode.fromStored("uac_pow"))
+        assertEquals(EngineMode.UAC_POW, EngineMode.fromStored("UAC_POW"))
     }
 
     @Test
     fun engineFlagsAreExclusive() {
         assertTrue(EngineMode.XRAY_CF.isXray)
         assertFalse(EngineMode.XRAY_CF.isTor)
+        assertFalse(EngineMode.XRAY_CF.isPow)
         assertTrue(EngineMode.TOR_WEBTUNNEL.isTor)
         assertFalse(EngineMode.TOR_WEBTUNNEL.isXray)
+        assertFalse(EngineMode.TOR_WEBTUNNEL.isPow)
+        assertTrue(EngineMode.UAC_POW.isPow)
+        assertFalse(EngineMode.UAC_POW.isXray)
+        assertFalse(EngineMode.UAC_POW.isTor)
     }
 
     @Test
@@ -36,9 +43,10 @@ class EngineModeTest {
     }
 
     @Test
-    fun toggledSwapsXrayAndTor() {
+    fun toggledCyclesXrayTorAndPow() {
         assertEquals(EngineMode.TOR_WEBTUNNEL, EngineMode.XRAY_CF.toggled())
-        assertEquals(EngineMode.XRAY_CF, EngineMode.TOR_WEBTUNNEL.toggled())
+        assertEquals(EngineMode.UAC_POW, EngineMode.TOR_WEBTUNNEL.toggled())
+        assertEquals(EngineMode.XRAY_CF, EngineMode.UAC_POW.toggled())
     }
 
     @Test
@@ -52,5 +60,9 @@ class EngineModeTest {
             ExitIpInfoRepository.lookupId("builtin:mci", torEngine = true, "DE"),
         )
         assertEquals("builtin:mci", ExitIpInfoRepository.lookupId("builtin:mci", torEngine = false))
+        assertEquals(
+            "${ExitIpInfoRepository.POW_LOOKUP_ID}:auto",
+            ExitIpInfoRepository.lookupId("builtin:mci", torEngine = false, powEngine = true),
+        )
     }
 }

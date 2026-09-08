@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogLevel
@@ -77,11 +78,22 @@ internal fun ConnectionAwareFeatureCard(
     val engineMode = rememberDisplayedEngineMode()
     val torStore = remember(context) { TorEngineStore.get(context) }
     val torSettings by torStore.settings.collectAsStateWithLifecycle()
+    val powStore = remember(context) { PowEngineStore.get(context) }
+    val powSettings by powStore.settings.collectAsStateWithLifecycle()
     val metrics by ConnectionMetricsStore.metrics.collectAsStateWithLifecycle()
     val entries by AppLogRepository.entries.collectAsStateWithLifecycle()
     val exitInfoRepository = remember(context) { ExitIpInfoRepository.get(context) }
     val rawExitInfoState by exitInfoRepository.state.collectAsStateWithLifecycle()
-    val lookupId = ExitIpInfoRepository.lookupId(profile.id, engineMode.isTor, torSettings.exitCountryCode)
+    val lookupId = ExitIpInfoRepository.lookupId(
+        profile.id,
+        torEngine = engineMode.isTor,
+        exitCountryCode = when {
+            engineMode.isTor -> torSettings.exitCountryCode
+            engineMode.isPow -> powSettings.exitCountryCode
+            else -> ""
+        },
+        powEngine = engineMode.isPow,
+    )
     val exitInfoState = if (rawExitInfoState.profileId == lookupId) {
         rawExitInfoState
     } else {
@@ -93,15 +105,15 @@ internal fun ConnectionAwareFeatureCard(
             ?.takeIf { it.isKnown }
     }
     val displayedCountry = resolvedExitCountry
-        ?: if (engineMode.isTor) CountryMetadata.UNKNOWN else profile.country
+        ?: if (engineMode.isTor || engineMode.isPow) CountryMetadata.UNKNOWN else profile.country
     val errorCount = remember(entries) { entries.count { it.level == LogLevel.ERROR } }
     val scope = rememberCoroutineScope()
     var activeDialog by remember { mutableStateOf<HomeMetricDialog?>(null) }
 
     LaunchedEffect(state, lookupId) {
         if (state == ConnectionState.CONNECTED) {
-            if (engineMode.isTor) delay(8_000)
-            exitInfoRepository.refresh(profile.id, force = engineMode.isTor)
+            if (engineMode.isTor || engineMode.isPow) delay(8_000)
+            exitInfoRepository.refresh(profile.id, force = engineMode.isTor || engineMode.isPow)
         } else {
             activeDialog = null
         }
@@ -146,6 +158,7 @@ internal fun ConnectionAwareFeatureCard(
         visible = activeDialog == HomeMetricDialog.PING,
         metrics = metrics,
         throughTor = engineMode.isTor,
+        throughPow = engineMode.isPow,
         onRefresh = {
             context.startService(
                 Intent(context, UacVpnService::class.java)
@@ -158,6 +171,7 @@ internal fun ConnectionAwareFeatureCard(
         visible = activeDialog == HomeMetricDialog.COUNTRY,
         state = exitInfoState,
         throughTor = engineMode.isTor,
+        throughPow = engineMode.isPow,
         onRefresh = { scope.launch { exitInfoRepository.refresh(profile.id, force = true) } },
         onDismissRequest = { activeDialog = null },
     )

@@ -75,6 +75,7 @@ import com.uacspoofer.mobile.engine.EngineModeChangeResult
 import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.canChangeEngineMode
 import com.uacspoofer.mobile.engine.tor.TorStatusStore
+import com.uacspoofer.mobile.engine.pow.PowStatusStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.ui.theme.UacColors
@@ -182,10 +183,10 @@ internal fun HomeHeader(
                         },
                     )
                     .semantics {
-                        contentDescription = if (engineMode.isTor) {
-                            "Switch to UAC SNI Spoofer"
-                        } else {
-                            "Switch to UAC TOR BRIDGE"
+                        contentDescription = when (engineMode.next()) {
+                            EngineMode.TOR_WEBTUNNEL -> "Switch to UAC TOR BRIDGE"
+                            EngineMode.UAC_POW -> "Switch to UAC PoW"
+                            EngineMode.XRAY_CF -> "Switch to UAC SNI Spoofer"
                         }
                     },
                 contentAlignment = Alignment.Center,
@@ -214,7 +215,11 @@ internal fun AppTitle(compact: Boolean, accent: Color) {
     val engineMode = rememberDisplayedEngineMode()
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
-            text = if (engineMode.isTor) "UAC TOR BRIDGE" else "UAC SNI SPOOFER",
+            text = when {
+                engineMode.isTor -> "UAC TOR BRIDGE"
+                engineMode.isPow -> "UAC PoW"
+                else -> "UAC SNI SPOOFER"
+            },
             fontSize = if (compact) 20.sp else 23.sp,
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = 0.55.sp,
@@ -505,6 +510,7 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val advancedStore = remember(context) { AdvancedSettingsStore(context) }
     val advanced by advancedStore.state.collectAsStateWithLifecycle()
     val torStatus by TorStatusStore.status.collectAsStateWithLifecycle()
+    val powStatus by PowStatusStore.status.collectAsStateWithLifecycle()
     val routeProgress by ConnectionStateStore.routeProgress.collectAsStateWithLifecycle()
     var showRouteProgress by remember(state) { mutableStateOf(false) }
     LaunchedEffect(state) {
@@ -523,8 +529,8 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
         ConnectionState.DISCONNECTING -> homeText("Disconnecting...", "در حال قطع...")
         ConnectionState.ERROR -> homeText("Connection failed", "اتصال برقرار نشد")
     }
-    val connectingHint = if (engineMode.isTor) {
-        homeText(
+    val connectingHint = when {
+        engineMode.isTor -> homeText(
             TorStatusCopy.connectingHint(
                 persian = false,
                 percent = torStatus.bootstrapPercent,
@@ -540,8 +546,23 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
                 showRouteProgress = showRouteProgress,
             ),
         )
-    } else {
-        when {
+        engineMode.isPow -> homeText(
+            PowStatusCopy.connectingHint(
+                persian = false,
+                percent = powStatus.progressPercent,
+                phase = powStatus.phase,
+                detail = powStatus.detail,
+                showRouteProgress = showRouteProgress,
+            ),
+            PowStatusCopy.connectingHint(
+                persian = true,
+                percent = powStatus.progressPercent,
+                phase = powStatus.phase,
+                detail = powStatus.detail,
+                showRouteProgress = showRouteProgress,
+            ),
+        )
+        else -> when {
             showRouteProgress && routeProgress.isActive -> homeText(
                 "Connecting with route ${routeProgress.current}/${routeProgress.total}",
                 "اتصال با مسیر ${routeProgress.current}/${routeProgress.total}",
@@ -552,23 +573,30 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val hint = when (state) {
         ConnectionState.DISCONNECTED -> homeText("Tap the button to connect", "برای وصل شدن، دکمه رو بزن")
         ConnectionState.CONNECTING -> connectingHint
-        ConnectionState.CONNECTED -> if (engineMode.isTor) {
-            if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
+        ConnectionState.CONNECTED -> when {
+            engineMode.isTor -> if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
                 homeText("Local Tor SOCKS only · no device VPN", "فقط SOCKS محلی Tor · بدون VPN دستگاه")
             } else {
                 homeText("Device VPN is routing through Tor", "VPN دستگاه از Tor می‌گذره")
             }
-        } else {
-            homeText("Your connection is secure", "اتصال شما امنه")
+            engineMode.isPow -> if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
+                homeText("Local UAC PoW SOCKS only · no device VPN", "فقط SOCKS محلی UAC PoW · بدون VPN دستگاه")
+            } else {
+                homeText("Device VPN is routing through UAC PoW", "VPN دستگاه از UAC PoW می‌گذره")
+            }
+            else -> homeText("Your connection is secure", "اتصال شما امنه")
         }
         ConnectionState.DISCONNECTING -> homeText("Closing the secure tunnel", "در حال بستن اتصال امن")
-        ConnectionState.ERROR -> if (engineMode.isTor && torStatus.detail.isNotBlank()) {
-            homeText(
+        ConnectionState.ERROR -> when {
+            engineMode.isTor && torStatus.detail.isNotBlank() -> homeText(
                 torStatus.detail,
                 TorStatusCopy.errorHint(true, torStatus.detail) ?: torStatus.detail,
             )
-        } else {
-            homeText("Tap retry to try again", "دوباره امتحان کن")
+            engineMode.isPow && powStatus.detail.isNotBlank() -> homeText(
+                powStatus.detail,
+                PowStatusCopy.errorHint(true, powStatus.detail) ?: powStatus.detail,
+            )
+            else -> homeText("Tap retry to try again", "دوباره امتحان کن")
         }
     }
 

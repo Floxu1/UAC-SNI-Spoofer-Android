@@ -72,7 +72,7 @@ internal fun ConnectRescueOverlay(modifier: Modifier = Modifier) {
     val engineMode by engineStore.mode.collectAsStateWithLifecycle()
     val snapshot by ConnectRescueStore.snapshot.collectAsStateWithLifecycle()
     LaunchedEffect(engineMode) {
-        if (engineMode.isTor) ConnectRescueStore.hide()
+        if (!engineMode.isXray) ConnectRescueStore.hide()
     }
     LaunchedEffect(snapshot.generation, snapshot.phase) {
         if (snapshot.phase == ConnectRescuePhase.SUCCEEDED || snapshot.phase == ConnectRescuePhase.FAILED) {

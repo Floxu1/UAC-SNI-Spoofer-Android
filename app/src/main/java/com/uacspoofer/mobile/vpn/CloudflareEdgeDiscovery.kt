@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Network
 import android.os.Build
 import com.uacspoofer.mobile.BuildConfig
+import com.uacspoofer.mobile.logging.AppLogRepository
+import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
 import com.uacspoofer.mobile.profiles.LocalForwardProfile
@@ -18,15 +20,21 @@ import java.net.Socket
 import java.net.URL
 import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SNIHostName
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -464,7 +472,8 @@ internal class CloudflareEdgeDiscovery(
         tls: CloudflareTlsProbeSpec?,
         onProgress: suspend (CloudflareDiscoveryProgress) -> Unit,
     ): List<CloudflareEdgeCandidate> = coroutineScope {
-        val slots = Semaphore(preflightWorkers.coerceIn(1, 8))
+        val workers = preflightWorkers.coerceIn(1, MAX_PREFLIGHT_WORKERS)
+        val slots = Semaphore(workers)
         val completed = AtomicInteger(0)
         val healthy = AtomicInteger(0)
         onProgress(
@@ -474,8 +483,9 @@ internal class CloudflareEdgeDiscovery(
                 detail = "Starting TCP/TLS edge preflight",
             ),
         )
-        candidates.map { candidate ->
+        candidates.mapIndexed { index, candidate ->
             async {
+                delay((index % workers) * PREFLIGHT_STAGGER_MS)
                 slots.withPermit {
                     val result = if (candidate.ip == null) {
                         CloudflareEdgePreflightResult.unresolved("hostname could not be resolved on the selected network")
@@ -509,7 +519,9 @@ internal class CloudflareEdgeDiscovery(
 
     companion object {
         const val MAX_CANDIDATES = 60
-        const val PREFLIGHT_WORKERS = 4
+        const val PREFLIGHT_WORKERS = 28
+        private const val MAX_PREFLIGHT_WORKERS = 48
+        private const val PREFLIGHT_STAGGER_MS = 15L
         private const val MAX_HISTORY_EDGES = 16
         private const val MAX_DETAIL = 240
         private const val DISCOVERY_SCHEMA = "cf-edge-discovery-v1"
@@ -867,6 +879,8 @@ private class AndroidCloudflareRangeSource(
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) : CloudflareRangeSource {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val refreshInFlight = AtomicBoolean(false)
 
     override suspend fun load(network: Network?): CloudflareRangeSnapshot {
         val now = nowMs()
@@ -874,18 +888,40 @@ private class AndroidCloudflareRangeSource(
         val cachedAt = prefs.getLong(KEY_FETCHED_AT, 0L)
         val cached = cachedRaw?.let { parseCloudflareRangeResponse(it, cachedAt, "cache") }
         if (cached != null && now - cachedAt in 0 until CACHE_TTL_MS) return cached
-
-        val fetched = withTimeoutOrNull(FETCH_TOTAL_TIMEOUT_MS) {
-            runInterruptible(Dispatchers.IO) { fetch(network, now) }
-        }
-        if (fetched != null) {
-            prefs.edit()
-                .putString(KEY_JSON, fetched.first)
-                .putLong(KEY_FETCHED_AT, now)
-                .apply()
-            return fetched.second
-        }
+        scheduleRefresh(network)
         return cached ?: bundledCloudflareRanges(now)
+    }
+
+    private fun scheduleRefresh(network: Network?) {
+        if (!refreshInFlight.compareAndSet(false, true)) return
+        refreshScope.launch {
+            try {
+                val fetchedAt = nowMs()
+                val fetched = withTimeoutOrNull(FETCH_TOTAL_TIMEOUT_MS) {
+                    runInterruptible(Dispatchers.IO) { fetch(network, fetchedAt) }
+                }
+                if (fetched != null) {
+                    prefs.edit()
+                        .putString(KEY_JSON, fetched.first)
+                        .putLong(KEY_FETCHED_AT, fetchedAt)
+                        .apply()
+                    AppLogRepository.info(
+                        LogSource.ADAPTIVE,
+                        "Cloudflare range list refreshed in the background etag=${fetched.second.etag}",
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                AppLogRepository.warning(
+                    LogSource.ADAPTIVE,
+                    "Cloudflare range refresh failed; keeping the bundled list",
+                    error,
+                )
+            } finally {
+                refreshInFlight.set(false)
+            }
+        }
     }
 
     private fun fetch(network: Network?, fetchedAtMs: Long): Pair<String, CloudflareRangeSnapshot>? {

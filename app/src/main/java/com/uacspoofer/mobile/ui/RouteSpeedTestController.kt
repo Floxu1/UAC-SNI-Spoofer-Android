@@ -84,9 +84,9 @@ internal enum class RouteTournamentStage(
     val workers: Int,
 ) {
     QUALIFIER("Qualifying", "Fast batched HTTP preflight; isolated verification follows", Int.MAX_VALUE, 1, 3),
-    VERIFICATION("Resolver verification", "96 Edge, tuning and DNS families are checked in isolation", 96, 1, 1),
+    VERIFICATION("Resolver verification", "96 Edge, tuning and DNS families are checked in isolation", 96, 1, 6),
     MTU_VALIDATION("MTU validation", "Four real MTUs are opened for the best 24 route families", 96, 1, 1),
-    STABILITY("Stability", "24 diverse routes get repeated stability samples", 24, 2, 1),
+    STABILITY("Stability", "24 diverse routes get repeated stability samples", 24, 2, 3),
     STRESS("Stress test", "6 finalists face repeated cold-start tests", 6, 3, 1),
     CHAMPIONSHIP("ABBA final", "Champion and backup are compared A-B-B-A", 2, 2, 1),
     COMPLETE("Complete", "Champion and backup are ready", 0, 0, 0),
@@ -1281,14 +1281,22 @@ internal class RouteSpeedTestController private constructor(context: Context) {
     private fun expandMtuFamilies(source: List<RouteSpeedRow>, limit: Int): List<String> {
         if (source.isEmpty() || limit <= 0) return emptyList()
         val familyLimit = minOf(24, source.map { it.resolverFamilyKey() }.distinct().size)
+        val transportByFamily = source.associate { it.resolverFamilyKey() to it.mtuFamilyKey() }
         val familyWinners = diverseShortlist(source, familyLimit)
             .mapNotNull { id -> rows.firstOrNull { it.candidateId == id } }
             .map { it.resolverFamilyKey() }
-            .toSet()
         val rankedFamilies = rankedRows(source)
             .map { it.resolverFamilyKey() }
             .distinct()
-        val selectedFamilies = (familyWinners + rankedFamilies).distinct().take(familyLimit).toSet()
+        val seenTransport = HashSet<String>()
+        val selectedFamilies = (familyWinners + rankedFamilies)
+            .distinct()
+            .filter { family ->
+                val transport = transportByFamily[family] ?: return@filter false
+                seenTransport.add(transport)
+            }
+            .take(familyLimit)
+            .toSet()
         return rows
             .filter { it.resolverFamilyKey() in selectedFamilies }
             .sortedWith(
@@ -1303,6 +1311,8 @@ internal class RouteSpeedTestController private constructor(context: Context) {
 
     private fun RouteSpeedRow.resolverFamilyKey(): String =
         "$edgeKey|$resolverKey|$fragmentKey"
+
+    private fun RouteSpeedRow.mtuFamilyKey(): String = "$edgeKey|$fragmentKey"
 
     private fun buildSchedule(
         prepared: RouteSpeedTestPlan,

@@ -12,7 +12,7 @@ class TorStatusCopyTest {
         val hint = TorStatusCopy.bootstrapHint(20, persian = true)
         val isolated = isolateUnwrappedLtrRuns(hint.replace("\u200C", "\u2060\u200C\u2060"))
         assertTrue(isolated.contains("راه‌اندازی") || isolated.contains("راه\u2060\u200C\u2060اندازی"))
-        assertTrue(isolated.contains("\u2066Tor 20%\u2069"))
+        assertTrue(isolated.contains("\u2068Tor 20%\u2069"))
         assertFalse(isolated.contains("٪"))
     }
 

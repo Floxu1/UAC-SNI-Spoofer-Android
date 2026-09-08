@@ -79,6 +79,8 @@ data class SniMakerTestSession(
     val settings: com.uacspoofer.mobile.settings.AdvancedSettingsData,
     val network: NetworkFingerprint,
     val initialPreferredCandidateId: String?,
+    /** Screened Cloudflare edges every config in the list is measured over. */
+    val cleanEdges: List<MciEdge> = emptyList(),
 )
 
 data class RouteSpeedTestPlan(
@@ -199,18 +201,34 @@ class ProfileLatencyTester(context: Context) {
             parallelProbes = false,
         ).latencyMs
 
+    /**
+     * Runs the connect-rescue clean-IP screening once before the list is measured.
+     *
+     * Without it every config in the list is probed over whatever default edges the planner
+     * falls back to, so a config can look dead when only the edge was unreachable. Screening
+     * first means each config is judged over edges already proven to work on this network,
+     * which makes the list faster and the verdicts trustworthy. The screening is best effort:
+     * if it yields nothing the planner keeps its previous behaviour exactly.
+     */
     suspend fun prepareSniMakerSession(): SniMakerTestSession = withContext(Dispatchers.IO) {
         val settings = settingsStore.snapshot().validated()
-        val network = fingerprintResolver.captureAdaptive()
+        val networkContext = fingerprintResolver.captureAdaptiveContext()
+        val network = networkContext.fingerprint
         val selectedProfile = profileStore.selectedProfile()
-        val preferred = adaptivePlanner.candidates(settings, network, selectedProfile)
+        val signature = adaptivePlanner.signature(settings, selectedProfile)
+        val cleanEdges = runCatching {
+            discoverConnectEdgePool(settings, selectedProfile, networkContext, signature)
+        }.getOrDefault(emptyList())
+        val pool = cleanEdges.takeIf { it.isNotEmpty() }
+        val preferred = adaptivePlanner.candidates(settings, network, selectedProfile, poolOverride = pool)
             .firstOrNull(AdaptiveCandidate::learned)
             ?.id
         AppLogRepository.info(
             LogSource.APP,
-            "SNI Maker adaptive session network=${network.summary()} preferred=${preferred ?: "none"}",
+            "SNI Maker adaptive session network=${network.summary()} preferred=${preferred ?: "none"} " +
+                "cleanEdges=${cleanEdges.joinToString { "${it.address}:${it.port}" }.ifBlank { "planner defaults" }}",
         )
-        SniMakerTestSession(settings, network, preferred)
+        SniMakerTestSession(settings, network, preferred, cleanEdges)
     }
 
     suspend fun prepareRouteSpeedTest(
@@ -458,40 +476,44 @@ class ProfileLatencyTester(context: Context) {
             total = eligible.size,
             currentTarget = eligible.firstOrNull()?.let { "${it.address}:${it.port}" }.orEmpty(),
         )
-        val screenedCompleted = AtomicInteger(0)
-        val screenedHealthy = AtomicInteger(0)
-        val isolatedByEndpoint = coroutineScope {
-            val slots = Semaphore(EDGE_XRAY_VALIDATION_WORKERS)
-            eligible.mapIndexed { index, edge ->
-                async {
-                    slots.withPermit {
-                        val endpoint = "${edge.address}:${edge.port}"
-                        val candidate = AdaptiveCandidate(
-                            id = "connect-rescue-$index",
-                            label = "Connect rescue ${edge.address}",
-                            edge = edge.toMciEdge("connect-rescue-${index + 1}", validated.primaryMaxSplit),
-                            settings = validated.copy(finalmaskDelayMs = 20).validated(),
-                            runtimeOptions = customRuntime,
-                        )
-                        val result = measureRouteSpeedCandidate(
-                            plan = provisionalPlan,
-                            candidate = candidate,
-                            transferConfig = null,
-                        )
-                        val finished = screenedCompleted.incrementAndGet()
-                        if (result.accepted) screenedHealthy.incrementAndGet()
-                        publish(
-                            phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SCREENING,
-                            completed = finished,
-                            total = eligible.size,
-                            healthy = screenedHealthy.get(),
-                            currentTarget = endpoint,
-                        )
-                        endpoint to result
-                    }
-                }
-            }.awaitAll().toMap()
+        val screeningCandidates = eligible.mapIndexed { index, edge ->
+            AdaptiveCandidate(
+                id = "connect-rescue-$index",
+                label = "Connect rescue ${edge.address}",
+                edge = edge.toMciEdge("connect-rescue-${index + 1}", validated.primaryMaxSplit),
+                settings = validated.copy(finalmaskDelayMs = 20).validated(),
+                runtimeOptions = customRuntime,
+            )
         }
+        val endpointByCandidateId = screeningCandidates
+            .mapIndexed { index, candidate ->
+                candidate.id to "${eligible[index].address}:${eligible[index].port}"
+            }
+            .toMap()
+        val screenedCompleted = AtomicInteger(0)
+        val screenedResults = measureScreeningBatchResilient(
+            plan = provisionalPlan,
+            candidates = screeningCandidates,
+            probeParallelism = screeningCandidates.size,
+        ) { candidateId, stage ->
+            if (stage == RouteSpeedProbeStage.PROBING) {
+                publish(
+                    phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SCREENING,
+                    completed = screenedCompleted.incrementAndGet().coerceAtMost(eligible.size),
+                    total = eligible.size,
+                    currentTarget = endpointByCandidateId[candidateId].orEmpty(),
+                )
+            }
+        }
+        val isolatedByEndpoint = screenedResults
+            .mapNotNull { result -> endpointByCandidateId[result.candidate.id]?.let { it to result } }
+            .toMap()
+        publish(
+            phase = com.uacspoofer.mobile.vpn.ConnectRescuePhase.SCREENING,
+            completed = eligible.size,
+            total = eligible.size,
+            healthy = screenedResults.count(RouteSpeedProbeResult::accepted),
+        )
         val xrayAccepted = eligible.mapNotNull { edge ->
             val result = isolatedByEndpoint["${edge.address}:${edge.port}"]
                 ?.takeIf(RouteSpeedProbeResult::accepted)
@@ -1015,8 +1037,9 @@ class ProfileLatencyTester(context: Context) {
         }
 
         val firstPass = LinkedHashMap<String, RouteSpeedProbeResult>()
+        val runtimeKeys = LinkedHashSet<String>()
         for (batch in representatives.chunked(ROUTE_SCREEN_BATCH_SIZE)) {
-            val batchKeys = batch.mapTo(LinkedHashSet()) { routeScreeningKey(it) }
+            batch.forEach { runtimeKeys += routeScreeningKey(it) }
             runBatch(batch).forEach { result ->
                 val key = routeScreeningKey(result.candidate)
                 firstPass[key] = result
@@ -1024,17 +1047,20 @@ class ProfileLatencyTester(context: Context) {
                     emitSharedGroup(result)
                 }
             }
+        }
 
-            val failed = batch.filter { candidate ->
-                val result = firstPass[routeScreeningKey(candidate)]
-                result?.accepted != true && result?.detail?.startsWith(ISOLATED_QUALIFIER_FALLBACK) != true
-            }
-            if (failed.isNotEmpty()) {
-                AppLogRepository.info(
-                    LogSource.APP,
-                    "Route Speed fast qualifier retrying ${failed.size} runtime failures in the current batch",
-                )
-                runBatch(failed).forEach { result ->
+        val retryTargets = representatives.filter { candidate ->
+            val result = firstPass[routeScreeningKey(candidate)]
+            result?.accepted != true && result?.detail?.startsWith(ISOLATED_QUALIFIER_FALLBACK) != true
+        }
+        if (retryTargets.isNotEmpty()) {
+            AppLogRepository.info(
+                LogSource.APP,
+                "Route Speed fast qualifier retrying ${retryTargets.size} runtime failures " +
+                    "in ${(retryTargets.size + ROUTE_SCREEN_BATCH_SIZE - 1) / ROUTE_SCREEN_BATCH_SIZE} consolidated batches",
+            )
+            for (batch in retryTargets.chunked(ROUTE_SCREEN_BATCH_SIZE)) {
+                runBatch(batch).forEach { result ->
                     val key = routeScreeningKey(result.candidate)
                     val previous = firstPass[key]
                     if (result.accepted || previous == null || result.score > previous.score) {
@@ -1042,16 +1068,16 @@ class ProfileLatencyTester(context: Context) {
                     }
                 }
             }
+        }
 
-            batchKeys.forEach { key ->
-                val representative = checkNotNull(firstPass[key]) {
-                    "Missing qualifier result for runtime group $key"
-                }
-                if (representative.detail.startsWith(ISOLATED_QUALIFIER_FALLBACK)) {
-                    emitIsolatedFallbackGroup(representative)
-                } else {
-                    emitSharedGroup(representative)
-                }
+        runtimeKeys.forEach { key ->
+            val representative = checkNotNull(firstPass[key]) {
+                "Missing qualifier result for runtime group $key"
+            }
+            if (representative.detail.startsWith(ISOLATED_QUALIFIER_FALLBACK)) {
+                emitIsolatedFallbackGroup(representative)
+            } else {
+                emitSharedGroup(representative)
             }
         }
         candidates.associate { candidate ->
@@ -1064,10 +1090,11 @@ class ProfileLatencyTester(context: Context) {
     private suspend fun measureScreeningBatchResilient(
         plan: RouteSpeedTestPlan,
         candidates: List<AdaptiveCandidate>,
+        probeParallelism: Int = ROUTE_SCREEN_PARALLEL_PROBES,
         onStage: suspend (String, RouteSpeedProbeStage) -> Unit,
     ): List<RouteSpeedProbeResult> {
         return try {
-            measureScreeningBatch(plan, candidates, onStage)
+            measureScreeningBatch(plan, candidates, probeParallelism, onStage)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -1087,8 +1114,8 @@ class ProfileLatencyTester(context: Context) {
                 )
             } else {
                 val split = (candidates.size + 1) / 2
-                measureScreeningBatchResilient(plan, candidates.take(split), onStage) +
-                    measureScreeningBatchResilient(plan, candidates.drop(split), onStage)
+                measureScreeningBatchResilient(plan, candidates.take(split), probeParallelism, onStage) +
+                    measureScreeningBatchResilient(plan, candidates.drop(split), probeParallelism, onStage)
             }
         }
     }
@@ -1096,6 +1123,7 @@ class ProfileLatencyTester(context: Context) {
     private suspend fun measureScreeningBatch(
         plan: RouteSpeedTestPlan,
         candidates: List<AdaptiveCandidate>,
+        probeParallelism: Int = ROUTE_SCREEN_PARALLEL_PROBES,
         onStage: suspend (String, RouteSpeedProbeStage) -> Unit,
     ): List<RouteSpeedProbeResult> {
         require(candidates.isNotEmpty()) { "Screening batch is empty" }
@@ -1130,7 +1158,7 @@ class ProfileLatencyTester(context: Context) {
             core.startBatch(routes, plan.profile)
             probeCandidates.forEach { onStage(it.id, RouteSpeedProbeStage.PROBING) }
             return coroutineScope {
-                val probeSlots = Semaphore(ROUTE_SCREEN_PARALLEL_PROBES)
+                val probeSlots = Semaphore(probeParallelism.coerceIn(1, ROUTE_SCREEN_BATCH_SIZE))
                 probeCandidates.mapIndexed { index, candidate ->
                     async {
                         probeSlots.withPermit {
@@ -1288,7 +1316,12 @@ class ProfileLatencyTester(context: Context) {
         val startedAt = SystemClock.elapsedRealtime()
         val deadline = startedAt + totalTimeoutMs.coerceIn(MIN_MAKER_TIMEOUT_MS, MAX_MAKER_TIMEOUT_MS)
         val signature = adaptivePlanner.signature(session.settings, profile)
-        val planned = adaptivePlanner.candidates(session.settings, session.network, profile)
+        val planned = adaptivePlanner.candidates(
+            session.settings,
+            session.network,
+            profile,
+            poolOverride = session.cleanEdges.takeIf { it.isNotEmpty() },
+        )
         val candidates = planned.sortedBy { candidate ->
             when (candidate.id) {
                 AdaptiveCandidatePlanner.MCI_DIRECT_COMPAT_ID -> 0
@@ -1852,8 +1885,8 @@ class ProfileLatencyTester(context: Context) {
         private const val MAX_ROUTE_BUDGET_MS = 7_500L
         private const val SNI_MAKER_WARMUP_MS = 100L
         private const val ROUTE_SPEED_CANDIDATE_TIMEOUT_MS = 12_000L
-        private const val ROUTE_SCREEN_BATCH_SIZE = 16
-        private const val ROUTE_SCREEN_PARALLEL_PROBES = 4
+        private const val ROUTE_SCREEN_BATCH_SIZE = 25
+        private const val ROUTE_SCREEN_PARALLEL_PROBES = 16
         private const val EDGE_XRAY_VALIDATION_WORKERS = 2
         private const val CONNECT_RESCUE_SCREEN_LIMIT = 12
         private const val ISOLATED_QUALIFIER_FALLBACK = "isolated qualifier fallback:"

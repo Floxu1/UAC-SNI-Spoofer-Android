@@ -46,7 +46,7 @@ object MciConfig {
     const val FINALMASK_DELAY_MS = 0
     const val FINALMASK_MAX_SPLIT = 2
     const val XRAY_KEEPALIVE_IDLE_SECONDS = 11
-    const val XRAY_KEEPALIVE_INTERVAL_SECONDS = 1
+    const val XRAY_KEEPALIVE_INTERVAL_SECONDS = 15
 
     
     const val CONNECT_TIMEOUT_MS = 5_000

@@ -33,7 +33,9 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ChevronLeft
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.DashboardCustomize
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -46,6 +48,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.engine.EngineModeStore
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -62,11 +66,14 @@ import com.uacspoofer.mobile.vpn.UacQuickSettingsTileService
 internal fun SettingsScreen(
     onMenuClick: () -> Unit,
     onAdvancedSettingsClick: () -> Unit,
+    onPowSettingsClick: () -> Unit,
+    onTorSettingsClick: () -> Unit,
 ) {
     val context = LocalContext.current
     val isPersian = LocalHomePersian.current
-    val baseTextStyle = LocalTextStyle.current
-    val localizedTextStyle = homeLocalizedFont()?.let { baseTextStyle.copy(fontFamily = it) } ?: baseTextStyle
+    val engineStore = remember(context) { EngineModeStore.get(context) }
+    val engineMode by engineStore.mode.collectAsStateWithLifecycle()
+    val localizedTextStyle = homeLocalizedTextStyle()
     var tileNotice by remember { mutableStateOf<String?>(null) }
     val accent = UacColors.DisconnectedBlue
     val tileAddedMessage = homeText("Tile added successfully", "دکمه به پنل اضافه شد")
@@ -99,17 +106,47 @@ internal fun SettingsScreen(
                 )
             },
         ) {
-                item {
-                    SettingsNavigationCard(
-                        icon = Icons.Outlined.Tune,
-                        title = homeText("Advanced Settings", "تنظیمات پیشرفته"),
-                        subtitle = homeText(
-                            "Connection mode, DNS, TUN and transport controls",
-                            "حالت اتصال، DNS، TUN و تنظیمات انتقال",
-                        ),
-                        isPersian = isPersian,
-                        onClick = onAdvancedSettingsClick,
-                    )
+                if (engineMode.isPow) {
+                    item {
+                        SettingsNavigationCard(
+                            icon = Icons.Outlined.Hub,
+                            title = homeText("UAC PoW", "UAC PoW"),
+                            subtitle = homeText(
+                                "Outer hop and MASQUE",
+                                "لایه بیرونی و MASQUE",
+                            ),
+                            isPersian = isPersian,
+                            onClick = onPowSettingsClick,
+                        )
+                    }
+                }
+                if (engineMode.isTor) {
+                    item {
+                        SettingsNavigationCard(
+                            icon = Icons.Outlined.Shield,
+                            title = homeText("Tor", "Tor"),
+                            subtitle = homeText(
+                                "WebTunnel bridges and TLS hop",
+                                "بریج‌های WebTunnel و پرش TLS",
+                            ),
+                            isPersian = isPersian,
+                            onClick = onTorSettingsClick,
+                        )
+                    }
+                }
+                if (engineMode.isXray) {
+                    item {
+                        SettingsNavigationCard(
+                            icon = Icons.Outlined.Tune,
+                            title = homeText("Advanced Settings", "تنظیمات پیشرفته"),
+                            subtitle = homeText(
+                                "Connection mode, DNS, TUN and transport controls",
+                                "حالت اتصال، DNS، TUN و تنظیمات انتقال",
+                            ),
+                            isPersian = isPersian,
+                            onClick = onAdvancedSettingsClick,
+                        )
+                    }
                 }
                 item {
                     Column(

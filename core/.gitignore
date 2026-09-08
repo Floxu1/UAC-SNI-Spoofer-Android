@@ -1,0 +1,11 @@
+target/
+**/target/
+target-android/
+**/target-android/
+*.zip
+*.tar.gz
+.DS_Store
+.idea/
+.vscode/
+AGENTS.md
+**/AGENTS.md

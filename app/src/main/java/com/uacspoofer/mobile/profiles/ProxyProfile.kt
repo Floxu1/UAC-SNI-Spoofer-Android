@@ -32,6 +32,8 @@ data class ProxyProfile(
     val xhttpMode: String = "",
     val xhttpExtra: String = "",
     val packetEncoding: String = "",
+    /** TCP header obfuscation, `http` or blank. Only meaningful when [network] is `tcp`. */
+    val headerType: String = "",
     val country: CountryMetadata = CountryMetadata.UNKNOWN,
     val rawUri: String = "",
     val isBuiltIn: Boolean = false,
@@ -59,6 +61,7 @@ data class ProxyProfile(
                 xhttpMode = "",
                 xhttpExtra = "",
                 packetEncoding = "",
+                headerType = "",
             )
         } else {
             RuntimeProxyIdentity(
@@ -80,6 +83,7 @@ data class ProxyProfile(
                 xhttpMode = xhttpMode,
                 xhttpExtra = xhttpExtra,
                 packetEncoding = packetEncoding,
+                headerType = headerType,
             )
         }
 
@@ -149,7 +153,10 @@ data class RuntimeProxyIdentity(
     val xhttpMode: String = "",
     val xhttpExtra: String = "",
     val packetEncoding: String = "",
-)
+    val headerType: String = "",
+) {
+    val usesTls: Boolean get() = security == "tls"
+}
 
 data class ProfileLibrary(
     val customProfiles: List<ProxyProfile>,

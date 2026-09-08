@@ -34,7 +34,29 @@ x86_64      494154A10429A43494D14AC1A78F44870206121D6E8AFBEE6ED94CF3CF68999A
 
 ## hev-socks5-tunnel
 
-- Purpose: lightweight TUN-to-SOCKS pipe for Tor engine device tunnel
+- Purpose: lightweight TUN-to-SOCKS pipe for Tor and UAC PoW device tunnels
 - License: MIT
 - Bundled license: `third_party/hev-socks5-tunnel-LICENSE.txt`
 - Upstream: https://github.com/heiher/hev-socks5-tunnel
+
+## UAC PoW · WARP core (vendored)
+
+- Purpose: outer WARP / MASQUE / WireGuard hop for the UAC PoW engine
+- License: GNU Affero GPL v3
+- Bundled license and trademark notice: `core/aether/LICENSE` and `core/aether/TRADEMARK.md`
+- Location: `core/aether/` (plus `core/quiche/` for QUIC)
+
+## Cloudflare quiche
+
+- Purpose: QUIC / HTTP/3 used by the WARP MASQUE path
+- License: BSD-2-Clause
+- Location: `core/quiche/`
+- Upstream: https://github.com/cloudflare/quiche
+
+## Psiphon tunnel-core
+
+- Purpose: inner circumvention hop for UAC PoW (`psiphontunnel-2.0.39.aar`)
+- License: GNU GPL v3
+- Bundled AAR: `app/libs/psiphontunnel-2.0.39.aar`
+- Upstream: https://github.com/Psiphon-Labs/psiphon-tunnel-core
+

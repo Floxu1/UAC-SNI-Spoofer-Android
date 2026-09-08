@@ -12,7 +12,58 @@ object ProfileUriParser {
         "type", "network", "security", "sni", "servername", "host", "path", "alpn", "fp", "fingerprint",
         "flow", "encryption", "servicename", "authority", "headertype", "mode", "extra", "packetencoding",
         "allowinsecure", "insecure", "country", "countrycode", "cc", "location",
+        // Accepted and then dropped: the engine picks these itself, see [ENGINE_OWNED_KEYS].
+        "cs", "ciphersuites", "cipher", "fm", "fragment", "spx",
     )
+
+    /**
+     * Keys some subscriptions carry that this engine decides on its own.
+     *
+     * `cs`/`fm` describe a fixed cipher list and a fixed fragment layout. Both are overridden
+     * downstream anyway: the uTLS fingerprint dictates the cipher order, and fragmentation is
+     * chosen per operator by the adaptive tester. Rejecting the URI over them would lose an
+     * otherwise valid config, so they are parsed, ignored, and reported once.
+     */
+    private val ENGINE_OWNED_KEYS = setOf("cs", "ciphersuites", "cipher", "fm", "fragment", "spx")
+
+    /** uTLS profiles Xray-core accepts. Anything else, `unsafe` included, falls back to Chrome. */
+    private val KNOWN_FINGERPRINTS = setOf(
+        "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized",
+    )
+
+    private fun normalizeFingerprint(raw: String): String =
+        raw.trim().lowercase().takeIf { it in KNOWN_FINGERPRINTS } ?: "chrome"
+
+    /**
+     * Plain configs are accepted alongside TLS ones. `reality` and `xtls` stay rejected because
+     * they need key material and a handshake this engine does not build.
+     */
+    internal fun normalizeSecurity(raw: String?): String {
+        val security = raw.orEmpty().trim().lowercase().ifBlank { "tls" }
+        return when (security) {
+            "tls" -> "tls"
+            "none", "" -> "none"
+            else -> throw IllegalArgumentException("Unsupported security '$security'; use TLS or none")
+        }
+    }
+
+    /**
+     * `http` header obfuscation over raw TCP is a real transport, not a decoration: the server
+     * expects the disguised request, so dropping it would break the config. On xhttp the same
+     * key means something else and is handled by the mode resolver.
+     */
+    internal fun normalizeHeaderType(raw: String?, network: String): String {
+        val headerType = raw.orEmpty().trim().lowercase()
+        if (ProfileNetworks.isXhttp(network)) return headerType
+        return when (headerType) {
+            "", "none" -> ""
+            "http" -> {
+                require(network == "tcp") { "http header obfuscation needs type=tcp, not $network" }
+                "http"
+            }
+            else -> throw IllegalArgumentException("Unsupported TCP header type: $headerType")
+        }
+    }
 
     fun parse(raw: String, id: String = newId(), nameOverride: String? = null): ProxyProfile {
         val text = raw.trim()
@@ -43,12 +94,8 @@ object ProfileUriParser {
         require(unknown.isEmpty()) { "Unsupported parameter: ${unknown.first()}" }
 
         val network = ProfileNetworks.requireSupported(query["type"] ?: query["network"] ?: "ws")
-        val security = (query["security"] ?: "tls").lowercase()
-        require(security == "tls") { "UAC SNI requires TLS security" }
-        val headerType = query["headertype"].orEmpty().lowercase()
-        if (!ProfileNetworks.isXhttp(network)) {
-            require(headerType.isBlank() || headerType == "none") { "Unsupported TCP header type: $headerType" }
-        }
+        val security = normalizeSecurity(query["security"])
+        val headerType = normalizeHeaderType(query["headertype"], network)
 
         val encryption = query["encryption"].orEmpty().ifBlank { "none" }
         if (protocol == ProxyProtocol.VLESS) {
@@ -62,7 +109,9 @@ object ProfileUriParser {
         val host = query["host"].orEmpty().ifBlank { sni }
         val path = normalizePath(query["path"].orEmpty(), network)
         val alpn = TlsAlpnResolver.canonicalString(query["alpn"].orEmpty(), network)
-        val fingerprint = query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() }.ifBlank { "chrome" }
+        val fingerprint = normalizeFingerprint(
+            query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() },
+        )
         val allowInsecure = parseBoolean(query["allowinsecure"] ?: query["insecure"])
         val serviceName = query["servicename"].orEmpty()
         val authority = query["authority"].orEmpty()
@@ -112,6 +161,7 @@ object ProfileUriParser {
             xhttpMode = xhttpMode,
             xhttpExtra = xhttpExtra,
             packetEncoding = packetEncoding,
+            headerType = headerType,
             country = country,
             rawUri = text,
         )
@@ -150,7 +200,14 @@ object ProfileUriParser {
                 .put("aid", profile.alterId.toString())
                 .put("scy", profile.encryption.ifBlank { "auto" })
                 .put("net", profile.network)
-                .put("type", if (ProfileNetworks.isXhttp(profile.network)) profile.xhttpMode.ifBlank { "none" } else "none")
+                .put(
+                    "type",
+                    when {
+                        ProfileNetworks.isXhttp(profile.network) -> profile.xhttpMode.ifBlank { "none" }
+                        profile.headerType.isNotBlank() -> profile.headerType
+                        else -> "none"
+                    },
+                )
                 .put("host", profile.host)
                 .put("path", profile.path)
                 .put("tls", profile.security)
@@ -182,6 +239,7 @@ object ProfileUriParser {
         if (profile.xhttpMode.isNotBlank()) query["mode"] = profile.xhttpMode
         if (profile.xhttpExtra.isNotBlank()) query["extra"] = profile.xhttpExtra
         if (profile.packetEncoding.isNotBlank()) query["packetEncoding"] = profile.packetEncoding
+        if (profile.headerType.isNotBlank()) query["headerType"] = profile.headerType
         profile.country.countryCode?.let { query["countryCode"] = it }
         if (profile.country.isKnown) query["country"] = profile.country.countryName
         val encodedQuery = query.entries.joinToString("&") { (key, value) -> "$key=${encode(value)}" }
@@ -213,17 +271,14 @@ object ProfileUriParser {
         val sourcePort = json.optString("port", "443").toIntOrNull() ?: json.optInt("port", 443)
         require(sourcePort in 1..65_535) { "VMess server port is invalid" }
         val network = ProfileNetworks.requireSupported(json.optString("net", "ws"), "VMess transport")
-        val security = json.optString("tls", "tls").lowercase().ifBlank { "tls" }
-        require(security == "tls") { "SNI mode requires TLS security" }
+        val security = normalizeSecurity(json.optString("tls"))
         val sni = json.optString("sni").ifBlank { json.optString("host") }.ifBlank { sourceHost }
         val host = json.optString("host").ifBlank { sni }
         val path = normalizePath(json.optString("path"), network)
         val headerType = json.optString("type")
         val serviceName = if (network == "grpc") json.optString("path").removePrefix("/") else ""
         if (network == "grpc") require(serviceName.isNotBlank()) { "gRPC serviceName is missing" }
-        if (!ProfileNetworks.isXhttp(network)) {
-            require(headerType.isBlank() || headerType.equals("none", true)) { "Unsupported TCP header type: $headerType" }
-        }
+        val tcpHeaderType = normalizeHeaderType(headerType, network)
         val xhttpMode = if (ProfileNetworks.isXhttp(network)) {
             ProfileNetworks.vmessMode(headerType, json.optString("mode"))
         } else {
@@ -252,8 +307,9 @@ object ProfileUriParser {
             host = host,
             path = path,
             alpn = json.optString("alpn").ifBlank { TlsAlpnResolver.canonicalString("", network) },
-            fingerprint = json.optString("fp").ifBlank { "chrome" },
+            fingerprint = normalizeFingerprint(json.optString("fp")),
             allowInsecure = parseBoolean(json.optString("allowInsecure")),
+            headerType = tcpHeaderType,
             encryption = json.optString("scy", "auto").ifBlank { "auto" },
             alterId = json.optString("aid", "0").toIntOrNull()?.coerceAtLeast(0) ?: 0,
             serviceName = serviceName,
@@ -303,7 +359,7 @@ object ProfileUriParser {
             "host" to host,
             "path" to query["path"].orEmpty(),
             "alpn" to query["alpn"].orEmpty().ifBlank { TlsAlpnResolver.canonicalString("", network) },
-            "fp" to query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() }.ifBlank { "chrome" },
+            "fp" to normalizeFingerprint(query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() }),
         )
         if (scheme == "vless") sanitized["encryption"] = "none"
         if (query["security"].orEmpty().equals("tls", ignoreCase = true)) {
