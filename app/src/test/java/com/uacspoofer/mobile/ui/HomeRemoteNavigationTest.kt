@@ -38,7 +38,7 @@ class HomeRemoteNavigationTest {
         )
         assertFalse(
             HomeRemoteNavigation.shouldParkConfirmOnConnect(
-                slot = HomeRemoteSlot.Engine,
+                slot = HomeRemoteSlot.EngineXray,
                 keyboardInput = true,
             ),
         )
@@ -63,7 +63,7 @@ class HomeRemoteNavigationTest {
         )
         assertEquals(
             HomeRemoteAction.Focus(HomeRemoteSlot.Connect),
-            HomeRemoteNavigation.action(HomeRemoteSlot.Engine, RemoteDpad.Down),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EnginePow, RemoteDpad.Down),
         )
     }
 
@@ -91,7 +91,43 @@ class HomeRemoteNavigationTest {
     fun engineLeftGoesToMenuNotDrawer() {
         assertEquals(
             HomeRemoteAction.Focus(HomeRemoteSlot.Menu),
-            HomeRemoteNavigation.action(HomeRemoteSlot.Engine, RemoteDpad.Left),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineXray, RemoteDpad.Left),
+        )
+    }
+
+    @Test
+    fun engineRailMovesVerticallyBetweenTheThreeIcons() {
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.EngineXray),
+            HomeRemoteNavigation.action(HomeRemoteSlot.Menu, RemoteDpad.Right),
+        )
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.EngineTor),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineXray, RemoteDpad.Down),
+        )
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.EnginePow),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineTor, RemoteDpad.Down),
+        )
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.EngineTor),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EnginePow, RemoteDpad.Up),
+        )
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.EngineXray),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineTor, RemoteDpad.Up),
+        )
+        assertEquals(
+            HomeRemoteAction.Ignore,
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineXray, RemoteDpad.Up),
+        )
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.Menu),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineTor, RemoteDpad.Left),
+        )
+        assertEquals(
+            HomeRemoteAction.Focus(HomeRemoteSlot.Menu),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EnginePow, RemoteDpad.Left),
         )
     }
 

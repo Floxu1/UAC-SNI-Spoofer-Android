@@ -49,7 +49,7 @@ internal fun PowSettingsScreen(onBack: () -> Unit) {
         header = {
             ToolPageHeader(
                 title = homeText("UAC PoW", "UAC PoW"),
-                subtitle = homeText("Outer hop and MASQUE", "لایه بیرونی و MASQUE"),
+                subtitle = homeText("How it connects", "چطوری وصل بشه؟"),
                 icon = Icons.Outlined.Hub,
                 accent = accent,
                 onMenuClick = onBack,
@@ -71,23 +71,23 @@ private fun PowSettingsPanel() {
     val choices = listOf(
         PowTransportChoice(
             PowCoreConfig.OUTER_AUTO,
-            homeText("Auto", "خودکار"),
-            homeText("Tries WireGuard, MASQUE, then WoW", "به‌ترتیب هر سه را امتحان می‌کند"),
+            homeText("Auto (Recommended)", "خودکار (پیشنهادی)"),
+            homeText("Let the app pick the best one", "بسپار به خودش، بهترین راه رو پیدا می‌کنه"),
         ),
         PowTransportChoice(
             "masque",
             "MASQUE",
-            homeText("WARP over HTTP/3", "پرش HTTP/3 روی WARP"),
+            homeText("Often the fastest", "معمولا سریع‌تره"),
         ),
         PowTransportChoice(
             "wireguard",
             "WireGuard",
-            homeText("WARP over WireGuard", "پرش WireGuard روی WARP"),
+            homeText("Works on most networks", "روی بیشتر اینترنت‌ها خوب جواب میده"),
         ),
         PowTransportChoice(
             "gool",
             "WoW",
-            homeText("WARP over WARP", "دو پرش WARP پشت‌سرهم"),
+            homeText("Extra layer if others fail", "اگه بقیه وصل نشد اینو امتحان کن"),
         ),
     )
 
@@ -96,7 +96,7 @@ private fun PowSettingsPanel() {
             Text(
                 homeText(
                     AetherNative.unavailableReason,
-                    "کتابخانه بومی UAC PoW برای این معماری موجود نیست.",
+                    "این گوشی از UAC PoW پشتیبانی نمی‌کنه.",
                 ),
                 color = UacColors.ErrorRed,
                 fontSize = 12.5.sp,
@@ -116,11 +116,11 @@ private fun PowSettingsPanel() {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SectionLabel(homeText("Outer hop", "لایه بیرونی"))
+            SectionLabel(homeText("Connection mode", "روش اتصال"))
             Text(
                 homeText(
-                    "Auto tries WireGuard, then MASQUE, then WoW. Pinning one never falls back.",
-                    "خودکار به‌ترتیب WireGuard، سپس MASQUE، سپس WoW را امتحان می‌کند. پین کردن به بقیه برنمی‌گردد.",
+                    "Auto is best for most people. It tries each way until one works. Pick one by hand only if you know what you're doing.",
+                    "خودکار برای بیشتر آدما بهترینه. خودش دونه دونه امتحان می‌کنه تا وصل بشه. فقط اگه می‌دونی داری چی کار می‌کنی دستی انتخاب کن.",
                 ),
                 color = UacColors.TextSecondary,
                 fontSize = 12.sp,
@@ -155,7 +155,7 @@ private fun PowSettingsPanel() {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            SectionLabel(homeText("If connect fails", "اگر وصل نمی‌شود"))
+            SectionLabel(homeText("Can't connect?", "وصل نمیشه؟"))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -163,7 +163,7 @@ private fun PowSettingsPanel() {
             ) {
                 Column(Modifier.weight(1f).padding(end = 12.dp)) {
                     Text(
-                        homeText("Help getting through filters", "کمک برای رد شدن از فیلتر"),
+                        homeText("Try harder to get through", "سخت‌تر تلاش کن رد بشی"),
                         color = UacColors.TextPrimary,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -171,8 +171,8 @@ private fun PowSettingsPanel() {
                     )
                     Text(
                         homeText(
-                            "Turn on only if you cannot connect. Traffic is sent in smaller pieces so filters are less likely to block it. Speed and ping usually get worse. Leave it off if you already connect. Only used with MASQUE.",
-                            "فقط وقتی روشن کن که وصل نمی‌شود. بسته‌ها ریزتر فرستاده می‌شوند تا فیلتر سخت‌تر بگیرد. معمولاً کندتر می‌شود و پینگ بالا می‌رود. اگر وصل می‌شوی خاموش بماند. فقط روی گزینه MASQUE اثر دارد.",
+                            "Turn this on only if nothing connects. It sends data in smaller pieces to get past filters, but it will be a bit slower. Only works with MASQUE.",
+                            "فقط وقتی هیچ‌جوره وصل نمیشی روشنش کن. اطلاعات رو ریز ریز می‌فرسته تا از فیلتر رد بشه ولی یکم کندتر و پینگش بیشتر میشه. فقط روی MASQUE جواب میده.",
                         ),
                         color = UacColors.TextSecondary,
                         fontSize = 12.sp,
@@ -191,8 +191,8 @@ private fun PowSettingsPanel() {
             }
             Text(
                 homeText(
-                    "Applies on the next connect.",
-                    "از اتصال بعدی اعمال می‌شود.",
+                    "Will be used next time you connect.",
+                    "دفعه بعد که وصل بشی اعمال میشه.",
                 ),
                 color = UacColors.TextSecondary,
                 fontSize = 11.5.sp,

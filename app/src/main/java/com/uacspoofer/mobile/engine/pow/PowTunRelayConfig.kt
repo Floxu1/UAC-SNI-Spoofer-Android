@@ -41,12 +41,12 @@ internal object PowTunRelayConfig {
               cache-size: 10000
             misc:
               log-level: warn
-              connect-timeout: 15000
+              connect-timeout: 5000
               tcp-read-write-timeout: 900000
-              udp-read-write-timeout: 15000
-              tcp-buffer-size: 524224
+              udp-read-write-timeout: 45000
+              tcp-buffer-size: 1048576
               task-stack-size: 557056
-              max-session-count: 0
+              max-session-count: 4096
         """.trimIndent() + "\n"
     }
 }

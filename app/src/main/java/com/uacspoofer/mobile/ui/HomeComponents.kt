@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -66,6 +67,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
@@ -96,10 +98,8 @@ internal fun HomeHeader(
     val engineStore = remember(context) { EngineModeStore.get(context) }
     val engineMode by engineStore.mode.collectAsStateWithLifecycle()
     var pendingEngine by remember { mutableStateOf<EngineMode?>(null) }
-    var spinNonce by remember { mutableStateOf(0) }
     val iconSize = if (compact) 22.dp else 24.dp
     val buttonSize = if (compact) 38.dp else 42.dp
-    val switchSize = if (compact) 42.dp else 46.dp
     val drawerOpen = LocalDrawerOpen.current
     val guideSession = LocalHomeGuideSession.current
 
@@ -129,14 +129,47 @@ internal fun HomeHeader(
         pendingEngine = null
     }
 
-    Row(
-        modifier = modifier.height(if (compact) 44.dp else 48.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+    val headerHeight = if (compact) 44.dp else 48.dp
+    if (!engineToggleEnabled) {
+        Row(
+            modifier = modifier.height(headerHeight),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RemoteIconButton(
+                onClick = onMenuClick,
+                modifier = Modifier
+                    .size(buttonSize)
+                    .focusProperties { canFocus = !drawerOpen }
+                    .trackHomeSlot(HomeRemoteSlot.Menu)
+                    .openDrawerOnDpadLeft(onMenuClick),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Menu,
+                    contentDescription = "Open navigation menu",
+                    tint = UacColors.TextPrimary,
+                    modifier = Modifier.size(iconSize),
+                )
+            }
+            Icon(
+                imageVector = Icons.Outlined.VerifiedUser,
+                contentDescription = "Connection status",
+                tint = accent,
+                modifier = Modifier.size(iconSize),
+            )
+        }
+        return
+    }
+
+    Box(
+        modifier = modifier
+            .height(headerHeight)
+            .zIndex(8f),
     ) {
         RemoteIconButton(
             onClick = onMenuClick,
             modifier = Modifier
+                .align(Alignment.CenterStart)
                 .size(buttonSize)
                 .focusProperties { canFocus = !drawerOpen }
                 .trackHomeSlot(HomeRemoteSlot.Menu)
@@ -149,71 +182,47 @@ internal fun HomeHeader(
                 modifier = Modifier.size(iconSize),
             )
         }
-        if (engineToggleEnabled) {
-            Box(
-                modifier = Modifier
-                    .size(switchSize)
-                    .then(
-                        if (onEngineLaidOut != null) {
-                            Modifier.onGloballyPositioned(onEngineLaidOut)
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .then(
-                        if (guideSession?.step == HomeGuideStep.Engine) {
-                            Modifier.guideTargetDpad(guideSession.gotIt)
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .trackHomeSlot(HomeRemoteSlot.Engine)
-                    .clickable(
-                        enabled = pendingEngine == null,
-                        role = Role.Button,
-                        onClick = {
-                            if (pendingEngine != null) return@clickable
-                            spinNonce += 1
-                            val target = engineMode.toggled()
-                            if (canChangeEngineMode(ConnectionStateStore.state.value)) {
-                                engineStore.setMode(target)
-                            } else {
-                                pendingEngine = target
-                            }
-                        },
-                    )
-                    .semantics {
-                        contentDescription = when (engineMode.next()) {
-                            EngineMode.TOR_WEBTUNNEL -> "Switch to UAC TOR BRIDGE"
-                            EngineMode.UAC_POW -> "Switch to UAC PoW"
-                            EngineMode.XRAY_CF -> "Switch to UAC SNI Spoofer"
-                        }
+        EngineSwitchRail(
+            selected = engineMode,
+            pending = pendingEngine,
+            compact = compact,
+            enabled = pendingEngine == null,
+            onSelect = { target ->
+                if (pendingEngine != null || target == engineStore.snapshot()) return@EngineSwitchRail
+                if (canChangeEngineMode(ConnectionStateStore.state.value)) {
+                    engineStore.setMode(target)
+                } else {
+                    pendingEngine = target
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .wrapContentHeight(unbounded = true, align = Alignment.Top)
+                .then(
+                    if (onEngineLaidOut != null) {
+                        Modifier.onGloballyPositioned(onEngineLaidOut)
+                    } else {
+                        Modifier
                     },
-                contentAlignment = Alignment.Center,
-            ) {
-                EngineSwitchGlyph(
-                    accent = accent,
-                    spinning = pendingEngine != null,
-                    spinNonce = spinNonce,
-                    compact = compact,
-                    modifier = Modifier.size(switchSize),
                 )
-            }
-        } else {
-            Icon(
-                imageVector = Icons.Outlined.VerifiedUser,
-                contentDescription = "Connection status",
-                tint = accent,
-                modifier = Modifier.size(iconSize),
-            )
-        }
+                .then(
+                    if (guideSession?.step == HomeGuideStep.Engine) {
+                        Modifier.guideTargetDpad(guideSession.gotIt)
+                    } else {
+                        Modifier
+                    },
+                ),
+        )
     }
 }
 
 @Composable
 internal fun AppTitle(compact: Boolean, accent: Color) {
     val engineMode = rememberDisplayedEngineMode()
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(horizontal = if (compact) 56.dp else 64.dp),
+    ) {
         Text(
             text = when {
                 engineMode.isTor -> "UAC TOR BRIDGE"

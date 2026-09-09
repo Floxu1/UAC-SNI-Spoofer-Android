@@ -96,7 +96,7 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
     val hasListRows = showAutomatic || recommended.isNotEmpty() || moreCountries.isNotEmpty()
     val accent = UacColors.DisconnectedBlue
     val selectedLabel = if (selectedCode.isEmpty()) {
-        homeText("Automatic", "خودکار")
+        homeText("Auto", "خودکار")
     } else {
         PowRegions.name(selectedCode, nameLocale)
     }
@@ -121,15 +121,15 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
         if (live) {
             applying = true
             VpnController.applyPowExit(context)
-            notify(if (isPersian) "در حال اتصال مجدد به $name…" else "Reconnecting to $name…")
+            notify(if (isPersian) "دارم به $name وصل میشم…" else "Switching to $name…")
             scope.launch {
                 delay(8_000)
                 applying = false
             }
         } else {
             notify(
-                if (isPersian) "$name برای اتصال بعدی انتخاب شد"
-                else "$name selected for the next connection",
+                if (isPersian) "$name ذخیره شد، دفعه بعد که وصل بشی همون میشه"
+                else "$name saved — next time you connect it will be $name",
             )
         }
     }
@@ -176,7 +176,7 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
                             ),
                             placeholder = {
                                 Text(
-                                    homeText("Search country", "جست‌وجوی کشور"),
+                                    homeText("Search country", "اسم کشور رو بنویس"),
                                     color = UacColors.TextSecondary,
                                     fontSize = 14.sp,
                                 )
@@ -189,7 +189,7 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
                                     RemoteIconButton(onClick = { query = "" }) {
                                         Icon(
                                             Icons.Outlined.Close,
-                                            contentDescription = homeText("Clear search", "پاک‌کردن جست‌وجو"),
+                                            contentDescription = homeText("Clear search", "پاک کن"),
                                             tint = UacColors.TextSecondary,
                                         )
                                     }
@@ -219,16 +219,16 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
                             if (showAutomatic) {
                                 item(key = "auto") {
                                     TorCountryRow(
-                                        title = homeText("Automatic", "خودکار"),
+                                        title = homeText("Auto", "خودکار"),
                                         subtitle = homeText(
-                                            "Psiphon picks the fastest available country",
-                                            "Psiphon سریع‌ترین کشور در دسترس را انتخاب می‌کند",
+                                            "Let the app pick the fastest one",
+                                            "بسپار به خودش، سریع‌ترین رو پیدا می‌کنه",
                                         ),
                                         country = null,
                                         selected = selectedCode.isEmpty(),
                                         applying = applying && selectedCode.isEmpty(),
                                         status = if (selectedCode.isEmpty()) {
-                                            homeText("Selected / Automatic", "انتخاب‌شده / خودکار")
+                                            homeText("Selected", "انتخاب شده")
                                         } else {
                                             null
                                         },
@@ -239,7 +239,7 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
                             }
                             if (recommended.isNotEmpty()) {
                                 item(key = "recommended-label") {
-                                    CountrySectionLabel(homeText("Recommended", "پیشنهادی"))
+                                    CountrySectionLabel(homeText("Suggestions", "پیشنهادی"))
                                 }
                                 itemsIndexed(recommended, key = { _, code -> "rec-$code" }) { _, code ->
                                     val selected = selectedCode == code
@@ -249,7 +249,7 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
                                         country = CountryMetadata.resolve(code, null),
                                         selected = selected,
                                         applying = applying && selected,
-                                        status = if (selected) homeText("Selected", "انتخاب‌شده") else null,
+                                        status = if (selected) homeText("Selected", "انتخاب شده") else null,
                                         onSelect = { persistCountry(code) },
                                     )
                                 }
@@ -266,7 +266,7 @@ internal fun PowCountryScreen(onMenuClick: () -> Unit) {
                                         country = CountryMetadata.resolve(code, null),
                                         selected = selected,
                                         applying = applying && selected,
-                                        status = if (selected) homeText("Selected", "انتخاب‌شده") else null,
+                                        status = if (selected) homeText("Selected", "انتخاب شده") else null,
                                         onSelect = { persistCountry(code) },
                                     )
                                 }

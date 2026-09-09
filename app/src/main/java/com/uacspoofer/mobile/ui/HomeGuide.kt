@@ -138,7 +138,7 @@ internal fun HomeGuideOverlay(
         }
     }
     val targetRequester = when (step) {
-        HomeGuideStep.Engine -> homeFocus?.engine
+        HomeGuideStep.Engine -> homeFocus?.engineXray
         HomeGuideStep.Country -> homeFocus?.profile
     }
 
@@ -170,22 +170,15 @@ internal fun HomeGuideOverlay(
             Canvas(Modifier.fillMaxSize()) {
                 val stroke = Stroke(width = 2.dp.toPx())
                 val color = UacColors.DisconnectedBlue
-                if (step == HomeGuideStep.Engine) {
-                    drawCircle(
-                        color = color,
-                        radius = hole.width / 2f,
-                        center = hole.center,
-                        style = stroke,
-                    )
-                } else {
-                    drawRoundRect(
-                        color = color,
-                        topLeft = hole.topLeft,
-                        size = hole.size,
-                        cornerRadius = CornerRadius(12.dp.toPx()),
-                        style = stroke,
-                    )
-                }
+                drawRoundRect(
+                    color = color,
+                    topLeft = hole.topLeft,
+                    size = hole.size,
+                    cornerRadius = CornerRadius(
+                        if (step == HomeGuideStep.Engine) hole.width / 2f else 12.dp.toPx(),
+                    ),
+                    style = stroke,
+                )
             }
         }
         if (targetRect != null) {
@@ -208,8 +201,8 @@ internal fun HomeGuideOverlay(
             }
             val body = when (step) {
                 HomeGuideStep.Engine -> homeText(
-                    "Use this button to put the engine on Tor. Each tap switches the connection engine between Tor and SNI Spoofing.",
-                    "از این دکمه میتونی موتور برنامه را روی Tor بگذاری. هر بار که بزنی، موتور اتصال بین Tor و Sni Spoofing تغییر میکنه",
+                    "These three icons switch the connection engine. Tap the one you want — Cloudflare, Tor, or PoW.",
+                    "با این سه آیکون می‌تونی موتور اتصال را عوض کنی. روی هر کدام که می‌خوای بزن.",
                 )
                 HomeGuideStep.Country -> homeText(
                     "From this row on Home you can pick the Tor exit country. If you are not sure, Automatic is the best choice.",

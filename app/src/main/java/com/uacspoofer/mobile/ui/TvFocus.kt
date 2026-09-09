@@ -79,7 +79,9 @@ internal fun rememberRemoteRowFocus(): Pair<MutableInteractionSource, Boolean> {
 
 internal class HomeRemoteFocus {
     val menu = FocusRequester()
-    val engine = FocusRequester()
+    val engineXray = FocusRequester()
+    val engineTor = FocusRequester()
+    val enginePow = FocusRequester()
     val connect = FocusRequester()
     val profile = FocusRequester()
     val ping = FocusRequester()
@@ -98,7 +100,9 @@ internal class HomeRemoteFocus {
 
     fun requester(slot: HomeRemoteSlot): FocusRequester? = when (slot) {
         HomeRemoteSlot.Menu -> menu
-        HomeRemoteSlot.Engine -> engine
+        HomeRemoteSlot.EngineXray -> engineXray
+        HomeRemoteSlot.EngineTor -> engineTor
+        HomeRemoteSlot.EnginePow -> enginePow
         HomeRemoteSlot.Connect -> connect
         HomeRemoteSlot.Profile -> profile
         HomeRemoteSlot.Ping -> ping

@@ -14,10 +14,10 @@ internal object PowStatusCopy {
         if (persian) return persianDetail(trimmed, phase, percent, showRouteProgress)
         if (trimmed.isNotEmpty()) return trimmed
         return when (phase) {
-            PowPhase.OUTER -> "Connecting WARP outer leg"
-            PowPhase.INNER -> "Starting Psiphon through WARP"
-            PowPhase.BRIDGING -> "Routing device traffic through UAC PoW"
-            else -> if (showRouteProgress) "Starting UAC PoW" else "Starting UAC PoW"
+            PowPhase.OUTER -> "Connecting..."
+            PowPhase.INNER -> "Starting secure tunnel..."
+            PowPhase.BRIDGING -> "Almost ready..."
+            else -> "Connecting UAC PoW..."
         }
     }
 
@@ -34,22 +34,22 @@ internal object PowStatusCopy {
     ): String {
         val trimmed = detail.trim()
         return when {
-            trimmed.startsWith("Connecting MASQUE") -> "در حال اتصال لایه ${homeLtr("MASQUE")}"
-            trimmed.startsWith("Connecting WireGuard") -> "در حال اتصال لایه ${homeLtr("WireGuard")}"
-            trimmed.startsWith("Connecting WoW") -> "در حال اتصال لایه ${homeLtr("WoW")}"
-            trimmed.startsWith("Starting Psiphon") -> "در حال شروع ${homeLtr("Psiphon")} روی ${homeLtr("WARP")}"
-            trimmed.startsWith("Trying") -> "در حال تلاش برای مسیر بعدی"
-            trimmed.startsWith("Routing device") -> "در حال عبور ترافیک دستگاه از ${homeLtr("UAC PoW")}"
-            trimmed.startsWith("UAC PoW ready") -> "${homeLtr("UAC PoW")} آماده است"
-            trimmed.startsWith("Starting UAC PoW") -> "در حال شروع ${homeLtr("UAC PoW")}"
-            trimmed.startsWith("Creating device") -> "در حال ساخت رابط ${homeLtr("VPN")}"
-            trimmed.startsWith("Reconnecting") -> "اتصال مجدد برای کشور خروجی"
+            trimmed.startsWith("Connecting MASQUE") -> "دارم به ${homeLtr("MASQUE")} وصل میشم"
+            trimmed.startsWith("Connecting WireGuard") -> "دارم به ${homeLtr("WireGuard")} وصل میشم"
+            trimmed.startsWith("Connecting WoW") -> "دارم به ${homeLtr("WoW")} وصل میشم"
+            trimmed.startsWith("Starting Psiphon") -> "دارم تونل امن رو روشن می‌کنم"
+            trimmed.startsWith("Trying") -> "نشد، دارم راه بعدی رو امتحان می‌کنم"
+            trimmed.startsWith("Routing device") -> "دارم اینترنت گوشیت رو وصل می‌کنم"
+            trimmed.startsWith("UAC PoW ready") -> "${homeLtr("UAC PoW")} وصله، برو حالشو ببر"
+            trimmed.startsWith("Starting UAC PoW") -> "دارم ${homeLtr("UAC PoW")} رو روشن می‌کنم"
+            trimmed.startsWith("Creating device") -> "دارم ${homeLtr("VPN")} گوشیت رو می‌سازم"
+            trimmed.startsWith("Reconnecting") -> "دارم دوباره وصل میشم"
             trimmed.isNotEmpty() -> homeLtr(trimmed)
-            phase == PowPhase.OUTER -> "در حال اتصال لایه ${homeLtr("WARP")}"
-            phase == PowPhase.INNER -> "در حال شروع ${homeLtr("Psiphon")}"
-            percent in 1..99 -> "راه‌اندازی ${homeLtr("UAC PoW $percent%")}"
-            showRouteProgress -> "در حال شروع ${homeLtr("UAC PoW")}"
-            else -> "در حال شروع ${homeLtr("UAC PoW")}"
+            phase == PowPhase.OUTER -> "دارم وصل میشم..."
+            phase == PowPhase.INNER -> "یه لحظه، دارم تونل رو راه میندازم..."
+            percent in 1..99 -> "${homeLtr("UAC PoW")} $percent% ..."
+            showRouteProgress -> "دارم ${homeLtr("UAC PoW")} رو روشن می‌کنم..."
+            else -> "دارم ${homeLtr("UAC PoW")} رو روشن می‌کنم..."
         }
     }
 }

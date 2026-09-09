@@ -8,14 +8,51 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 internal object PowPathProbe {
-    private const val HOST = "www.gstatic.com"
-    private const val HTTP =
-        "GET /generate_204 HTTP/1.1\r\nHost: $HOST\r\nConnection: close\r\n\r\n"
+    private data class ProbeTarget(val host: String, val http: String)
+
+    private val TARGETS = listOf(
+        ProbeTarget(
+            "www.gstatic.com",
+            "GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n",
+        ),
+        ProbeTarget(
+            "cloudflare.com",
+            "GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nConnection: close\r\n\r\n",
+        ),
+        ProbeTarget(
+            "www.google.com",
+            "GET /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n",
+        ),
+    )
+
+    // Fallback single-target read length for the 8KB download phase.
+    private const val EXTRA_READ_BYTES = 8 * 1024
 
     suspend fun measureMs(
         socksPort: Int,
         timeoutMs: Int = PowQualityPolicy.PROBE_TIMEOUT_MS,
     ): Long = withContext(Dispatchers.IO) {
+        val started = SystemClock.elapsedRealtime()
+        val perTargetTimeout = (timeoutMs / TARGETS.size).coerceAtLeast(700)
+        val results = TARGETS.map { target ->
+            // Each target is probed independently; the overall verdict is 2/3 success.
+            measureSingleTargetMs(socksPort, perTargetTimeout, target)
+        }
+        val successes = results.filter { it > 0L }.sorted()
+        if (successes.size < 2) return@withContext -1L
+        // TTFB + small download: median of successful targets captures real browsing latency.
+        val median = successes[successes.size / 2]
+        // Include wall time for the parallel batch but cap by median to avoid outlier inflation.
+        val wall = (SystemClock.elapsedRealtime() - started).coerceAtLeast(1L)
+        // If all probes ran in sequence the wall equals sum; prefer median for stability.
+        minOf(median, wall).coerceAtLeast(1L)
+    }
+
+    private fun measureSingleTargetMs(
+        socksPort: Int,
+        timeoutMs: Int,
+        target: ProbeTarget,
+    ): Long {
         val started = SystemClock.elapsedRealtime()
         val ok = runCatching {
             Socket().use { sock ->
@@ -30,7 +67,7 @@ internal object PowPathProbe {
                 if (auth[0] != 0x05.toByte() || auth[1] != 0x00.toByte()) {
                     error("socks auth")
                 }
-                val host = HOST.toByteArray(Charsets.US_ASCII)
+                val host = target.host.toByteArray(Charsets.US_ASCII)
                 val request = ByteArray(7 + host.size)
                 request[0] = 0x05
                 request[1] = 0x01
@@ -54,17 +91,37 @@ internal object PowPathProbe {
                     }
                     else -> error("socks atyp")
                 }
-                output.write(HTTP.toByteArray(Charsets.US_ASCII))
+                output.write(target.http.toByteArray(Charsets.US_ASCII))
                 output.flush()
-                val reply = ByteArray(96)
-                val read = input.read(reply)
-                if (read < 12) error("http short")
-                val text = String(reply, 0, read, Charsets.US_ASCII)
-                text.contains(" 204") || text.contains(" 200")
+                // Read header + up to 8KB body to measure real download, not just header.
+                val buffer = ByteArray(96 + EXTRA_READ_BYTES)
+                var totalRead = 0
+                var firstChunkMs = -1L
+                val deadline = SystemClock.elapsedRealtime() + timeoutMs
+                while (totalRead < 96 && SystemClock.elapsedRealtime() < deadline) {
+                    val n = input.read(buffer, totalRead, 96 - totalRead)
+                    if (n <= 0) break
+                    if (firstChunkMs < 0) firstChunkMs = SystemClock.elapsedRealtime() - started
+                    totalRead += n
+                    if (totalRead >= 12) {
+                        val text = String(buffer, 0, totalRead, Charsets.US_ASCII)
+                        if (text.contains(" 204") || text.contains(" 200")) break
+                    }
+                }
+                if (totalRead < 12) error("http short")
+                val text = String(buffer, 0, totalRead, Charsets.US_ASCII)
+                if (!text.contains(" 204") && !text.contains(" 200")) error("http status")
+                // Try to drain a bit more to account for throughput, but don't fail if not available.
+                runCatching {
+                    sock.soTimeout = 300
+                    val extra = ByteArray(EXTRA_READ_BYTES)
+                    input.read(extra)
+                }
+                true
             }
         }.getOrDefault(false)
-        if (!ok) return@withContext -1L
-        (SystemClock.elapsedRealtime() - started).coerceAtLeast(1L)
+        if (!ok) return -1L
+        return (SystemClock.elapsedRealtime() - started).coerceAtLeast(1L)
     }
 
     private fun readExact(input: InputStream, count: Int): ByteArray {

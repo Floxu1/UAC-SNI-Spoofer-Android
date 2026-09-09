@@ -3,7 +3,9 @@ package com.uacspoofer.mobile.ui
 internal enum class HomeRemoteSlot {
     None,
     Menu,
-    Engine,
+    EngineXray,
+    EngineTor,
+    EnginePow,
     Connect,
     Profile,
     Ping,
@@ -40,25 +42,34 @@ internal object HomeRemoteNavigation {
             RemoteDpad.Down -> HomeRemoteAction.Focus(HomeRemoteSlot.Connect)
             RemoteDpad.Left -> HomeRemoteAction.OpenDrawer
             RemoteDpad.Up -> HomeRemoteAction.Focus(HomeRemoteSlot.Menu)
-            RemoteDpad.Right -> HomeRemoteAction.Focus(HomeRemoteSlot.Engine)
+            RemoteDpad.Right -> HomeRemoteAction.Focus(HomeRemoteSlot.EngineXray)
         }
         HomeRemoteSlot.Menu -> when (dpad) {
             RemoteDpad.Left -> HomeRemoteAction.OpenDrawer
             RemoteDpad.Down -> HomeRemoteAction.Focus(HomeRemoteSlot.Connect)
-            RemoteDpad.Right -> HomeRemoteAction.Focus(HomeRemoteSlot.Engine)
+            RemoteDpad.Right -> HomeRemoteAction.Focus(HomeRemoteSlot.EngineXray)
             RemoteDpad.Up -> HomeRemoteAction.Ignore
         }
-        HomeRemoteSlot.Engine -> when (dpad) {
-            RemoteDpad.Left -> HomeRemoteAction.Focus(HomeRemoteSlot.Menu)
-            RemoteDpad.Down -> HomeRemoteAction.Focus(HomeRemoteSlot.Connect)
-            RemoteDpad.Right,
-            RemoteDpad.Up -> HomeRemoteAction.Ignore
-        }
+        HomeRemoteSlot.EngineXray -> engineRailAction(
+            dpad = dpad,
+            up = null,
+            down = HomeRemoteSlot.EngineTor,
+        )
+        HomeRemoteSlot.EngineTor -> engineRailAction(
+            dpad = dpad,
+            up = HomeRemoteSlot.EngineXray,
+            down = HomeRemoteSlot.EnginePow,
+        )
+        HomeRemoteSlot.EnginePow -> engineRailAction(
+            dpad = dpad,
+            up = HomeRemoteSlot.EngineTor,
+            down = HomeRemoteSlot.Connect,
+        )
         HomeRemoteSlot.Connect -> when (dpad) {
             RemoteDpad.Left -> HomeRemoteAction.OpenDrawer
             RemoteDpad.Up -> HomeRemoteAction.Focus(HomeRemoteSlot.Menu)
             RemoteDpad.Down -> HomeRemoteAction.Focus(HomeRemoteSlot.Profile)
-            RemoteDpad.Right -> HomeRemoteAction.Focus(HomeRemoteSlot.Engine)
+            RemoteDpad.Right -> HomeRemoteAction.Focus(HomeRemoteSlot.EngineXray)
         }
         HomeRemoteSlot.Profile -> when (dpad) {
             RemoteDpad.Left -> HomeRemoteAction.OpenDrawer
@@ -85,6 +96,17 @@ internal object HomeRemoteNavigation {
             RemoteDpad.Down -> HomeRemoteAction.Ignore
         }
         HomeRemoteSlot.Other -> HomeRemoteAction.Ignore
+    }
+
+    private fun engineRailAction(
+        dpad: RemoteDpad,
+        up: HomeRemoteSlot?,
+        down: HomeRemoteSlot,
+    ): HomeRemoteAction = when (dpad) {
+        RemoteDpad.Left -> HomeRemoteAction.Focus(HomeRemoteSlot.Menu)
+        RemoteDpad.Down -> HomeRemoteAction.Focus(down)
+        RemoteDpad.Up -> up?.let(HomeRemoteAction::Focus) ?: HomeRemoteAction.Ignore
+        RemoteDpad.Right -> HomeRemoteAction.Ignore
     }
 }
 
