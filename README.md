@@ -110,6 +110,7 @@
 - مکانیزم `Cooldown` برای مسیرهای ناموفق (عدم تست تکراری بی‌مورد)
 
 </div>
+<div align="right">
 
 ### 🧪 Route Speed Test
 
