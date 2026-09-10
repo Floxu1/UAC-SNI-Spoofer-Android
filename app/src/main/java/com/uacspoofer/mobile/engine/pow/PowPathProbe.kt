@@ -5,6 +5,8 @@ import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 
 internal object PowPathProbe {
@@ -13,39 +15,46 @@ internal object PowPathProbe {
     private val TARGETS = listOf(
         ProbeTarget(
             "www.gstatic.com",
-            "GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n",
+            "GET /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: keep-alive\r\n\r\n",
         ),
         ProbeTarget(
             "cloudflare.com",
-            "GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nConnection: close\r\n\r\n",
+            "GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nConnection: keep-alive\r\n\r\n",
         ),
         ProbeTarget(
             "www.google.com",
-            "GET /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n",
+            "GET /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: keep-alive\r\n\r\n",
         ),
     )
 
-    // Fallback single-target read length for the 8KB download phase.
-    private const val EXTRA_READ_BYTES = 8 * 1024
+    private const val EXTRA_READ_BYTES = 4 * 1024
 
     suspend fun measureMs(
         socksPort: Int,
         timeoutMs: Int = PowQualityPolicy.PROBE_TIMEOUT_MS,
     ): Long = withContext(Dispatchers.IO) {
         val started = SystemClock.elapsedRealtime()
-        val perTargetTimeout = (timeoutMs / TARGETS.size).coerceAtLeast(700)
-        val results = TARGETS.map { target ->
-            // Each target is probed independently; the overall verdict is 2/3 success.
-            measureSingleTargetMs(socksPort, perTargetTimeout, target)
+        // Level A: parallel probes — wall time ~ single target, not sum.
+        val deferred = TARGETS.map { target ->
+            async { measureSingleTargetMs(socksPort, timeoutMs, target) }
         }
+        val results = deferred.awaitAll()
         val successes = results.filter { it > 0L }.sorted()
         if (successes.size < 2) return@withContext -1L
-        // TTFB + small download: median of successful targets captures real browsing latency.
         val median = successes[successes.size / 2]
-        // Include wall time for the parallel batch but cap by median to avoid outlier inflation.
         val wall = (SystemClock.elapsedRealtime() - started).coerceAtLeast(1L)
-        // If all probes ran in sequence the wall equals sum; prefer median for stability.
         minOf(median, wall).coerceAtLeast(1L)
+    }
+
+    // DNS-level mapdns warm check — light probe for Page Turbo.
+    suspend fun warmMapDns(socksPort: Int): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val jobs = TARGETS.take(2).map { target ->
+                async { measureSingleTargetMs(socksPort, PowQualityPolicy.DNS_WARM_TIMEOUT_MS, target) }
+            }
+            val results = jobs.awaitAll()
+            results.count { it > 0L } >= 1
+        }.getOrDefault(false)
     }
 
     private fun measureSingleTargetMs(

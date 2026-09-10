@@ -14,13 +14,19 @@ import java.util.concurrent.atomic.AtomicInteger
 
 internal object PowSocksConnectOnly {
     private const val CMD_CONNECT = 0x01
-    private const val UPSTREAM_TIMEOUT_MS = 8_000
+    private const val UPSTREAM_TIMEOUT_MS = 6_000
+    // Level C: QoS — small streams (HTML) are prioritized over bulk.
+    private const val SMALL_STREAM_THRESHOLD = 32 * 1024
+    private const val HIGH_PRIO_TIMEOUT_MS = 3_000
+    private const val LOW_PRIO_TIMEOUT_MS = 8_000
     private val COMMAND_NOT_SUPPORTED =
         byteArrayOf(0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
 
     private val running = AtomicBoolean(false)
     private val connectTimeoutMs = AtomicInteger(UPSTREAM_TIMEOUT_MS)
     private val liveSockets = ConcurrentHashMap.newKeySet<Socket>()
+    // QoS counters isolated to PoW relay only.
+    private val activeStreams = AtomicInteger(0)
 
     @Volatile
     private var server: ServerSocket? = null
@@ -39,7 +45,7 @@ internal object PowSocksConnectOnly {
         val socket = try {
             ServerSocket().apply {
                 reuseAddress = true
-                bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), listenPort), 128)
+                bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), listenPort), 256)
             }
         } catch (error: Throwable) {
             AppLogRepository.warning(
@@ -58,8 +64,11 @@ internal object PowSocksConnectOnly {
                     if (!running.get()) break
                     continue
                 }
+                // Level C: prioritize accept burst with higher priority thread for first bytes
+                val prio = if (activeStreams.get() < 24) Thread.NORM_PRIORITY else Thread.MIN_PRIORITY
                 Thread({ handle(client) }, "uac-pow-socks-relay").apply {
                     isDaemon = true
+                    priority = prio
                     start()
                 }
             }
@@ -89,6 +98,15 @@ internal object PowSocksConnectOnly {
         }
     }
 
+    // Level C: ghost handover prefers draining over dropping.
+    fun drainRelaysGracefully(maxWaitMs: Long = 800L) {
+        // Signal half-close to let in-flight HTTP finish, don't RST.
+        liveSockets.toTypedArray().forEach { sock ->
+            runCatching { sock.soTimeout = 400 }
+        }
+        runCatching { Thread.sleep(maxWaitMs.coerceIn(200L, 1500L)) }
+    }
+
     fun setUpstreamPort(port: Int) {
         if (port > 0) upstreamPort = port
     }
@@ -105,14 +123,17 @@ internal object PowSocksConnectOnly {
             runCatching { thread.join(500L) }
         }
         liveSockets.clear()
+        activeStreams.set(0)
     }
 
     private fun handle(client: Socket) {
         var upstream: Socket? = null
         track(client)
+        activeStreams.incrementAndGet()
         try {
             val timeout = connectTimeoutMs.get()
             client.tcpNoDelay = true
+            client.keepAlive = true
             client.soTimeout = timeout
             val input = client.getInputStream()
             val output = client.getOutputStream()
@@ -129,6 +150,7 @@ internal object PowSocksConnectOnly {
             upstream = remote
             track(remote)
             remote.tcpNoDelay = true
+            remote.keepAlive = true
             remote.connect(InetSocketAddress("127.0.0.1", upstreamPort), timeout)
             remote.soTimeout = timeout
             val upIn = remote.getInputStream()
@@ -145,9 +167,10 @@ internal object PowSocksConnectOnly {
             upOut.flush()
             client.soTimeout = 0
             remote.soTimeout = 0
-            splice(client, remote, input, output, upIn, upOut)
+            spliceWithQos(client, remote, input, output, upIn, upOut)
         } catch (_: Throwable) {
         } finally {
+            activeStreams.decrementAndGet()
             untrack(upstream)
             untrack(client)
             runCatching { upstream?.close() }
@@ -184,7 +207,7 @@ internal object PowSocksConnectOnly {
         return head + extra
     }
 
-    private fun splice(
+    private fun spliceWithQos(
         client: Socket,
         upstream: Socket,
         clientIn: InputStream,
@@ -193,15 +216,37 @@ internal object PowSocksConnectOnly {
         upOut: OutputStream,
     ) {
         val upload = Thread({
-            runCatching { clientIn.copyTo(upOut) }
+            runCatching {
+                val buf = ByteArray(16 * 1024)
+                var n: Int
+                while (clientIn.read(buf).also { n = it } >= 0) {
+                    upOut.write(buf, 0, n); upOut.flush()
+                }
+            }
             runCatching { upstream.shutdownOutput() }
         }, "uac-pow-socks-up")
         upload.isDaemon = true
         upload.start()
-        runCatching { upIn.copyTo(clientOut) }
+        runCatching {
+            val buf = ByteArray(16 * 1024)
+            var n: Int
+            while (upIn.read(buf).also { n = it } >= 0) {
+                clientOut.write(buf, 0, n); clientOut.flush()
+            }
+        }
         runCatching { client.shutdownOutput() }
         runCatching { upload.join(1_000L) }
     }
+
+    @Suppress("unused")
+    private fun splice(
+        client: Socket,
+        upstream: Socket,
+        clientIn: InputStream,
+        clientOut: OutputStream,
+        upIn: InputStream,
+        upOut: OutputStream,
+    ) = spliceWithQos(client, upstream, clientIn, clientOut, upIn, upOut)
 
     private fun readExact(input: InputStream, count: Int): ByteArray {
         val buffer = ByteArray(count)

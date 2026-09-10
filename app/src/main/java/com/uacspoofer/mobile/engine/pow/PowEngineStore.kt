@@ -8,6 +8,7 @@ import java.util.Locale
 
 class PowEngineStore private constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
 
     init {
         if (!prefs.getBoolean(KEY_H2_QUALITY_MIGRATION, false)) {
@@ -35,19 +36,23 @@ class PowEngineStore private constructor(context: Context) {
         return validated
     }
 
-    fun rememberedOuterProtocol(): String? =
-        prefs.getString(KEY_OUTER_PROTOCOL, null)
-            ?.trim()
-            ?.lowercase()
-            ?.takeIf { it in PowCoreConfig.OUTER_LADDER }
+    // Level B: per-network scoreboard — try netKey first, fallback to global.
+    fun rememberedOuterProtocol(): String? {
+        val netKey = PowNetworkScoreboard.networkKey(appContext)
+        PowNetworkScoreboard.loadOuter(prefs, netKey)?.let { return it }
+        return prefs.getString(KEY_OUTER_PROTOCOL, null)?.trim()?.lowercase()?.takeIf { it in PowCoreConfig.OUTER_LADDER }
+    }
 
     fun saveOuterProtocol(protocol: String) {
         val clean = protocol.trim().lowercase()
         if (clean !in PowCoreConfig.OUTER_LADDER) return
         prefs.edit().putString(KEY_OUTER_PROTOCOL, clean).apply()
+        PowNetworkScoreboard.saveOuter(prefs, PowNetworkScoreboard.networkKey(appContext), clean)
     }
 
     fun rememberedStrategyIndex(shape: String, ladderSize: Int): Int {
+        val netKey = PowNetworkScoreboard.networkKey(appContext)
+        PowNetworkScoreboard.loadStrategy(prefs, netKey, shape, ladderSize)?.let { return it }
         val storedShape = prefs.getString(KEY_STRATEGY_SHAPE, null)
         if (storedShape != shape) {
             prefs.edit().remove(KEY_STRATEGY_INDEX).putString(KEY_STRATEGY_SHAPE, shape).apply()
@@ -57,10 +62,13 @@ class PowEngineStore private constructor(context: Context) {
     }
 
     fun saveStrategyWinner(index: Int, shape: String) {
-        prefs.edit()
-            .putInt(KEY_STRATEGY_INDEX, index)
-            .putString(KEY_STRATEGY_SHAPE, shape)
-            .apply()
+        prefs.edit().putInt(KEY_STRATEGY_INDEX, index).putString(KEY_STRATEGY_SHAPE, shape).apply()
+        PowNetworkScoreboard.saveStrategy(prefs, PowNetworkScoreboard.networkKey(appContext), index, shape)
+    }
+
+    fun saveStrategyWinnerWithRtt(index: Int, shape: String, rttMs: Long) {
+        saveStrategyWinner(index, shape)
+        if (rttMs > 0) PowNetworkScoreboard.saveStrategy(prefs, PowNetworkScoreboard.networkKey(appContext), index, shape, rttMs)
     }
 
     fun availableRegions(): List<String> =

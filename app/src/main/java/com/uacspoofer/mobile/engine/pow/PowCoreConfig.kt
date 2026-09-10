@@ -69,15 +69,15 @@ object PowCoreConfig {
     fun outerBudgetMs(protocol: String, retune: Boolean = false): Long {
         if (retune) {
             return when (protocol) {
-                "masque" -> 28_000L
-                "wireguard" -> 22_000L
-                else -> 32_000L
+                "masque" -> 14_000L
+                "wireguard" -> 11_000L
+                else -> 16_000L
             }
         }
         return when (protocol) {
-            "masque" -> 45_000L
-            "wireguard" -> 35_000L
-            else -> 50_000L
+            "masque" -> 28_000L
+            "wireguard" -> 20_000L
+            else -> 32_000L
         }
     }
 

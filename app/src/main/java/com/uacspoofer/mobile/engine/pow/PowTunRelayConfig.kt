@@ -6,6 +6,10 @@ internal object PowTunRelayConfig {
     const val DEFAULT_MTU = 1_280
     const val FAKE_NET = "100.64.0.0"
     const val FAKE_MASK = "255.192.0.0"
+    // Isolated to PoW — does not affect TorTunRelayConfig (its own yaml is untouched).
+    const val CONNECT_TIMEOUT_MS = 2_000
+    const val TCP_BUFFER_SIZE = 262_144
+    const val UDP_TIMEOUT_MS = 20_000
 
     fun mtuForChain(preferred: Int, networkMtu: Int = 0): Int {
         var mtu = preferred.coerceIn(MIN_MTU, MAX_MTU)
@@ -41,12 +45,13 @@ internal object PowTunRelayConfig {
               cache-size: 10000
             misc:
               log-level: warn
-              connect-timeout: 5000
-              tcp-read-write-timeout: 900000
-              udp-read-write-timeout: 45000
-              tcp-buffer-size: 1048576
-              task-stack-size: 557056
+              connect-timeout: $CONNECT_TIMEOUT_MS
+              tcp-read-write-timeout: 300000
+              udp-read-write-timeout: $UDP_TIMEOUT_MS
+              tcp-buffer-size: $TCP_BUFFER_SIZE
+              task-stack-size: 262144
               max-session-count: 4096
+              keepalive-timeout: 180000
         """.trimIndent() + "\n"
     }
 }
