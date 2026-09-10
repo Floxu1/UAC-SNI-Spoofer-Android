@@ -1,86 +1,228 @@
 <div align="center">
 
+<img width="1672" height="941" alt="UAC SNI Spoofer" src="https://github.com/user-attachments/assets/f99d9c99-a01b-43f7-b3f1-f4077d45cf27" />
+
+<br/>
+
 # UAC SNI Spoofer Android
 
-<img width="1672" height="941" alt="5ddf67f8-f5b8-4eb9-94c3-8e324ee5f816" src="https://github.com/user-attachments/assets/f99d9c99-a01b-43f7-b3f1-f4077d45cf27" />
+**ابزار متن‌باز پیشرفته برای مدیریت اتصال، عبور ترافیک و بهینه‌سازی مسیر شبکه در اندروید**
 
+<br/>
 
-<a href="./README.md">فارسی</a> · <a href="./README.en.md">English</a>
+[![Release](https://img.shields.io/github/v/release/Floxu1/UAC-SNI-Spoofer-Android?display_name=tag&sort=semver&label=version&style=flat-square&color=7c3aed)](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/latest)
+![Android](https://img.shields.io/badge/Android-7.0%2B-green?style=flat-square&logo=android&logoColor=white)
+![License](https://img.shields.io/badge/License-Open%20Source-blue?style=flat-square)
+![Core](https://img.shields.io/badge/Core-Xray-orange?style=flat-square)
+
+<br/>
+
+[فارسی](./README.md) · [English](./README.en.md)
 
 </div>
 
+---
+
 <div dir="rtl" align="right">
 
-<h2>معرفی</h2>
+## ◈ معرفی
 
-<p><span dir="ltr">UAC SNI Spoofer</span> یک ابزار متن‌باز برای مدیریت اتصال‌های امن در اندروید است. برنامه از مسیر بومی <span dir="ltr">VPN/TUN</span> و هسته <span dir="ltr">Xray</span> استفاده می‌کند و برای اتصال سریع، مدیریت کانفیگ‌ها و بررسی وضعیت واقعی شبکه طراحی شده است.</p>
+**UAC SNI Spoofer** یک ابزار متن‌باز پیشرفته برای مدیریت اتصال‌های امن، عبور ترافیک و بهینه‌سازی مسیر شبکه در اندروید است.
 
-<p>نسخه فعلی: <a href="https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/latest"><img src="https://img.shields.io/github/v/release/Floxu1/UAC-SNI-Spoofer-Android?display_name=tag&amp;sort=semver&amp;label=version" alt="آخرین نسخه منتشرشده"></a></p>
+برنامه از یک معماری چندلایه استفاده می‌کند:
 
-<h2>امکانات</h2>
+<div align="right">
 
-<ul>
-  <li>تونل سراسری اندروید با <span dir="ltr">Android VpnService</span>، هسته <span dir="ltr">Xray</span> و مسیر بومی <span dir="ltr">TUN</span></li>
-  <li>پشتیبانی از کانفیگ‌های <span dir="ltr">VLESS</span>، <span dir="ltr">VMess</span> و <span dir="ltr">Trojan</span> همراه با حفظ مشخصات اصلی انتقال، امنیت، <span dir="ltr">SNI</span>، <span dir="ltr">Host</span>، <span dir="ltr">Path</span>، <span dir="ltr">ALPN</span> و <span dir="ltr">Fingerprint</span></li>
-  <li><strong>اتصال تطبیقی:</strong> ساخت اثرانگشت جداگانه برای هر شبکه با توجه به نوع اتصال، اپراتور، <span dir="ltr">ASN</span> و سرویس‌دهنده؛ سپس مرتب‌سازی مسیرها، یادگیری نتیجه موفق و اتصال سریع‌تر در دفعات بعد</li>
-  <li>استفاده از مجموعه <span dir="ltr">Edge</span>های اصلی و جایگزین متناسب با شبکه، همراه با مسیر <span dir="ltr">Direct Compatibility</span> برای آزمایش کانفیگ بدون جایگزینی آدرس، تغییر <span dir="ltr">ALPN</span> یا اعمال <span dir="ltr">FinalMask</span></li>
-  <li>بازیابی خودکار اتصال هنگام تغییر شبکه یا افت کیفیت با کمک برنده ذخیره‌شده، مسیر پشتیبان و زمان استراحت مسیرهای ناموفق</li>
-  <li><strong><span dir="ltr">Route Speed Test</span>:</strong> بررسی کامل ترکیب‌های <span dir="ltr">Edge × DNS × Fragment × MTU</span> و آزمایش صدها مسیر مستقل برای هر کانفیگ و شبکه</li>
-  <li>رقابت چندمرحله‌ای مسیرها از غربال اولیه تا آزمون پایداری، فشار و فینال <span dir="ltr">A-B-B-A</span>؛ با راه‌اندازی سرد <span dir="ltr">Xray</span>، تست چندمقصدی <span dir="ltr">HTTP</span>، پاسخ <span dir="ltr">DNS</span>، حجم دریافتی، سرعت، پینگ، نوسان، نرخ موفقیت و درصد اطمینان</li>
-  <li>رتبه‌بندی زنده بهترین مسیرها، توقف و ادامه تست بدون از دست‌رفتن نتیجه، رفتن دستی به مرحله بعد و نگهداری لیست نهایی مخصوص همان کانفیگ و اثرانگشت شبکه</li>
-  <li>انتخاب یک برنده و یک مسیر پشتیبان، ذخیره آن‌ها برای همان کانفیگ و شبکه و استفاده مستقیم در اتصال‌های بعدی</li>
-  <li>چند <span dir="ltr">DNS Resolver</span> مستقل شامل <span dir="ltr">Cloudflare</span>، <span dir="ltr">Google</span>، <span dir="ltr">Quad9</span>، <span dir="ltr">AdGuard</span> و <span dir="ltr">OpenDNS</span> با <span dir="ltr">DoH</span> و آدرس‌های <span dir="ltr">Bootstrap</span></li>
-  <li><strong><span dir="ltr">Config Maker</span>:</strong> دو روش <span dir="ltr">Quick Scan</span> و <span dir="ltr">Deep Adaptive Test</span> برای سنجش کانفیگ‌ها، نمایش مسیر در حال تست و توقف روی اولین نتیجه سالم</li>
-  <li>واردکردن کانفیگ از متن، کلیپ‌بورد، فایل یا لینک اشتراک؛ ادغام چند اشتراک بدون پاک‌شدن نتیجه‌های قبلی و حذف خودکار موارد تکراری</li>
-  <li>سه حالت مسیریابی برنامه‌ها: عبور همه برنامه‌ها از <span dir="ltr">VPN</span>، دورزدن تونل برای برنامه‌های انتخابی یا عبور فقط برنامه‌های انتخابی از <span dir="ltr">VPN</span></li>
-  <li>حالت‌های اتصال <span dir="ltr">Tunnel</span> و پروکسی محلی <span dir="ltr">SOCKS</span>، همراه با کنترل‌های <span dir="ltr">Fragment</span>، <span dir="ltr">FinalMask</span>، <span dir="ltr">MTU</span>، <span dir="ltr">Mux</span>، <span dir="ltr">Keepalive</span>، <span dir="ltr">QUIC</span> و مسیریابی</li>
-  <li>پایش زنده پینگ، ترافیک، کشور و آدرس خروجی، وضعیت سلامت اتصال و گزارش‌های فنی برای عیب‌یابی</li>
-  <li>اتصال و قطع سریع <span dir="ltr">VPN</span> از پنل <span dir="ltr">Quick Settings</span> اندروید و کنترل‌های اعلان</li>
-</ul>
+- تونل کامل سیستم — `Android VpnService`
+- مسیر بومی — `TUN Native Route`
+- هسته اصلی — `Xray Core`
+- موتور جدید بهینه‌سازی مسیر — `PoW (Path Optimization Wrapper)`
 
-<h2>نیازمندی‌ها</h2>
+</div>
 
-<ul>
-  <li>اندروید ۷ یا جدیدتر</li>
-  <li>دادن مجوز استاندارد <span dir="ltr">VPN</span> هنگام اولین اتصال</li>
-  <li>خاموش‌بودن برنامه‌های <span dir="ltr">VPN</span> دیگر هنگام استفاده</li>
-</ul>
+> هدف اصلی پروژه ایجاد یک سیستم هوشمند برای انتخاب مسیر، مقاوم‌سازی اتصال، مدیریت تغییرات شبکه و کاهش اختلال‌های ناشی از شرایط مختلف اپراتورها است.
 
-<h2>نصب</h2>
+---
 
-<ol>
-  <li>فایل <span dir="ltr">APK</span> نسخه جدید را از بخش <a href="https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases"><span dir="ltr">Releases</span></a> دریافت کنید.</li>
-  <li>برنامه را نصب و اجرا کنید.</li>
-  <li>کانفیگ موردنظر را انتخاب کنید و دکمه اتصال را بزنید.</li>
-  <li>درخواست مجوز <span dir="ltr">VPN</span> را تأیید کنید.</li>
-</ol>
+## ◈ معماری اتصال
 
-<h2>ساخت از سورس</h2>
+| لایه | نقش |
+|------|------|
+| `VPN Layer` | استفاده از `Android VpnService` برای ایجاد تونل کامل سیستم |
+| `Xray Core` | پشتیبانی از پروتکل‌های مدرن و مدیریت انتقال‌های پیچیده |
+| `PoW Engine` | بررسی، انتخاب و مدیریت هوشمند مسیرهای اتصال |
+| `Aether Native Layer` | مدیریت عملیات سطح پایین و ارتباط سریع بین لایه‌های اندروید و موتور شبکه |
+| `Tun Relay / SOCKS Bridge` | مدیریت مسیرهای `TUN → SOCKS → Transport` برای انعطاف بیشتر |
 
-<p>برای ساخت پروژه به <span dir="ltr">JDK 17</span> و <span dir="ltr">Android SDK 35</span> نیاز دارید.</p>
+---
 
-<pre dir="ltr" align="left"><code>git clone https://github.com/Floxu1/UAC-SNI-Spoofer-Android.git
+## ◈ امکانات
+
+**تونل و اتصال**
+
+<div align="right">
+
+- تونل کامل اندروید با `VpnService` و مسیر بومی `TUN`
+- پشتیبانی از موتور `Xray` برای مدیریت کانفیگ‌های `VLESS` ،`VMess` و `Trojan`
+- پشتیبانی از `SOCKS Local Proxy` در کنار حالت `Tunnel VPN`
+
+</div>
+
+**هوش مصنوعی مسیر — PoW Adaptive Network Engine**
+
+<div align="right">
+
+- تشخیص خودکار شرایط شبکه
+- امتیازدهی و رتبه‌بندی مسیرها
+- ذخیره‌سازی نتایج موفق برای هر کانفیگ و هر شبکه
+- انتخاب خودکار بهترین مسیر
+
+</div>
+
+**معیارهای رتبه‌بندی — Network Scoreboard**
+
+<div align="right">
+
+- تأخیر — `Latency`
+- پایداری بسته‌ها — `Packet Stability`
+- نرخ موفقیت — `Success Rate`
+- اثرانگشت شبکه — `Network Fingerprint`
+- اپراتور و مسیر — `Carrier / ASN`
+
+</div>
+
+**قابلیت‌های پیشرفته**
+
+<div align="right">
+
+- مدیریت هوشمند تکنیک‌های مقاوم‌سازی اتصال برای شرایط مختلف شبکه — `Adaptive Obfuscation`
+- انتقال نرم بین مسیرها هنگام تغییر شبکه یا افت کیفیت، بدون قطع کامل اتصال — `Ghost Handover`
+- بهینه‌سازی مسیرهای پرتکرار و کاهش زمان برقراری اتصال — `PoW Page Turbo`
+- معماری ارتباطی جداگانه برای مدیریت سرویس‌ها، IPC و مسیرهای جایگزین — `Psiphon Compatible Transport Layer`
+- مدیریت مسیرهای چندمرحله‌ای و لایه‌ای برای افزایش انعطاف شبکه — `Tor Style Routing Layer`
+- تست و رتبه‌بندی مسیرهای مختلف: `Edge × DNS × Fragment × MTU`
+
+</div>
+
+**مدیریت برنامه‌ها**
+
+<div align="right">
+
+- برای همه برنامه‌ها — `Global VPN`
+- `Bypass` انتخابی برای برنامه‌های مشخص
+- `VPN` فقط برای برنامه‌های انتخابی
+
+</div>
+
+**وارد کردن کانفیگ**
+
+<div align="right">
+
+- `Text` · `Clipboard` · `File` · `Subscription URL`
+
+</div>
+
+**نمایش زنده**
+
+<div align="right">
+
+- `Ping` · `Traffic` · `Exit IP` · `Country` · `Connection Health`
+- کنترل سریع از `Android Quick Settings`
+
+</div>
+
+---
+
+## ◈ موتور PoW
+
+موتور `PoW` به عنوان یک لایه مستقل برای هوشمندسازی اتصال طراحی شده است.
+به جای استفاده از یک مسیر ثابت، مسیرهای مختلف را بررسی کرده و بر اساس شرایط واقعی شبکه تصمیم می‌گیرد.
+
+```
+تشخیص تغییر شبکه  →  امتیازدهی مسیرها  →  ذخیره برنده و مسیر پشتیبان
+        ↓
+Recovery خودکار  ←  Adaptive Routing  ←  مدیریت اتصال‌های طولانی‌مدت
+```
+
+---
+
+## ◈ نیازمندی‌ها
+
+| مورد | مقدار |
+|------|-------|
+| Android | 7.0 یا بالاتر |
+| JDK (ساخت) | 17 |
+| Android SDK | 35 |
+| مجوز VPN | هنگام اولین اتصال |
+
+---
+
+## ◈ ساخت از سورس
+
+```bash
+git clone https://github.com/Floxu1/UAC-SNI-Spoofer-Android.git
 cd UAC-SNI-Spoofer-Android
-.\gradlew.bat assembleDebug</code></pre>
+.\gradlew.bat assembleDebug
+```
 
-<p>خروجی نسخه دیباگ در مسیر زیر ساخته می‌شود:</p>
+خروجی:
 
-<pre dir="ltr" align="left"><code>app\build\outputs\apk\debug\app-debug.apk</code></pre>
+```
+app\build\outputs\apk\debug\app-debug.apk
+```
 
-<h2>پشتیبانی و ارتباط</h2>
+> بخش‌های Native شامل موتورهای سطح پایین در مسیر `core/aether` قرار دارند.
 
-<ul>
-  <li>کانال تلگرام: <a href="https://t.me/UacSniSpoofer"><span dir="ltr">t.me/UacSniSpoofer</span></a></li>
-  <li>گروه تلگرام: <a href="https://t.me/UacSniSpooferGroup"><span dir="ltr">t.me/UacSniSpooferGroup</span></a></li>
-  <li>گزارش مشکل: <a href="https://github.com/Floxu1/UAC-SNI-Spoofer-Android/issues"><span dir="ltr">GitHub Issues</span></a></li>
-</ul>
+---
 
-<h2>نکته</h2>
+## ◈ ساختار پروژه
 
-<p>کیفیت اتصال به وضعیت اپراتور، کانفیگ انتخاب‌شده و شرایط شبکه بستگی دارد. هیچ کانفیگی روی تمام شبکه‌ها عملکرد یکسانی ندارد.</p>
+```
+app/
+ └── engine/
+      └── pow/
+          ├── AetherNative
+          ├── PowCoreConfig
+          ├── PowEngineStore
+          ├── PowAdaptiveObfuscation
+          ├── PowGhostHandover
+          ├── PowNetworkScoreboard
+          ├── PowTun2Socks
+          └── PowPsiphonService
 
-<p>مجوزها و توضیحات وابستگی‌های جانبی در فایل <a href="./THIRD_PARTY_NOTICES.md"><span dir="ltr">THIRD_PARTY_NOTICES.md</span></a> قرار گرفته است.</p>
+core/
+ └── aether/
 
-<h3>اگر این پروژه براتون مفید بود، لطفاً ستاره بدین ⭐</h3>
+scripts/
+ ├── isolate_psiphon_aar.py
+ └── patch_v2ray_seq.py
+```
+
+---
+
+## ◈ پشتیبانی
+
+| | |
+|---|---|
+| 📢 Telegram | [@UacSniSpoofer](https://t.me/UacSniSpoofer) |
+| 👥 Group | [@UacSniSpooferGroup](https://t.me/UacSniSpooferGroup) |
+| 🐛 Issues | [GitHub Issues](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/issues) |
+
+---
+
+## ◈ توضیحات
+
+> عملکرد اتصال به عوامل مختلفی مانند اپراتور، کیفیت شبکه، کانفیگ انتخابی و شرایط مسیر بستگی دارد.
+> هیچ مسیر یا کانفیگی برای تمام شبکه‌ها بهترین نتیجه را تضمین نمی‌کند.
+
+مجوزها و وابستگی‌های خارجی در فایل [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) قرار دارند.
+
+---
+
+<div align="center">
+
+اگر پروژه برای شما مفید بود، لطفاً ⭐ بدهید
+
+</div>
 
 </div>
