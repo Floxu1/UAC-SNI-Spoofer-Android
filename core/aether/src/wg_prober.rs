@@ -53,7 +53,7 @@ impl WgScanMode {
             WgScanMode::Turbo => WgStrategy {
                 concurrency: 12,
                 per_probe_timeout: Duration::from_millis(5000),
-                overall_deadline: Duration::from_secs(30),
+                overall_deadline: Duration::from_secs(12),
                 quiet_after_first: Duration::from_secs(0),
                 target_successes: 1,
                 early_exit_first: true,
@@ -63,28 +63,28 @@ impl WgScanMode {
                 pool_port_waves: 2,
             },
             WgScanMode::Balanced => WgStrategy {
-                concurrency: 8,
-                per_probe_timeout: Duration::from_millis(7000),
-                overall_deadline: Duration::from_secs(80),
-                quiet_after_first: Duration::from_secs(12),
-                target_successes: 5,
+                concurrency: 10,
+                per_probe_timeout: Duration::from_millis(6000),
+                overall_deadline: Duration::from_secs(18),
+                quiet_after_first: Duration::from_secs(2),
+                target_successes: 3,
                 early_exit_first: false,
                 full_subnet: false,
-                sample_per_cidr: 120,
+                sample_per_cidr: 80,
                 anchor_port_count: 4,
                 pool_port_waves: 3,
             },
             WgScanMode::Thorough => WgStrategy {
-                concurrency: 10,
-                per_probe_timeout: Duration::from_millis(9000),
-                overall_deadline: Duration::from_secs(250),
-                quiet_after_first: Duration::from_secs(25),
-                target_successes: 0,
+                concurrency: 12,
+                per_probe_timeout: Duration::from_millis(8000),
+                overall_deadline: Duration::from_secs(32),
+                quiet_after_first: Duration::from_secs(6),
+                target_successes: 5,
                 early_exit_first: false,
-                full_subnet: true,
-                sample_per_cidr: 0,
-                anchor_port_count: 8,
-                pool_port_waves: 4,
+                full_subnet: false,
+                sample_per_cidr: 140,
+                anchor_port_count: 6,
+                pool_port_waves: 3,
             },
             WgScanMode::Stealth => WgStrategy {
                 concurrency: 3,
@@ -218,14 +218,20 @@ pub async fn hunt_best_wg_endpoint(probe: &WgProbe, mode: WgScanMode) -> Result<
                             _ => pr,
                         });
                         found += 1;
-
-                        if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
-                            log::info!("[+] reached target of {} endpoints, selecting best", st.target_successes);
-                            if !st.quiet_after_first.is_zero() {
-                                quiet_until = Some(Instant::now() + st.quiet_after_first);
-                            } else {
-                                break;
-                            }
+                        if quiet_until.is_none() && !st.quiet_after_first.is_zero() {
+                            quiet_until = Some(Instant::now() + st.quiet_after_first);
+                            log::info!(
+                                "[+] first wg endpoint in {:?}; ranking for {:?}",
+                                pr.rtt,
+                                st.quiet_after_first
+                            );
+                        }
+                        if st.target_successes > 0 && found >= st.target_successes {
+                            log::info!(
+                                "[+] reached target of {} endpoints, selecting best",
+                                st.target_successes
+                            );
+                            break;
                         }
                     }
                 }
@@ -521,6 +527,23 @@ fn sample_cidr_v6(cidr: &str, n: usize, v4_cidrs: &[&str]) -> Vec<Ipv6Addr> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn connect_scan_modes_finish_fast_enough_for_android() {
+        let turbo = WgScanMode::Turbo.strategy();
+        let balanced = WgScanMode::Balanced.strategy();
+        let thorough = WgScanMode::Thorough.strategy();
+
+        assert!(turbo.early_exit_first);
+        assert!(!balanced.early_exit_first);
+        assert!(!thorough.full_subnet);
+        assert!(balanced.quiet_after_first <= Duration::from_secs(3));
+        assert!(thorough.quiet_after_first <= Duration::from_secs(8));
+        assert!(balanced.overall_deadline <= Duration::from_secs(20));
+        assert!(thorough.overall_deadline <= Duration::from_secs(35));
+        assert!(turbo.overall_deadline <= balanced.overall_deadline);
+        assert!(balanced.target_successes >= 1 && balanced.target_successes <= 3);
+    }
 
     #[test]
     fn anchors_cover_priority_ports_before_the_sampled_pool() {

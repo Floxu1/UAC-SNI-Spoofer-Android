@@ -280,7 +280,7 @@ impl ScanMode {
             ScanMode::Turbo => Strategy {
                 concurrency: 20,
                 per_probe_timeout: Duration::from_millis(6000),
-                overall_deadline: Duration::from_secs(45),
+                overall_deadline: Duration::from_secs(18),
                 quiet_after_first: Duration::from_secs(0),
                 target_successes: 1,
                 early_exit_first: true,
@@ -290,22 +290,22 @@ impl ScanMode {
             ScanMode::Balanced => Strategy {
                 concurrency: 16,
                 per_probe_timeout: Duration::from_millis(6000),
-                overall_deadline: Duration::from_secs(120),
-                quiet_after_first: Duration::from_secs(20),
-                target_successes: 6,
+                overall_deadline: Duration::from_secs(25),
+                quiet_after_first: Duration::from_secs(2),
+                target_successes: 3,
                 early_exit_first: false,
                 full_subnet: false,
-                sample_per_cidr: 140,
+                sample_per_cidr: 80,
             },
             ScanMode::Thorough => Strategy {
-                concurrency: 20,
-                per_probe_timeout: Duration::from_millis(10000),
-                overall_deadline: Duration::from_secs(300),
-                quiet_after_first: Duration::from_secs(30),
-                target_successes: 0,
+                concurrency: 18,
+                per_probe_timeout: Duration::from_millis(8000),
+                overall_deadline: Duration::from_secs(45),
+                quiet_after_first: Duration::from_secs(6),
+                target_successes: 5,
                 early_exit_first: false,
-                full_subnet: true,
-                sample_per_cidr: 0,
+                full_subnet: false,
+                sample_per_cidr: 180,
             },
             ScanMode::Stealth => Strategy {
                 concurrency: 3,
@@ -447,14 +447,20 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
                             _ => pr,
                         });
                         found += 1;
-
-                        if st.target_successes > 0 && found >= st.target_successes && quiet_until.is_none() {
-                            log::info!("[+] reached target of {} gateways, selecting best", st.target_successes);
-                            if !st.quiet_after_first.is_zero() {
-                                quiet_until = Some(Instant::now() + st.quiet_after_first);
-                            } else {
-                                break;
-                            }
+                        if quiet_until.is_none() && !st.quiet_after_first.is_zero() {
+                            quiet_until = Some(Instant::now() + st.quiet_after_first);
+                            log::info!(
+                                "[+] first gateway in {:?}; ranking for {:?}",
+                                pr.rtt,
+                                st.quiet_after_first
+                            );
+                        }
+                        if st.target_successes > 0 && found >= st.target_successes {
+                            log::info!(
+                                "[+] reached target of {} gateways, selecting best",
+                                st.target_successes
+                            );
+                            break;
                         }
                     }
                 }
@@ -831,6 +837,26 @@ mod tests {
         for entry in MASQUE_DOH_CIDRS_V4 {
             assert!(tail.contains(entry), "{entry} should be at the end");
         }
+    }
+
+    #[test]
+    fn connect_scan_modes_finish_fast_enough_for_android() {
+        let turbo = ScanMode::Turbo.strategy();
+        let balanced = ScanMode::Balanced.strategy();
+        let thorough = ScanMode::Thorough.strategy();
+
+        assert!(turbo.early_exit_first);
+        assert!(!balanced.early_exit_first);
+        assert!(!thorough.early_exit_first);
+        assert!(!thorough.full_subnet);
+        assert!(balanced.quiet_after_first <= Duration::from_secs(3));
+        assert!(thorough.quiet_after_first <= Duration::from_secs(8));
+        assert!(balanced.overall_deadline <= Duration::from_secs(30));
+        assert!(thorough.overall_deadline <= Duration::from_secs(50));
+        assert!(turbo.overall_deadline <= balanced.overall_deadline);
+        assert!(balanced.overall_deadline <= thorough.overall_deadline);
+        assert!(balanced.target_successes >= 1 && balanced.target_successes <= 3);
+        assert!(thorough.sample_per_cidr > balanced.sample_per_cidr);
     }
 
     #[test]

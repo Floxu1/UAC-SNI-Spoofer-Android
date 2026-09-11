@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use futures::StreamExt;
+
 use crate::error::{AetherError, Result};
 pub use crate::prober::{IpScan, ScanMode};
 use crate::{
@@ -69,6 +71,10 @@ pub struct StartOptions {
     /// though the code to serve it was already here. Carried in the config now, and
     /// the environment variable is still honoured as a fallback for the CLI.
     pub http_proxy: Option<SocketAddr>,
+    /// Android owns the outer-protocol ladder. One failed hunt must return so
+    /// Kotlin can try the next transport instead of sleeping inside a rescan loop
+    /// until the app kills the process.
+    pub scan_once: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +173,7 @@ impl StartOptions {
             gateway: false,
             upstream_proxy: None,
             http_proxy: None,
+            scan_once: false,
         }
     }
 
@@ -348,6 +355,7 @@ fn apply_runtime_options(options: &StartOptions) {
     }
     socks::clear_gateway_proxy();
     socks::reload_routes();
+    std::env::set_var("AETHER_SCAN", options.scan_mode.label());
 }
 
 pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
@@ -1289,21 +1297,48 @@ async fn dial_masque_pass(
     dial_masque_pass_from(identity, candidates, options, 0).await
 }
 
-/// Dial each candidate in order, carrying an identity-rejection count in from a
-/// previous pass.
-///
-/// The count carries across transports on purpose: a 4xx on the CONNECT means
-/// the edge read our client certificate and refused it, which no change of
-/// transport or peer can fix.
+async fn probe_known_masque_peer(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    source: &'static str,
+    options: &StartOptions,
+) -> (SocketAddr, PeerOutcome) {
+    (
+        peer,
+        try_masque_peer(identity, peer, source, options).await,
+    )
+}
+
+/// Dial known gateways concurrently. Sequential 5s timeouts were eating the
+/// whole Android outer budget before SOCKS could come up; the first peer that
+/// answers connect-ip wins, which is also the fastest path in that wave.
 async fn dial_masque_pass_from(
     identity: &account::Identity,
     candidates: &[(SocketAddr, &'static str)],
     options: &StartOptions,
     mut identity_rejections: u32,
 ) -> PassOutcome {
-    for (peer, source) in candidates {
-        match try_masque_peer(identity, *peer, source, options).await {
-            PeerOutcome::Accepted => return PassOutcome::Connected(*peer),
+    if candidates.is_empty() {
+        return if identity_rejections > 0 {
+            PassOutcome::IdentityRejected(identity_rejections)
+        } else {
+            PassOutcome::Exhausted
+        };
+    }
+
+    let conc = crate::sysprofile::cap_concurrency(8).clamp(1, candidates.len());
+    let mut in_flight = futures::stream::FuturesUnordered::new();
+    let mut next = 0usize;
+
+    while in_flight.len() < conc && next < candidates.len() {
+        let (peer, source) = candidates[next];
+        next += 1;
+        in_flight.push(probe_known_masque_peer(identity, peer, source, options));
+    }
+
+    while let Some((peer, outcome)) = in_flight.next().await {
+        match outcome {
+            PeerOutcome::Accepted => return PassOutcome::Connected(peer),
             PeerOutcome::IdentityRejected => {
                 identity_rejections += 1;
                 if identity_rejections >= IDENTITY_REJECTED_LIMIT {
@@ -1311,6 +1346,11 @@ async fn dial_masque_pass_from(
                 }
             }
             PeerOutcome::Unreachable => {}
+        }
+        if next < candidates.len() {
+            let (peer, source) = candidates[next];
+            next += 1;
+            in_flight.push(probe_known_masque_peer(identity, peer, source, options));
         }
     }
 
@@ -1739,6 +1779,9 @@ async fn run_masque(
                             crate::ffi::record_log(format!(
                                 "No usable MASQUE gateway ({e}); retrying shortly"
                             ));
+                            if options.scan_once {
+                                return Err(e);
+                            }
                             // Deliberately no `enable_restricted_h2()` here.
                             //
                             // `hunt_masque_peer` already tries the bounded HTTP/2
@@ -1757,20 +1800,26 @@ async fn run_masque(
 
         log::info!("[+] using cloudflare edge {peer}");
 
-        if forced.is_none() {
-            let profile = options.masque_profile().to_string();
-            lastconn::save(&lastconn_path, &peer.to_string(), &profile);
-        }
-
         last_good_peer = Some(peer);
 
         let reconnect_detail =
-            match run_masque_tunnel(&identity, peer, ech.clone(), listen, options).await {
+            match run_masque_tunnel(
+                &identity,
+                peer,
+                ech.clone(),
+                listen,
+                options,
+                forced.is_none().then_some(lastconn_path.as_str()),
+            )
+            .await {
                 Ok(()) => "MASQUE tunnel closed; reconnecting".to_string(),
                 Err(e) => format!("MASQUE tunnel ended: {e}; reconnecting"),
             };
         log::warn!("[-] {reconnect_detail}");
         crate::ffi::record_log(&reconnect_detail);
+        if options.scan_once {
+            return Err(AetherError::Other(reconnect_detail));
+        }
 
         crate::ffi::emit_status("connecting", Some(reconnect_detail));
 
@@ -1784,6 +1833,7 @@ async fn run_masque_tunnel(
     ech: Option<Vec<u8>>,
     listen: SocketAddr,
     options: &StartOptions,
+    lastconn_path: Option<&str>,
 ) -> Result<()> {
     let (chans, internals) = quic::channels();
 
@@ -1876,7 +1926,12 @@ async fn run_masque_tunnel(
 
     let startup_timeout = masque_startup_timeout();
     let tunnel_result = match tokio::time::timeout(startup_timeout, ready_rx).await {
-        Ok(Ok(())) => tunnel_task.await,
+        Ok(Ok(())) => {
+            if let Some(path) = lastconn_path {
+                lastconn::save(path, &peer.to_string(), options.masque_profile());
+            }
+            tunnel_task.await
+        }
         Ok(Err(_)) => {
             let joined = tunnel_task.await;
             let msg = match joined {
@@ -2159,9 +2214,10 @@ async fn run_wireguard(
     let (mode_str, ip) = if forced.is_some() || quick.is_some() {
         (String::new(), prober::IpScan::V4)
     } else {
-        let mode_str = select_scan_mode_str().await;
-        let ip = select_ip_version().await;
-        (mode_str, ip)
+        (
+            options.scan_mode.label().to_string(),
+            options.ip_scan,
+        )
     };
 
     let mut last_good: Option<(SocketAddr, aethernoize::AetherNoizeConfig, String)> = None;
@@ -2276,6 +2332,9 @@ async fn run_wireguard(
                             Ok(v) => v,
                             Err(e) => {
                                 log::warn!("[-] no usable WireGuard endpoint found: {e}; rescanning shortly");
+                                if options.scan_once {
+                                    return Err(e);
+                                }
                                 tokio::time::sleep(wg_reconnect_delay()).await;
                                 continue;
                             }
@@ -2287,17 +2346,21 @@ async fn run_wireguard(
 
         log::info!("[+] using cloudflare edge {peer}");
 
-        if forced.is_none() {
-            lastconn::save(&lastconn_path, &peer.to_string(), &profile_name);
-        }
-
         let is_same_peer_as_before = last_good.as_ref().map(|(p, _, _)| *p) == Some(peer);
         if !is_same_peer_as_before {
             consecutive_fails_on_peer = 0;
         }
-        last_good = Some((peer, profile.clone(), profile_name));
+        last_good = Some((peer, profile.clone(), profile_name.clone()));
 
-        match run_wireguard_tunnel(identity.clone(), peer, profile, listen, options).await {
+        match run_wireguard_tunnel(
+            identity.clone(),
+            peer,
+            profile,
+            listen,
+            options,
+            forced.is_none().then_some((lastconn_path.as_str(), profile_name.as_str())),
+        )
+        .await {
             Ok(()) => {
                 log::warn!("[-] WireGuard tunnel closed; reconnecting");
                 consecutive_fails_on_peer += 1;
@@ -2306,6 +2369,9 @@ async fn run_wireguard(
                 log::warn!("[-] WireGuard tunnel ended: {e}; reconnecting");
                 consecutive_fails_on_peer += 1;
             }
+        }
+        if options.scan_once {
+            return Err(AetherError::Other("WireGuard tunnel ended".into()));
         }
 
         tokio::time::sleep(wg_reconnect_delay()).await;
@@ -2318,6 +2384,7 @@ async fn run_wireguard_tunnel(
     aethernoize: aethernoize::AetherNoizeConfig,
     listen: SocketAddr,
     options: &StartOptions,
+    lastconn: Option<(&str, &str)>,
 ) -> Result<()> {
     let private_key = identity.private_key_bytes()?;
     let peer_public = identity.peer_public_key_bytes()?;
@@ -2411,6 +2478,9 @@ async fn run_wireguard_tunnel(
     // it does stop the core claiming ready for a session that has no data path at
     // all.
     crate::ffi::mark_ready();
+    if let Some((path, profile)) = lastconn {
+        lastconn::save(path, &peer.to_string(), profile);
+    }
 
     let tunnel_result = tunnel.run(outbound_rx).await;
     if let Some(task) = &http_task {
@@ -2635,6 +2705,9 @@ async fn run_gool(
                         log::warn!(
                             "[-] no usable outer WARP endpoint found: {e}; rescanning shortly"
                         );
+                        if options.scan_once {
+                            return Err(e);
+                        }
                         tokio::time::sleep(wg_reconnect_delay()).await;
                         continue;
                     }
@@ -2645,18 +2718,22 @@ async fn run_gool(
         };
 
         log::info!("[+] using cloudflare edge {peer} (outer)");
-        if options.forced_peer.is_none() {
-            // Saved before the tunnel is raised, not after: the outer endpoint has
-            // already passed a handshake and data-plane check by this point, and
-            // the call below only returns when the whole GOOL session ends. Waiting
-            // for that would mean never recording a peer that worked for hours.
-            lastconn::save(&lastconn_path, &peer.to_string(), GOOL_OUTER_PROFILE);
-        }
         last_peer = Some(peer);
 
-        match run_warp_in_warp(primary.clone(), secondary.clone(), peer, listen, options).await {
+        match run_warp_in_warp(
+            primary.clone(),
+            secondary.clone(),
+            peer,
+            listen,
+            options,
+            options.forced_peer.is_none().then_some(lastconn_path.as_str()),
+        )
+        .await {
             Ok(()) => log::warn!("[-] gool tunnel closed; reconnecting"),
             Err(e) => log::warn!("[-] gool tunnel ended: {e}; reconnecting"),
+        }
+        if options.scan_once {
+            return Err(AetherError::Other("gool tunnel ended".into()));
         }
         consecutive_fails += 1;
 
@@ -2727,6 +2804,7 @@ async fn run_warp_in_warp(
     peer: SocketAddr,
     listen: SocketAddr,
     options: &StartOptions,
+    lastconn_path: Option<&str>,
 ) -> Result<()> {
     log::info!("[*] establishing outer WARP tunnel to {peer}...");
     let (outer_stack, mut outer_exit) = establish_wg(
@@ -2814,6 +2892,9 @@ async fn run_warp_in_warp(
     };
 
     crate::ffi::mark_ready();
+    if let Some(path) = lastconn_path {
+        lastconn::save(path, &peer.to_string(), GOOL_OUTER_PROFILE);
+    }
 
     let outcome = tokio::select! {
         result = &mut outer_exit => join_outcome("outer wireguard tunnel", result),
@@ -3151,6 +3232,7 @@ mod tests {
 
         assert_eq!(options.listen, "127.0.0.1:1819".parse().unwrap());
         assert_eq!(options.scan_mode, ScanMode::Balanced);
+        assert!(!options.scan_once);
         assert_eq!(options.ip_scan, IpScan::V4);
         assert_eq!(options.masque_profile(), "firewall");
         assert!(options.forced_peer.is_none());

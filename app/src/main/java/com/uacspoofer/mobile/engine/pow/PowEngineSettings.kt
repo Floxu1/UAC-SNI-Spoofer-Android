@@ -5,6 +5,7 @@ data class PowEngineSettings(
     val outerTransport: String = PowCoreConfig.OUTER_AUTO,
     val obfuscationProfile: String = "balanced",
     val h2Fragmentation: Boolean = false,
+    val scanMode: String = PowCoreConfig.SCAN_BALANCED,
 ) {
     fun validated(): PowEngineSettings {
         val country = PowRegions.normalize(exitCountryCode)
@@ -18,6 +19,7 @@ data class PowEngineSettings(
                 PowCoreConfig.OUTER_AUTO
             },
             obfuscationProfile = if (obfuscation in OBFUSCATION_PROFILES) obfuscation else "balanced",
+            scanMode = PowCoreConfig.normalizeScanMode(scanMode),
         )
     }
 

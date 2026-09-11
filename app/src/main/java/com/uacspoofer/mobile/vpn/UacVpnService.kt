@@ -36,6 +36,7 @@ import com.uacspoofer.mobile.engine.pow.PowPhase
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
 import com.uacspoofer.mobile.engine.pow.PowTun2Socks
 import com.uacspoofer.mobile.engine.pow.PowTunRelayConfig
+import com.uacspoofer.mobile.location.GpsSpoofRuntime
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciConfig
@@ -116,6 +117,7 @@ class UacVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         AppLogRepository.info(LogSource.SERVICE, "Connection service created")
+        GpsSpoofRuntime.attach(this)
         createNotificationChannel()
         nativeTunEngine = XrayNativeTunEngine(this)
         proxyCore = MciXrayCore(this)

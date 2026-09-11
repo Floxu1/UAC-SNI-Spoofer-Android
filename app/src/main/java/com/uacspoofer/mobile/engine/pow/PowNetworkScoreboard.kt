@@ -44,6 +44,27 @@ internal object PowNetworkScoreboard {
         }.getOrDefault("other:unknown")
     }
 
+    fun networkKind(context: Context): String {
+        return runCatching {
+            val cm = context.getSystemService(ConnectivityManager::class.java) ?: return "other:unknown"
+            val net = cm.activeNetwork ?: return "other:unknown"
+            val caps = cm.getNetworkCapabilities(net)
+            when {
+                caps == null -> "other:unknown"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi:unknown"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cell:unknown"
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "eth:unknown"
+                else -> "other:unknown"
+            }
+        }.getOrDefault("other:unknown")
+    }
+
+    fun matchesCurrent(rowKey: String, currentKey: String): Boolean {
+        val rowKind = rowKey.substringBefore(':')
+        val currentKind = currentKey.substringBefore(':')
+        return rowKind.isNotBlank() && rowKind == currentKind
+    }
+
     fun saveOuter(prefs: android.content.SharedPreferences, netKey: String, protocol: String) {
         val clean = protocol.trim().lowercase().takeIf { it in PowCoreConfig.OUTER_LADDER } ?: return
         prefs.edit().putString(KEY_PREFIX_OUTER + netKey, clean).apply()
@@ -66,8 +87,54 @@ internal object PowNetworkScoreboard {
         return prefs.getInt(KEY_PREFIX_STRATEGY + netKey, 0).coerceIn(0, (ladderSize - 1).coerceAtLeast(0))
     }
 
-    fun bestOuterForScoreboard(prefs: android.content.SharedPreferences, fallback: String?): String? {
-        val key = runCatching { networkKey(prefs as Context) }.getOrNull()
-        return key?.let { loadOuter(prefs, it) } ?: fallback
+    fun loadRttMs(prefs: android.content.SharedPreferences, netKey: String): Long? =
+        runCatching { prefs.getLong(KEY_PREFIX_RTT + netKey, 0L) }.getOrNull()?.takeIf { it > 0L }
+
+    fun prefNetworkKey(prefKey: String): String? = when {
+        prefKey.startsWith(KEY_PREFIX_STRAT_SHAPE) -> prefKey.removePrefix(KEY_PREFIX_STRAT_SHAPE)
+        prefKey.startsWith(KEY_PREFIX_OUTER) -> prefKey.removePrefix(KEY_PREFIX_OUTER)
+        prefKey.startsWith(KEY_PREFIX_STRATEGY) -> prefKey.removePrefix(KEY_PREFIX_STRATEGY)
+        prefKey.startsWith(KEY_PREFIX_RTT) -> prefKey.removePrefix(KEY_PREFIX_RTT)
+        else -> null
+    }
+
+    fun rows(prefs: android.content.SharedPreferences): List<PowScoreboardRow> {
+        val keys = runCatching { prefs.all.keys }.getOrDefault(emptySet())
+            .mapNotNull(::prefNetworkKey)
+            .distinct()
+            .sorted()
+        return keys.map { netKey ->
+            PowScoreboardRow(
+                networkKey = netKey,
+                outer = loadOuter(prefs, netKey),
+                strategyIndex = runCatching {
+                    if (prefs.contains(KEY_PREFIX_STRATEGY + netKey)) {
+                        prefs.getInt(KEY_PREFIX_STRATEGY + netKey, 0)
+                    } else {
+                        null
+                    }
+                }.getOrNull(),
+                rttMs = loadRttMs(prefs, netKey),
+            )
+        }
+    }
+
+    fun clearAll(prefs: android.content.SharedPreferences): Int {
+        val keys = prefs.all.keys.filter { key ->
+            key.startsWith(KEY_PREFIX_OUTER) ||
+                key.startsWith(KEY_PREFIX_STRATEGY) ||
+                key.startsWith(KEY_PREFIX_STRAT_SHAPE) ||
+                key.startsWith(KEY_PREFIX_RTT)
+        }
+        if (keys.isEmpty()) return 0
+        prefs.edit().also { editor -> keys.forEach(editor::remove) }.apply()
+        return keys.size
     }
 }
+
+internal data class PowScoreboardRow(
+    val networkKey: String,
+    val outer: String?,
+    val strategyIndex: Int?,
+    val rttMs: Long?,
+)

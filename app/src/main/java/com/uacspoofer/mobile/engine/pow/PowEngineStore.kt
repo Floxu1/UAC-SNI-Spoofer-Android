@@ -17,6 +17,17 @@ class PowEngineStore private constructor(context: Context) {
                 .putBoolean(KEY_H2_QUALITY_MIGRATION, true)
                 .apply()
         }
+        if (!prefs.getBoolean(KEY_CONNECT_FIRST_MIGRATION, false)) {
+            // Previous connects recorded last-good WARP/WoW after MASQUE and
+            // WireGuard were killed mid-scan. Auto then always started there.
+            PowNetworkScoreboard.clearAll(prefs)
+            prefs.edit()
+                .remove(KEY_OUTER_PROTOCOL)
+                .putBoolean(KEY_CONNECT_FIRST_MIGRATION, true)
+                .apply()
+            runCatching { PowCoreConfig.lastconnPath(appContext).takeIf { it.isFile }?.delete() }
+            runCatching { PowCoreConfig.goolLastconnPath(appContext).takeIf { it.isFile }?.delete() }
+        }
     }
 
     private val mutableSettings = MutableStateFlow(read())
@@ -31,6 +42,7 @@ class PowEngineStore private constructor(context: Context) {
             .putString(KEY_OUTER, validated.outerTransport)
             .putString(KEY_OBFUSCATION, validated.obfuscationProfile)
             .putBoolean(KEY_H2_FRAGMENT, validated.h2Fragmentation)
+            .putString(KEY_SCAN_MODE, validated.scanMode)
             .apply()
         mutableSettings.value = validated
         return validated
@@ -84,11 +96,16 @@ class PowEngineStore private constructor(context: Context) {
         prefs.edit().putString(KEY_AVAILABLE_REGIONS, clean.joinToString(",")).apply()
     }
 
+    internal fun learnedPaths(): PowLearnedPathSnapshot = PowPathMemory.snapshot(appContext, prefs)
+
+    internal fun forgetLearnedPaths(): Int = PowPathMemory.forget(appContext, prefs)
+
     private fun read(): PowEngineSettings = PowEngineSettings(
         exitCountryCode = prefs.getString(KEY_EXIT_COUNTRY, "").orEmpty(),
         outerTransport = prefs.getString(KEY_OUTER, PowCoreConfig.OUTER_AUTO).orEmpty(),
         obfuscationProfile = prefs.getString(KEY_OBFUSCATION, "balanced").orEmpty(),
         h2Fragmentation = prefs.getBoolean(KEY_H2_FRAGMENT, false),
+        scanMode = prefs.getString(KEY_SCAN_MODE, PowCoreConfig.SCAN_BALANCED).orEmpty(),
     ).validated()
 
     companion object {
@@ -97,7 +114,9 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_OUTER = "outer_transport"
         private const val KEY_OBFUSCATION = "obfuscation_profile"
         private const val KEY_H2_FRAGMENT = "h2_fragmentation"
+        private const val KEY_SCAN_MODE = "scan_mode"
         private const val KEY_H2_QUALITY_MIGRATION = "h2_fragment_off_for_quality"
+        private const val KEY_CONNECT_FIRST_MIGRATION = "connect_first_outer_v1"
         private const val KEY_OUTER_PROTOCOL = "outer_protocol"
         private const val KEY_STRATEGY_INDEX = "psiphon_winning_strategy_chained"
         private const val KEY_STRATEGY_SHAPE = "psiphon_winning_strategy_chained_shape"

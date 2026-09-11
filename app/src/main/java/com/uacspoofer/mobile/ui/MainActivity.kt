@@ -21,6 +21,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.core.VpnController
+import com.uacspoofer.mobile.location.GpsSpoofRuntime
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
@@ -75,6 +76,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyShellOrientation()
+        GpsSpoofRuntime.attach(this)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),

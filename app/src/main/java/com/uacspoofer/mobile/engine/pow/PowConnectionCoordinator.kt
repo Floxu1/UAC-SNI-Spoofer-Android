@@ -183,7 +183,9 @@ class PowConnectionCoordinator(
                     ownsTun = true
                 }
                 AetherNative.attach(service)
-                val outer = raiseOuterLeg() ?: error(outerFailureMessage())
+                val outer = raiseOuterLeg(
+                    scanMode = PowCoreConfig.normalizeScanMode(currentSettings.scanMode),
+                ) ?: error(outerFailureMessage())
                 ensureActive()
                 PowStatusStore.update(
                     PowPhase.INNER,
@@ -370,7 +372,7 @@ class PowConnectionCoordinator(
 
     private suspend fun raiseOuterLeg(
         discovery: String = PowCoreConfig.DISCOVERY_CACHE,
-        scanMode: String = "balanced",
+        scanMode: String = PowCoreConfig.SCAN_BALANCED,
         silent: Boolean = false,
         retune: Boolean = false,
         chainPort: Int = PowCoreConfig.CHAIN_SOCKS_PORT,
@@ -388,7 +390,7 @@ class PowConnectionCoordinator(
             coroutineContext.ensureActive()
             if (stopRequested.get()) return null
             val label = PowCoreConfig.outerLabel(protocol)
-            val budget = PowCoreConfig.outerBudgetMs(protocol, retune = retune)
+            val budget = PowCoreConfig.outerBudgetMs(protocol, retune = retune, scanMode = scanMode)
             if (AetherNative.isRunning()) {
                 stopOuterLeg()
             }
@@ -402,7 +404,7 @@ class PowConnectionCoordinator(
             }
             AppLogRepository.info(
                 LogSource.POW,
-                "Outer attempt ${offset + 1}/${ordered.size}: $label (${budget / 1000}s)" +
+                "Outer attempt ${offset + 1}/${ordered.size}: $label (${budget / 1000}s, $scanMode)" +
                     if (retune) " fresh" else "",
             )
             val config = if (chainPort == PowCoreConfig.CHAIN_SOCKS_PORT) {
@@ -437,7 +439,7 @@ class PowConnectionCoordinator(
             outerThread = thread
             thread.start()
             if (awaitOuterProxy(budget, chainPort)) {
-                if (auto) store.saveOuterProtocol(protocol)
+                store.saveOuterProtocol(protocol)
                 lastOuterProtocol = protocol
                 outerCommitted = true
                 AppLogRepository.success(LogSource.POW, "$label is carrying the outer leg")
@@ -923,7 +925,7 @@ class PowConnectionCoordinator(
             val outer = withRetuneHunt {
                 raiseOuterLeg(
                     discovery = PowCoreConfig.DISCOVERY_FRESH,
-                    scanMode = "turbo",
+                    scanMode = PowCoreConfig.SCAN_TURBO,
                     silent = true,
                     retune = true,
                 )

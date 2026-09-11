@@ -128,6 +128,8 @@ struct NativeStartOptions {
     /// already loaded and running, so LAN sharing on the WARP transports had no way
     /// to ask for the HTTP listener at all before this field existed.
     http_proxy: Option<String>,
+    #[serde(default = "default_true")]
+    scan_once: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -164,8 +166,13 @@ impl Default for NativeStartOptions {
             gateway: false,
             upstream_proxy: None,
             http_proxy: None,
+            scan_once: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl TryFrom<NativeStartOptions> for StartOptions {
@@ -218,6 +225,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.access_email = value.access_email.filter(|value| !value.trim().is_empty());
         options.gateway = value.gateway;
         options.upstream_proxy = value.upstream_proxy.filter(|v| !v.trim().is_empty());
+        options.scan_once = value.scan_once;
         options.http_proxy = match value.http_proxy.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),
@@ -634,6 +642,7 @@ mod tests {
         assert_eq!(options.masque_transport, MasqueTransport::H2);
         assert_eq!(options.listen, "127.0.0.1:1819".parse().unwrap());
         assert_eq!(options.scan_mode, ScanMode::Balanced);
+        assert!(options.scan_once);
         assert_eq!(options.tls_curve_preset, TlsCurvePreset::Chrome);
         assert!(options.wireguard_data_check);
     }

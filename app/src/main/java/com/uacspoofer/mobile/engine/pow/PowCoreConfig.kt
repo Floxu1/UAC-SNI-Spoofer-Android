@@ -11,8 +11,22 @@ object PowCoreConfig {
     const val OUTER_AUTO = "auto"
     const val DISCOVERY_CACHE = "cache"
     const val DISCOVERY_FRESH = "fresh"
+    const val SCAN_TURBO = "turbo"
+    const val SCAN_BALANCED = "balanced"
+    const val SCAN_THOROUGH = "thorough"
 
     val OUTER_LADDER = listOf("wireguard", "masque", "gool")
+    val SCAN_MODES = listOf(SCAN_TURBO, SCAN_BALANCED, SCAN_THOROUGH)
+
+    fun normalizeScanMode(raw: String?): String {
+        val value = raw?.trim()?.lowercase().orEmpty()
+        return when (value) {
+            "fast", SCAN_TURBO -> SCAN_TURBO
+            "deep", SCAN_THOROUGH -> SCAN_THOROUGH
+            SCAN_BALANCED -> SCAN_BALANCED
+            else -> SCAN_BALANCED
+        }
+    }
 
     fun identityPath(context: Context): File = File(context.filesDir, "uac-pow.toml")
 
@@ -39,7 +53,7 @@ object PowCoreConfig {
         protocol: String,
         settings: PowEngineSettings,
         discovery: String = DISCOVERY_CACHE,
-        scanMode: String = "balanced",
+        scanMode: String = PowCoreConfig.SCAN_BALANCED,
     ): String = JSONObject().apply {
         put("config_path", identityPath(context).absolutePath)
         put("protocol", protocol)
@@ -66,7 +80,7 @@ object PowCoreConfig {
         else -> protocol.uppercase()
     }
 
-    fun outerBudgetMs(protocol: String, retune: Boolean = false): Long {
+    fun outerBudgetMs(protocol: String, retune: Boolean = false, scanMode: String = SCAN_BALANCED): Long {
         if (retune) {
             return when (protocol) {
                 "masque" -> 14_000L
@@ -74,10 +88,16 @@ object PowCoreConfig {
                 else -> 16_000L
             }
         }
+        val scan = normalizeScanMode(scanMode)
+        val (masque, wireguard, gool) = when (scan) {
+            SCAN_TURBO -> Triple(32_000L, 24_000L, 34_000L)
+            SCAN_THOROUGH -> Triple(75_000L, 55_000L, 70_000L)
+            else -> Triple(45_000L, 36_000L, 48_000L)
+        }
         return when (protocol) {
-            "masque" -> 28_000L
-            "wireguard" -> 20_000L
-            else -> 32_000L
+            "masque" -> masque
+            "wireguard" -> wireguard
+            else -> gool
         }
     }
 

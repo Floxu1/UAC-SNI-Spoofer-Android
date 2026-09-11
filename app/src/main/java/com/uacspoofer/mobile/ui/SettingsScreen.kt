@@ -4,6 +4,7 @@ import android.app.StatusBarManager
 import android.content.ComponentName
 import android.graphics.drawable.Icon
 import android.os.Build
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,20 +13,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import android.os.SystemClock
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -34,9 +27,11 @@ import androidx.compose.material.icons.outlined.ChevronLeft
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.DashboardCustomize
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -44,22 +39,44 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.uacspoofer.mobile.engine.EngineModeStore
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.os.SystemClock
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.R
+import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.core.ConnectionStateStore
+import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.tor.TorEngineStore
+import com.uacspoofer.mobile.location.GpsSpoofRuntime
+import com.uacspoofer.mobile.location.GpsSpoofStore
+import com.uacspoofer.mobile.location.GpsSpoofTarget
+import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.vpn.ExitIpInfoRepository
 import com.uacspoofer.mobile.vpn.UacQuickSettingsTileService
 
 @Composable
@@ -106,6 +123,7 @@ internal fun SettingsScreen(
                 )
             },
         ) {
+                item { GpsSpoofSettingsCard() }
                 if (engineMode.isPow) {
                     item {
                         SettingsNavigationCard(
@@ -235,6 +253,237 @@ internal fun SettingsScreen(
                     )
                 }
         }
+    }
+}
+
+@Composable
+private fun GpsSpoofSettingsCard() {
+    val context = LocalContext.current
+    val isPersian = LocalHomePersian.current
+    val store = remember(context) { GpsSpoofStore.get(context) }
+    val enabled by store.enabled.collectAsStateWithLifecycle()
+    val connection by ConnectionStateStore.state.collectAsStateWithLifecycle()
+    val engineMode by remember(context) { EngineModeStore.get(context) }.mode.collectAsStateWithLifecycle()
+    val torSettings by remember(context) { TorEngineStore.get(context) }.settings.collectAsStateWithLifecycle()
+    val powSettings by remember(context) { PowEngineStore.get(context) }.settings.collectAsStateWithLifecycle()
+    val exitState by remember(context) { ExitIpInfoRepository.get(context) }.state.collectAsStateWithLifecycle()
+    val profileCountry = remember(engineMode, connection) {
+        ProfileStore(context).selectedProfile().country.countryCode
+    }
+    val countryCode = GpsSpoofTarget.countryCode(
+        engine = engineMode,
+        profileCountry = profileCountry,
+        torExit = torSettings.exitCountryCode,
+        powExit = powSettings.exitCountryCode,
+        exitIpCountry = exitState.info?.countryCode,
+    )
+    val countryName = GpsSpoofTarget.displayName(countryCode, isPersian)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var mockAllowed by remember { mutableStateOf(GpsSpoofRuntime.isMockLocationAllowed(context)) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                mockAllowed = GpsSpoofRuntime.isMockLocationAllowed(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val active = enabled && connection == ConnectionState.CONNECTED && mockAllowed && countryCode != null
+    val accent = when {
+        active -> UacColors.ConnectedGreen
+        enabled -> UacColors.ConnectingCyan
+        else -> UacColors.DisconnectedBlue
+    }
+    val border by animateColorAsState(
+        targetValue = if (enabled) accent.copy(alpha = 0.46f) else Color.White.copy(alpha = 0.08f),
+        label = "gps-spoof-border",
+    )
+    val status = when {
+        !enabled -> homeText(
+            "Maps keep your real GPS until you turn this on.",
+            "تا وقتی خاموش باشد نقشه‌ها موقعیت واقعی را می‌بینند.",
+        )
+        !mockAllowed -> homeText(
+            "Select UAC as the mock location app in Developer options.",
+            "در Developer options این برنامه را به‌عنوان mock location انتخاب کن.",
+        )
+        connection != ConnectionState.CONNECTED -> homeText(
+            "Starts the moment you connect.",
+            "به‌محض وصل شدن فعال می‌شود.",
+        )
+        countryName.isNotBlank() -> homeText(
+            "Active · $countryName",
+            "فعال · $countryName",
+        )
+        else -> homeText(
+            "Waiting for the exit country.",
+            "منتظر کشور خروجی است.",
+        )
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ToolCardBrush, ToolCardShape)
+            .border(1.dp, border, ToolCardShape)
+            .padding(15.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SettingsIcon(Icons.Outlined.MyLocation, accent)
+            Spacer(Modifier.size(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    homeText("GPS spoofing", "جعل موقعیت GPS"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    homeText(
+                        "While connected, apps see the selected country instead of your real GPS",
+                        "وقتی وصل باشی، برنامه‌ها کشور انتخاب‌شده را می‌بینند نه موقعیت واقعی تو",
+                    ),
+                    color = UacColors.TextSecondary,
+                    fontSize = 12.5.sp,
+                    lineHeight = 18.sp,
+                )
+            }
+            Spacer(Modifier.size(10.dp))
+            GpsSpoofOnOffSwitch(
+                enabled = enabled,
+                accent = accent,
+                onChange = { store.setEnabled(it) },
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(accent.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                .padding(horizontal = 11.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(if (active) accent else UacColors.TextSecondary.copy(alpha = 0.7f), CircleShape),
+            )
+            Text(
+                text = status,
+                color = if (active) UacColors.TextPrimary else UacColors.TextSecondary,
+                fontSize = 12.5.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (enabled && !mockAllowed) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(UacColors.DisconnectingAmber.copy(alpha = 0.10f))
+                    .border(1.dp, UacColors.DisconnectingAmber.copy(alpha = 0.28f), RoundedCornerShape(12.dp))
+                    .clickable { GpsSpoofRuntime.openDeveloperSettings(context) }
+                    .padding(horizontal = 11.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.WarningAmber,
+                    contentDescription = null,
+                    tint = UacColors.DisconnectingAmber,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    homeText(
+                        "Open Developer options, then choose this app as mock location",
+                        "Developer options را باز کن و این برنامه را mock location بگذار",
+                    ),
+                    color = UacColors.TextPrimary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GpsSpoofOnOffSwitch(
+    enabled: Boolean,
+    accent: Color,
+    onChange: (Boolean) -> Unit,
+) {
+    val trackColor by animateColorAsState(
+        targetValue = if (enabled) accent.copy(alpha = 0.22f) else Color.Black.copy(alpha = 0.38f),
+        label = "gps-spoof-track",
+    )
+    val outline by animateColorAsState(
+        targetValue = if (enabled) accent.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.14f),
+        label = "gps-spoof-outline",
+    )
+    Row(
+        modifier = Modifier
+            .width(118.dp)
+            .height(38.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(trackColor)
+            .border(1.dp, outline, RoundedCornerShape(999.dp))
+            .padding(3.dp)
+            .semantics {
+                role = Role.Switch
+                stateDescription = if (enabled) "ON" else "OFF"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        GpsSpoofSwitchHalf(
+            label = "OFF",
+            selected = !enabled,
+            selectedColor = Color.White.copy(alpha = 0.12f),
+            selectedText = UacColors.TextPrimary,
+            onClick = { onChange(false) },
+            modifier = Modifier.weight(1f),
+        )
+        GpsSpoofSwitchHalf(
+            label = "ON",
+            selected = enabled,
+            selectedColor = accent,
+            selectedText = Color.White,
+            onClick = { onChange(true) },
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun GpsSpoofSwitchHalf(
+    label: String,
+    selected: Boolean,
+    selectedColor: Color,
+    selectedText: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (selected) selectedColor else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (selected) selectedText else UacColors.TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.6.sp,
+        )
     }
 }
 
