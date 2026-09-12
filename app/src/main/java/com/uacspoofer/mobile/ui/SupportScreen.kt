@@ -467,8 +467,8 @@ private fun localizedUpdateMessage(message: String): String {
         message == "The downloaded APK could not be opened" -> "فایل ${supportLtr("APK")} دانلودشده باز نشد"
         message == "Downloaded APK URI is unavailable" -> "آدرس فایل ${supportLtr("APK")} دانلودشده در دسترس نیست"
         message == "The latest release has no readable version" -> "نسخه ${supportLtr("Release")} جدید قابل تشخیص نیست"
-        message.startsWith("Release ") && message.endsWith(" does not include a signed APK") ->
-            "این ${supportLtr("Release")} فایل ${supportLtr("APK")} امضاشده نداره"
+        message.startsWith("Release ") && "does not include a signed APK" in message ->
+            "این ${supportLtr("Release")} فایل ${supportLtr("APK")} امضاشده‌ی همین معماری رو نداره"
         else -> "به‌روزرسانی انجام نشد. دوباره امتحان کن."
     }
 }

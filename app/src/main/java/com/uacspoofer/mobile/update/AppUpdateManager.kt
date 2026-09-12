@@ -64,7 +64,10 @@ internal class AppUpdateManager(context: Context) {
             if (status != HttpURLConnection.HTTP_OK) {
                 error("GitHub Releases returned HTTP $status")
             }
-            val release = parseRelease(connection.inputStream.bufferedReader().use { it.readText() })
+            val release = parseRelease(
+                connection.inputStream.bufferedReader().use { it.readText() },
+                resolveInstalledApkVariant(),
+            )
             if (isVersionNewer(release.version, BuildConfig.VERSION_NAME)) {
                 UpdateCheckResult.Available(release)
             } else {
@@ -129,40 +132,48 @@ internal class AppUpdateManager(context: Context) {
         }
     }
 
-    private fun parseRelease(jsonText: String): AppRelease {
+    private fun resolveInstalledApkVariant(): String {
+        if (BuildConfig.TV_MODE) return APK_VARIANT_TV
+        val apkPath = appContext.applicationInfo.sourceDir
+        val packed = runCatching { abisPackedInApk(apkPath) }.getOrDefault(emptySet())
+        if (packed.isNotEmpty()) {
+            val variant = variantFromPackedAbis(packed, Build.SUPPORTED_ABIS, tvMode = false)
+            preferences.edit().putString(KEY_INSTALLED_APK_VARIANT, variant).apply()
+            return variant
+        }
+        return preferences.getString(KEY_INSTALLED_APK_VARIANT, null)
+            ?: variantFromPackedAbis(emptySet(), Build.SUPPORTED_ABIS, tvMode = false)
+    }
+
+    private fun parseRelease(jsonText: String, installedVariant: String): AppRelease {
         val root = JSONObject(jsonText)
         val tagName = root.getString("tag_name")
         val version = extractVersion(tagName)
             ?: extractVersion(root.optString("name"))
             ?: error("The latest release has no readable version")
         val assets = root.getJSONArray("assets")
-        var selected: JSONObject? = null
-        var selectedScore = Int.MIN_VALUE
-        for (index in 0 until assets.length()) {
-            val asset = assets.getJSONObject(index)
-            val name = asset.optString("name")
-            if (!name.endsWith(".apk", ignoreCase = true)) continue
-            val lowerName = name.lowercase()
-            val score = when {
-                "unsigned" in lowerName -> 0
-                lowerName == "uac-spoofer.apk" -> 100
-                "release" in lowerName -> 80
-                else -> 60
-            }
-            if (score > selectedScore) {
-                selected = asset
-                selectedScore = score
+        val apkAssets = buildList {
+            for (index in 0 until assets.length()) {
+                val asset = assets.getJSONObject(index)
+                val name = asset.optString("name")
+                if (!name.endsWith(".apk", ignoreCase = true)) continue
+                add(
+                    ReleaseApkAsset(
+                        name = name,
+                        url = asset.getString("browser_download_url"),
+                    ),
+                )
             }
         }
-        val apk = selected?.takeIf { selectedScore > 0 }
-            ?: error("Release $tagName does not include a signed APK")
+        val apk = selectReleaseApk(apkAssets, installedVariant)
+            ?: error("Release $tagName does not include a signed APK for $installedVariant")
         return AppRelease(
             version = version,
             tagName = tagName,
             title = root.optString("name").ifBlank { "UAC SNI Spoofer $version" },
             notes = root.optString("body"),
-            apkName = apk.getString("name"),
-            apkUrl = apk.getString("browser_download_url"),
+            apkName = apk.name,
+            apkUrl = apk.url,
             releaseUrl = root.getString("html_url"),
         )
     }
@@ -188,6 +199,7 @@ internal class AppUpdateManager(context: Context) {
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val PREFERENCES_NAME = "app_update_state"
         private const val KEY_PENDING_DOWNLOAD_ID = "pending_download_id"
+        private const val KEY_INSTALLED_APK_VARIANT = "installed_apk_variant"
         private const val NETWORK_TIMEOUT_MS = 12_000
         private const val DOWNLOAD_POLL_MS = 450L
 
