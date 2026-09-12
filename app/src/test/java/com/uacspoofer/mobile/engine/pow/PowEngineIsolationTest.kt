@@ -101,6 +101,8 @@ class PowEngineIsolationTest {
         )
         assertEquals("server_entries.txt", PowPsiphonIpc.ASSET_SERVER_ENTRIES)
         assertEquals("config", PowPsiphonIpc.KEY_CONFIG)
+        assertFalse(com.uacspoofer.mobile.vpn.LanSharePolicy.PORT == PowCoreConfig.SOCKS_PORT)
+        assertFalse(com.uacspoofer.mobile.vpn.LanSharePolicy.PORT == PowCoreConfig.TUN_SOCKS_PORT)
     }
 }
 

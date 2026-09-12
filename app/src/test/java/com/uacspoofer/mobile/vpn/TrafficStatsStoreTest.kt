@@ -31,4 +31,17 @@ class TrafficStatsStoreTest {
         assertEquals(0, TrafficStatsStore.stats.value.uploadBytesPerSecond)
         assertEquals(0, TrafficStatsStore.stats.value.downloadBytesPerSecond)
     }
+
+    @Test
+    fun reportsSessionDeltasForMonthlyTotals() {
+        val captured = mutableListOf<Pair<Long, Long>>()
+        TrafficStatsStore.monthlySink = { up, down -> captured += up to down }
+        try {
+            TrafficStatsStore.update(TunStats(1, 1_000, 1, 4_000), 1_000)
+            TrafficStatsStore.update(TunStats(2, 2_500, 3, 7_000), 2_000)
+            assertEquals(listOf(1_500L to 3_000L), captured)
+        } finally {
+            TrafficStatsStore.monthlySink = null
+        }
+    }
 }

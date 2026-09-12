@@ -78,9 +78,6 @@ internal object MciXrayConfigBuilder {
             if (s.ipv4Only) {
                 add("""{"type":"field","inboundTag":$acceptedInbounds,"network":"tcp","ip":["::/0"],"outboundTag":"block"}""")
             }
-            if (s.blockUdp443) {
-                add("""{"type":"field","network":"udp","port":"443","outboundTag":"block"}""")
-            }
             cleanHop?.let { plan ->
                 val domains = plan.domains.joinToString(",") { "\"${q(it)}\"" }
                 add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[$domains],"outboundTag":"ai-out"}""")
@@ -175,9 +172,6 @@ internal object MciXrayConfigBuilder {
                 val inbound = "[\"in-${q(route.tag)}\"]"
                 if (route.settings.ipv4Only) {
                     add("""{"type":"field","inboundTag":$inbound,"network":"tcp","ip":["::/0"],"outboundTag":"block"}""")
-                }
-                if (route.settings.blockUdp443) {
-                    add("""{"type":"field","inboundTag":$inbound,"network":"udp","port":"443","outboundTag":"block"}""")
                 }
                 add("""{"type":"field","inboundTag":$inbound,"network":"tcp,udp","outboundTag":"out-${q(route.tag)}"}""")
             }

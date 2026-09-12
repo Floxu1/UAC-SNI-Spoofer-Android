@@ -77,7 +77,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -856,7 +858,8 @@ private fun HomeScreenContent(
                 motionEnabled = motionEnabled,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(if (tight) 14.dp else if (compact) 22.dp else 32.dp),
+                    .height(if (tight) 14.dp else if (compact) 22.dp else 32.dp)
+                    .clip(RectangleShape),
             )
         }
         if (showGuide) {

@@ -80,6 +80,7 @@ import com.uacspoofer.mobile.engine.tor.TorStatusStore
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.ui.theme.UacColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -521,6 +522,7 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val torStatus by TorStatusStore.status.collectAsStateWithLifecycle()
     val powStatus by PowStatusStore.status.collectAsStateWithLifecycle()
     val routeProgress by ConnectionStateStore.routeProgress.collectAsStateWithLifecycle()
+    val killSwitchBlocking by NetworkGuardStore.blocking.collectAsStateWithLifecycle()
     var showRouteProgress by remember(state) { mutableStateOf(false) }
     LaunchedEffect(state) {
         if (state != ConnectionState.CONNECTING) {
@@ -531,12 +533,16 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
         delay(CONNECTING_ROUTE_HINT_DELAY_MS)
         showRouteProgress = true
     }
-    val status = when (state) {
-        ConnectionState.DISCONNECTED -> homeText("Disconnected", "وصل نیست")
-        ConnectionState.CONNECTING -> homeText("Connecting...", "در حال اتصال…")
-        ConnectionState.CONNECTED -> homeText("Connected", "وصل شد")
-        ConnectionState.DISCONNECTING -> homeText("Disconnecting...", "در حال قطع...")
-        ConnectionState.ERROR -> homeText("Connection failed", "اتصال برقرار نشد")
+    val status = when {
+        killSwitchBlocking && state == ConnectionState.ERROR ->
+            homeText("Internet blocked", "اینترنت مسدود است")
+        else -> when (state) {
+            ConnectionState.DISCONNECTED -> homeText("Disconnected", "وصل نیست")
+            ConnectionState.CONNECTING -> homeText("Connecting...", "در حال اتصال…")
+            ConnectionState.CONNECTED -> homeText("Connected", "وصل شد")
+            ConnectionState.DISCONNECTING -> homeText("Disconnecting...", "در حال قطع...")
+            ConnectionState.ERROR -> homeText("Connection failed", "اتصال برقرار نشد")
+        }
     }
     val connectingHint = when {
         engineMode.isTor -> homeText(
@@ -579,7 +585,12 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             else -> homeText("Establishing a secure tunnel", "در حال ساخت اتصال امن")
         }
     }
-    val hint = when (state) {
+    val hint = when {
+        killSwitchBlocking && state == ConnectionState.ERROR -> homeText(
+            "Kill switch is on · tap to reconnect",
+            "کلید قطع اضطراری روشن است · برای وصل دوباره بزن",
+        )
+        else -> when (state) {
         ConnectionState.DISCONNECTED -> homeText("Tap the button to connect", "برای وصل شدن، دکمه رو بزن")
         ConnectionState.CONNECTING -> connectingHint
         ConnectionState.CONNECTED -> when {
@@ -606,6 +617,7 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
                 PowStatusCopy.errorHint(true, powStatus.detail) ?: powStatus.detail,
             )
             else -> homeText("Tap retry to try again", "دوباره امتحان کن")
+        }
         }
     }
 

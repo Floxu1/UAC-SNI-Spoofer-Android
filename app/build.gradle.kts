@@ -28,8 +28,8 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 324
-        versionName = "2.0.5"
+        versionCode = 338
+        versionName = "2.0.6"
 
         buildConfigField("boolean", "TV_MODE", "false")
 
@@ -136,7 +136,7 @@ android.applicationVariants.configureEach {
         val apkOutput = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
         val abi = apkOutput.getFilter("ABI") ?: "universal"
         if (buildType.name == "release") {
-            apkOutput.outputFileName = "UAC-${version}-${abi}-Android7plus.apk"
+            apkOutput.outputFileName = "UAC-${version}-${abi}.apk"
         }
     }
 }
@@ -144,7 +144,7 @@ android.applicationVariants.configureEach {
 tasks.matching { it.name == "assembleRelease" }.configureEach {
     doLast {
         val dir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
-        val version = android.defaultConfig.versionName ?: "2.0.5"
+        val version = android.defaultConfig.versionName ?: "2.0.6"
         val universal = dir.listFiles()
             ?.filter { it.extension.equals("apk", ignoreCase = true) }
             ?.firstOrNull { it.name.contains("universal", ignoreCase = true) }
@@ -157,21 +157,21 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
             همه این فایل‌ها حداقل اندروید ۷ (Android 7.0) می‌خواهند.
             All of these APKs require Android 7.0 or newer.
 
-            UAC-$version-arm64-v8a-Android7plus.apk
+            UAC-$version-arm64-v8a.apk
               گوشی‌های ۶۴ بیتی — تقریباً همه گوشی‌های ۲۰۱۷ به بعد. سبک‌تر است. پیشنهاد اصلی.
               64-bit phones (most devices from 2017 on). Smaller. Recommended.
 
-            UAC-$version-armeabi-v7a-Android7plus.apk
+            UAC-$version-armeabi-v7a.apk
               گوشی‌های ۳۲ بیتی قدیمی.
               32-bit phones only.
 
-            UAC-$version-universal-Android7plus.apk
+            UAC-$version-universal.apk
               روی همه معماری‌ها نصب می‌شود. حجم بیشتر.
               Works on every CPU. Largest file.
               app-release.apk همین فایل است.
 
-            UAC-$version-x86_64-Android7plus.apk
-            UAC-$version-x86-Android7plus.apk
+            UAC-$version-x86_64.apk
+            UAC-$version-x86.apk
               امولاتور / شبیه‌ساز. برای گوشی واقعی نیست.
               Emulators only, not real phones.
 

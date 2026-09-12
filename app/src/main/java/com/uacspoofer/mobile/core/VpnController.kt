@@ -3,6 +3,7 @@ package com.uacspoofer.mobile.core
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.vpn.UacVpnService
 
 object VpnController {
@@ -37,6 +38,17 @@ object VpnController {
         val state = ConnectionStateStore.state.value
         if (state != ConnectionState.CONNECTED && state != ConnectionState.CONNECTING) return
         val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_APPLY_POW_EXIT)
+        context.startService(intent)
+    }
+
+    fun applyNetworkGuard(context: Context) {
+        val state = ConnectionStateStore.state.value
+        val live = state == ConnectionState.CONNECTED ||
+            state == ConnectionState.CONNECTING ||
+            state == ConnectionState.DISCONNECTING ||
+            NetworkGuardStore.blocking.value
+        if (!live) return
+        val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_APPLY_NETWORK_GUARD)
         context.startService(intent)
     }
 }

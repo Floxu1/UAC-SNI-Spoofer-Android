@@ -24,8 +24,12 @@ import com.uacspoofer.mobile.core.VpnController
 import com.uacspoofer.mobile.location.GpsSpoofRuntime
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
 import com.uacspoofer.mobile.update.AppUpdateManager
+import com.uacspoofer.mobile.vpn.AutoConnectCoordinator
+import com.uacspoofer.mobile.vpn.AutoConnectOrigin
+import com.uacspoofer.mobile.vpn.MonthlyTrafficStore
 
 class MainActivity : ComponentActivity() {
     private val vpnPermissionLauncher = registerForActivityResult(
@@ -77,6 +81,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         applyShellOrientation()
         GpsSpoofRuntime.attach(this)
+        NetworkGuardStore.get(this)
+        MonthlyTrafficStore.get(this)
+        AutoConnectCoordinator.ensureWatching(this)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -97,6 +104,9 @@ class MainActivity : ComponentActivity() {
             }
         }
         if (savedInstanceState == null) handleQuickTileIntent(intent)
+        if (savedInstanceState == null) {
+            window.decorView.post { AutoConnectCoordinator.tryStart(this, AutoConnectOrigin.APP_START) }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

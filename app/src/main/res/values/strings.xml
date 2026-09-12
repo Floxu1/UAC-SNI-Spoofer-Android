@@ -8,6 +8,7 @@
     <string name="proxy_connecting_notification">Starting local SOCKS5 proxy…</string>
     <string name="proxy_connected_notification">SOCKS5 proxy connected</string>
     <string name="vpn_failed_notification">UAC SNI connection failed</string>
+    <string name="vpn_kill_switch_notification">Internet blocked · Kill switch is on</string>
     <string name="notification_disconnect">Disconnect</string>
     <string name="notification_close">Close</string>
     <string name="quick_settings_tile_label">UAC SNI Spoofer</string>

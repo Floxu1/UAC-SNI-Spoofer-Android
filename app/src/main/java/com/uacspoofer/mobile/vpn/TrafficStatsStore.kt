@@ -16,6 +16,9 @@ object TrafficStatsStore {
     private val mutableStats = MutableStateFlow(TrafficStats())
     val stats: StateFlow<TrafficStats> = mutableStats.asStateFlow()
 
+    @Volatile
+    var monthlySink: ((Long, Long) -> Unit)? = null
+
     private var previousUpload = 0L
     private var previousDownload = 0L
     private var previousTimestampMs = 0L
@@ -40,6 +43,13 @@ object TrafficStatsStore {
         val downloadRate = if (previousTimestampMs > 0L && elapsed > 0L && countersAdvanced) {
             ((download - previousDownload) * 1_000L / elapsed).coerceAtLeast(0L)
         } else 0L
+        if (previousTimestampMs > 0L && countersAdvanced) {
+            val uploadDelta = (upload - previousUpload).coerceAtLeast(0L)
+            val downloadDelta = (download - previousDownload).coerceAtLeast(0L)
+            if (uploadDelta > 0L || downloadDelta > 0L) {
+                monthlySink?.invoke(uploadDelta, downloadDelta)
+            }
+        }
 
         previousUpload = upload
         previousDownload = download

@@ -13,6 +13,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.net.VpnService
 import android.os.SystemClock
 import android.system.OsConstants
@@ -34,6 +35,7 @@ import com.uacspoofer.mobile.engine.pow.PowConnectionCoordinator
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import com.uacspoofer.mobile.engine.pow.PowPhase
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
+import com.uacspoofer.mobile.engine.pow.PowCoreConfig
 import com.uacspoofer.mobile.engine.pow.PowTun2Socks
 import com.uacspoofer.mobile.engine.pow.PowTunRelayConfig
 import com.uacspoofer.mobile.location.GpsSpoofRuntime
@@ -48,6 +50,7 @@ import com.uacspoofer.mobile.profiles.RouteTransferMeasurementMode
 import com.uacspoofer.mobile.profiles.RouteTransferProbe
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
 import com.uacspoofer.mobile.ui.MainActivity
@@ -93,6 +96,9 @@ class UacVpnService : VpnService() {
     @Volatile private var activeEngine = EngineMode.XRAY_CF
     @Volatile private var aiRoutePlan: com.uacspoofer.mobile.ai.AiRoutePlan? = null
     @Volatile private var aiRouteJob: Job? = null
+    @Volatile private var killSwitchFd: ParcelFileDescriptor? = null
+    @Volatile private var autoReconnectAttempts = 0
+    @Volatile private var autoReconnectJob: Job? = null
     private val aiRouteController by lazy { com.uacspoofer.mobile.ai.AiRouteController(this) }
 
     private lateinit var nativeTunEngine: XrayNativeTunEngine
@@ -113,6 +119,7 @@ class UacVpnService : VpnService() {
     private lateinit var torCoordinator: TorConnectionCoordinator
     private lateinit var powEngineStore: PowEngineStore
     private lateinit var powCoordinator: PowConnectionCoordinator
+    private lateinit var networkGuardStore: NetworkGuardStore
 
     override fun onCreate() {
         super.onCreate()
@@ -142,6 +149,15 @@ class UacVpnService : VpnService() {
         )
         powEngineStore = PowEngineStore.get(this)
         powCoordinator = PowConnectionCoordinator(this)
+        networkGuardStore = NetworkGuardStore.get(this)
+        TunPacketFilter.applyFlags(networkGuardStore.snapshot())
+        serviceScope.launch {
+            networkGuardStore.settings.collect { flags ->
+                TunPacketFilter.applyFlags(flags)
+            }
+        }
+        MonthlyTrafficStore.get(this)
+        AutoConnectCoordinator.ensureWatching(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -154,9 +170,15 @@ class UacVpnService : VpnService() {
             ACTION_REFRESH_LATENCY -> requestLatencyRefresh()
             ACTION_ROUTE_MTU_PROBE -> requestRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
             ACTION_CANCEL_ROUTE_MTU_PROBE -> cancelRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
+            ACTION_APPLY_NETWORK_GUARD -> applyNetworkGuard()
             ACTION_CONNECT, null -> requestConnect()
         }
-        return Service.START_NOT_STICKY
+        val guard = networkGuardStore.snapshot()
+        return if (guard.killSwitch || guard.autoConnect) {
+            Service.START_STICKY
+        } else {
+            Service.START_NOT_STICKY
+        }
     }
     
     override fun onBind(intent: Intent?): IBinder? = super.onBind(intent)
@@ -167,6 +189,12 @@ class UacVpnService : VpnService() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        val guard = networkGuardStore.snapshot()
+        if (NetworkGuardPolicy.stayAliveOnSwipe(guard.killSwitch, guard.autoConnect)) {
+            AppLogRepository.info(LogSource.SERVICE, "App task removed; keeping the connection")
+            super.onTaskRemoved(rootIntent)
+            return
+        }
         AppLogRepository.info(LogSource.SERVICE, "App task removed; disconnecting active connection")
         requestDisconnect()
         super.onTaskRemoved(rootIntent)
@@ -182,6 +210,7 @@ class UacVpnService : VpnService() {
         latencyJob?.cancel()
         adaptiveLearningJob?.cancel()
         networkWatchJob?.cancel()
+        autoReconnectJob?.cancel()
         val interruptedRouteProbeId = activeRouteProbeId
         routeProbeJob?.cancel()
         serviceScope.cancel()
@@ -417,6 +446,8 @@ class UacVpnService : VpnService() {
         activeConnectionMode = settings.connectionMode
         activeEngine = engineModeStore.snapshot()
         ConnectRescueStore.hide()
+        NetworkGuardStore.clearUserStopped()
+        autoReconnectJob?.cancel()
         AppLogRepository.info(
             LogSource.SERVICE,
             "Connection requested engine=${activeEngine.id} mode=$activeConnectionMode",
@@ -473,14 +504,7 @@ class UacVpnService : VpnService() {
                 Log.e(TAG, "connection worker failed", error)
                 AppLogRepository.error(LogSource.SERVICE, "Connection worker failed", error)
                 lifecycleMutex.withLock {
-                    cleanupRoute()
-                    resourcesActive = false
-                }
-                if (token == generation.get()) {
-                    ConnectionStateStore.markError()
-                    runCatching { updateFailureNotification() }
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    failClosedLocked(token)
                 }
             }
         }
@@ -490,6 +514,8 @@ class UacVpnService : VpnService() {
 
     private fun requestDisconnect(closeAppTasks: Boolean = false) {
         AppLogRepository.info(LogSource.SERVICE, "Disconnect requested")
+        NetworkGuardStore.markUserStopped()
+        autoReconnectJob?.cancel()
         ConnectRescueStore.hide()
         activeRouteProbeId?.let {
             routeProbeJob?.cancel()
@@ -573,7 +599,7 @@ class UacVpnService : VpnService() {
                 adaptiveLearningJob = null
                 networkWatchJob = null
                 lifecycleMutex.withLock {
-                    cleanupRoute()
+                    cleanupRoute(holdVpn = true)
                     resourcesActive = false
                     profileStore.clearActive()
                     val settings = advancedSettingsStore.snapshot()
@@ -587,14 +613,7 @@ class UacVpnService : VpnService() {
                 Log.e(TAG, "profile switch failed", error)
                 AppLogRepository.error(LogSource.SERVICE, "Profile switch failed", error)
                 lifecycleMutex.withLock {
-                    runCatching { cleanupRoute() }
-                    resourcesActive = false
-                }
-                if (token == generation.get()) {
-                    ConnectionStateStore.markError()
-                    runCatching { updateFailureNotification() }
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    failClosedLocked(token)
                 }
             }
         }
@@ -649,7 +668,7 @@ class UacVpnService : VpnService() {
                 if (token != generation.get()) return@launch
                 lifecycleMutex.withLock {
                     if (token != generation.get()) return@withLock
-                    cleanupRoute()
+                    cleanupRoute(holdVpn = true)
                     resourcesActive = false
                     TorStatusStore.update(
                         TorPhase.STARTING,
@@ -671,14 +690,7 @@ class UacVpnService : VpnService() {
                 Log.e(TAG, "Tor exit country reconnect failed", error)
                 AppLogRepository.error(LogSource.TOR, "Tor exit country reconnect failed", error)
                 lifecycleMutex.withLock {
-                    runCatching { cleanupRoute() }
-                    resourcesActive = false
-                }
-                if (token == generation.get()) {
-                    ConnectionStateStore.markError()
-                    runCatching { updateFailureNotification() }
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    failClosedLocked(token)
                 }
             }
         }
@@ -751,7 +763,7 @@ class UacVpnService : VpnService() {
                 if (token != generation.get()) throw CancellationException("stale connect generation")
                 ConnectionStateStore.updateConnectRouteProgress(progressOffset + index + 1, progressTotal)
                 try {
-                    cleanupRoute()
+                    cleanupRoute(holdVpn = true)
                     val edge = candidate.edge
                     if (rescueGeneration != 0L) {
                         ConnectRescueStore.update(rescueGeneration) { current ->
@@ -865,6 +877,7 @@ class UacVpnService : VpnService() {
                     startLatencySampler(token)
                     startAdaptiveLearningMonitor(token, candidate, fingerprint, profile, signature, report.score)
                     startNetworkWatch(token, fingerprint)
+                    onSessionUp()
                     return true
                 } catch (cancelled: CancellationException) {
                     cleanupRoute()
@@ -875,7 +888,7 @@ class UacVpnService : VpnService() {
                     adaptiveProfileStore.recordFailure(fingerprint, profile, signature, candidate.id)
                     Log.w(TAG, "adaptive candidate ${candidate.id} failed", error)
                     AppLogRepository.warning(LogSource.ADAPTIVE, "Candidate ${candidate.id} rejected", error)
-                    cleanupRoute()
+                    cleanupRoute(holdVpn = true)
                     resourcesActive = false
                     if (index + 1 < candidates.size) {
                         val next = candidates[index + 1]
@@ -988,12 +1001,7 @@ class UacVpnService : VpnService() {
             "All adaptive candidates failed; best=${bestReport?.detail() ?: "none"}",
             lastFailure,
         )
-        if (token == generation.get()) {
-            ConnectionStateStore.markError()
-            runCatching { updateFailureNotification() }
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }
+        failClosedLocked(token)
     }
 
     private suspend fun connectTorEngine(token: Long, settings: AdvancedSettingsData) {
@@ -1015,6 +1023,7 @@ class UacVpnService : VpnService() {
         if (!isProxyMode()) startStatsMonitor(token)
         startHealthMonitor(token)
         startLatencySampler(token)
+        onSessionUp()
         AppLogRepository.success(LogSource.TOR, "Tor / WebTunnel engine is active")
     }
 
@@ -1038,6 +1047,7 @@ class UacVpnService : VpnService() {
         if (!isProxyMode()) startStatsMonitor(token)
         startHealthMonitor(token)
         startLatencySampler(token)
+        onSessionUp()
         AppLogRepository.success(LogSource.POW, "UAC PoW engine is active")
     }
 
@@ -1082,7 +1092,7 @@ class UacVpnService : VpnService() {
                 if (token != generation.get()) return@launch
                 lifecycleMutex.withLock {
                     if (token != generation.get()) return@withLock
-                    cleanupRoute()
+                    cleanupRoute(holdVpn = true)
                     resourcesActive = false
                     connectPowEngine(token, advancedSettingsStore.snapshot())
                 }
@@ -1099,14 +1109,7 @@ class UacVpnService : VpnService() {
                 Log.e(TAG, "pow reconnect failed", error)
                 AppLogRepository.error(LogSource.POW, "UAC PoW reconnect failed", error)
                 lifecycleMutex.withLock {
-                    runCatching { cleanupRoute() }
-                    resourcesActive = false
-                }
-                if (token == generation.get()) {
-                    ConnectionStateStore.markError()
-                    runCatching { updateFailureNotification() }
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    failClosedLocked(token)
                 }
             }
         }
@@ -1136,7 +1139,7 @@ class UacVpnService : VpnService() {
             .addDnsServer(dns)
             .apply { if (settings.ipv4Only || torRelay) allowFamily(OsConstants.AF_INET) }
         AppRoutingPreferences.applyTo(builder, this)
-        return builder.establish()
+        return attachPacketFilter(builder.establish(), settings.tunMtu)
     }
 
     private fun establishPowTun(
@@ -1161,7 +1164,20 @@ class UacVpnService : VpnService() {
             .addDnsServer(address.router)
             .allowFamily(OsConstants.AF_INET)
         AppRoutingPreferences.applyTo(builder, this)
-        return builder.establish()
+        return attachPacketFilter(builder.establish(), tunMtu)
+    }
+
+    private fun attachPacketFilter(
+        pfd: ParcelFileDescriptor?,
+        mtu: Int,
+    ): ParcelFileDescriptor? {
+        val adopted = adoptEstablishedTun(pfd) ?: return null
+        TunPacketFilter.applyFlags(networkGuardStore.snapshot())
+        return runCatching { TunPacketFilter.attach(adopted, mtu) }
+            .onFailure { error ->
+                AppLogRepository.warning(LogSource.TUN, "Packet filter unavailable; passing TUN through", error)
+            }
+            .getOrDefault(adopted)
     }
 
     /**
@@ -1182,7 +1198,12 @@ class UacVpnService : VpnService() {
         job.invokeOnCompletion { if (aiRouteJob === job) aiRouteJob = null }
     }
 
-    private suspend fun cleanupRoute() {
+    private suspend fun cleanupRoute(holdVpn: Boolean = false) {
+        val armed = holdVpn && shouldHoldKillSwitch()
+        if (armed) {
+            establishKillSwitchTun()
+        }
+        LanShareProxy.stop()
         profileStore.clearActive()
         aiRouteJob?.cancel()
         aiRouteJob = null
@@ -1199,6 +1220,7 @@ class UacVpnService : VpnService() {
         runCatching { powCoordinator.stop() }
         nativeTunEngine.stop()
         proxyCore.stop()
+        TunPacketFilter.stop()
         activeEdge = null
         activeCandidate = null
         activeFingerprint = null
@@ -1206,6 +1228,10 @@ class UacVpnService : VpnService() {
         runtimeHealthSuccesses.set(0L)
         ConnectionMetricsStore.reset()
         TrafficStatsStore.reset()
+        if (!armed) {
+            closeKillSwitchTun()
+            NetworkGuardStore.setBlocking(false)
+        }
     }
 
     private suspend fun measureRuntimeLatency(): ProbeResult {
@@ -1388,6 +1414,7 @@ class UacVpnService : VpnService() {
                     }
                     mismatchKey = null
                     mismatchCount = 0
+                    if (LanShareProxy.isRunning) LanShareProxy.refreshAdvertisedAddress()
                     continue
                 }
                 val currentMismatchKey = "${current.networkHandle}:${current.key}"
@@ -1588,7 +1615,7 @@ class UacVpnService : VpnService() {
             try {
                 lifecycleMutex.withLock {
                     if (recoveryToken != generation.get()) return@withLock
-                    cleanupRoute()
+                    cleanupRoute(holdVpn = true)
                     resourcesActive = false
                     delay(MciConfig.RUNTIME_RECOVERY_BACKOFF_MS)
                     if (recoveryToken != generation.get()) throw CancellationException("stale recovery generation")
@@ -1605,19 +1632,156 @@ class UacVpnService : VpnService() {
                 Log.e(TAG, "runtime recovery failed", error)
                 AppLogRepository.error(LogSource.SERVICE, "Runtime recovery failed", error)
                 lifecycleMutex.withLock {
-                    runCatching { cleanupRoute() }
-                    resourcesActive = false
-                }
-                if (recoveryToken == generation.get()) {
-                    ConnectionStateStore.markError()
-                    runCatching { updateFailureNotification() }
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
+                    failClosedLocked(recoveryToken)
                 }
             }
         }
         connectJob = job
         job.invokeOnCompletion { if (connectJob === job) connectJob = null }
+    }
+
+    private fun shouldHoldKillSwitch(): Boolean =
+        NetworkGuardPolicy.holdOnFailure(networkGuardStore.snapshot().killSwitch, isProxyMode())
+
+    private fun adoptEstablishedTun(pfd: ParcelFileDescriptor?): ParcelFileDescriptor? {
+        if (pfd == null) return null
+        val previous = killSwitchFd
+        killSwitchFd = null
+        if (previous != null && previous !== pfd && previous.fd != pfd.fd) {
+            runCatching { previous.close() }
+        }
+        NetworkGuardStore.setBlocking(false)
+        return pfd
+    }
+
+    private fun establishKillSwitchTun(): Boolean {
+        if (isProxyMode()) return false
+        return runCatching {
+            val builder = Builder()
+                .setSession("${getString(R.string.app_name)} Kill Switch")
+                .setBlocking(true)
+                .setMtu(1280)
+                .addAddress("10.255.255.1", 32)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("10.255.255.2")
+                .allowFamily(OsConstants.AF_INET)
+                .addDisallowedApplication(packageName)
+            val next = builder.establish() ?: return@runCatching false
+            val previous = killSwitchFd
+            killSwitchFd = next
+            if (previous != null && previous !== next && previous.fd != next.fd) {
+                runCatching { previous.close() }
+            }
+            AppLogRepository.warning(LogSource.TUN, "Kill switch is holding the VPN interface")
+            true
+        }.getOrElse {
+            AppLogRepository.error(LogSource.TUN, "Kill switch TUN failed", it)
+            false
+        }
+    }
+
+    private fun closeKillSwitchTun() {
+        val held = killSwitchFd
+        killSwitchFd = null
+        runCatching { held?.close() }
+    }
+
+    private suspend fun failClosedLocked(token: Long) {
+        cleanupRoute(holdVpn = true)
+        resourcesActive = false
+        if (token != generation.get()) return
+        ConnectionStateStore.markError()
+        val held = shouldHoldKillSwitch() && killSwitchFd != null
+        if (held) {
+            NetworkGuardStore.setBlocking(true)
+            runCatching { updateKillSwitchNotification() }
+            maybeScheduleAutoReconnect()
+        } else {
+            runCatching { updateFailureNotification() }
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
+    private fun maybeScheduleAutoReconnect() {
+        autoReconnectJob?.cancel()
+        if (!networkGuardStore.snapshot().autoConnect) return
+        if (NetworkGuardStore.userStoppedThisProcess) return
+        if (autoReconnectAttempts >= 8) return
+        val delayMs = (3_000L * (1L shl autoReconnectAttempts.coerceAtMost(4))).coerceAtMost(60_000L)
+        autoReconnectAttempts += 1
+        val job = serviceScope.launch {
+            delay(delayMs)
+            if (resourcesActive || connectJob?.isActive == true) return@launch
+            if (!networkGuardStore.snapshot().autoConnect) return@launch
+            if (NetworkGuardStore.userStoppedThisProcess) return@launch
+            val state = ConnectionStateStore.state.value
+            if (state != ConnectionState.ERROR && state != ConnectionState.DISCONNECTED) return@launch
+            requestConnect()
+        }
+        autoReconnectJob = job
+    }
+
+    private fun onSessionUp() {
+        NetworkGuardStore.setBlocking(false)
+        autoReconnectAttempts = 0
+        autoReconnectJob?.cancel()
+        startLanShare()
+    }
+
+    private fun lanShareUpstreamPort(): Int = when {
+        activeEngine.isPow -> powCoordinator.socksPort().takeIf { it > 0 } ?: PowCoreConfig.SOCKS_PORT
+        activeEngine.isTor -> torEngineStore.snapshot().socksPort
+        else -> advancedSettingsStore.snapshot().socksPort
+    }
+
+    private fun startLanShare() {
+        if (!networkGuardStore.snapshot().lanShare || !resourcesActive) {
+            LanShareProxy.stop()
+            return
+        }
+        runCatching {
+            LanShareProxy.start(
+                upstreamHost = "127.0.0.1",
+                upstreamPort = lanShareUpstreamPort(),
+                protect = { socket -> protect(socket) },
+            )
+        }.onFailure { error ->
+            AppLogRepository.warning(LogSource.SERVICE, "LAN share failed", error)
+            LanShareStatus.update(LanShareEndpoint(detail = error.message.orEmpty()))
+        }
+    }
+
+    private fun applyNetworkGuard() {
+        TunPacketFilter.applyFlags(networkGuardStore.snapshot())
+        serviceScope.launch {
+            lifecycleMutex.withLock {
+                if (resourcesActive) {
+                    startLanShare()
+                } else {
+                    LanShareProxy.stop()
+                }
+                if (
+                    !resourcesActive &&
+                    connectJob?.isActive != true &&
+                    NetworkGuardStore.blocking.value &&
+                    !networkGuardStore.snapshot().killSwitch
+                ) {
+                    closeKillSwitchTun()
+                    NetworkGuardStore.setBlocking(false)
+                    ConnectionStateStore.markDisconnected()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+        }
+    }
+
+    private fun updateKillSwitchNotification() {
+        getSystemService(NotificationManager::class.java).notify(
+            NOTIFICATION_ID,
+            buildNotification(R.string.vpn_kill_switch_notification),
+        )
     }
 
     private fun createNotificationChannel() {
@@ -1731,6 +1895,7 @@ class UacVpnService : VpnService() {
         const val ACTION_SWITCH_PROFILE = "com.uacspoofer.mobile.SWITCH_PROFILE"
         const val ACTION_APPLY_TOR_EXIT = "com.uacspoofer.mobile.APPLY_TOR_EXIT"
         const val ACTION_APPLY_POW_EXIT = "com.uacspoofer.mobile.APPLY_POW_EXIT"
+        const val ACTION_APPLY_NETWORK_GUARD = "com.uacspoofer.mobile.APPLY_NETWORK_GUARD"
         const val ACTION_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.ROUTE_MTU_PROBE"
         const val ACTION_CANCEL_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.CANCEL_ROUTE_MTU_PROBE"
         const val ACTION_REFRESH_LATENCY = "com.uacspoofer.mobile.REFRESH_LATENCY"

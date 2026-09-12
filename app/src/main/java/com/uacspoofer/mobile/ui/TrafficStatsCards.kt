@@ -22,16 +22,20 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.vpn.MonthlyTrafficStore
 import com.uacspoofer.mobile.vpn.TrafficStatsStore
 import java.util.Locale
 
@@ -144,7 +148,114 @@ private fun TrafficStatCard(
     }
 }
 
+@Composable
+internal fun TrafficUsagePanels() {
+    val context = LocalContext.current
+    val stats by TrafficStatsStore.stats.collectAsState()
+    val monthly by remember(context) { MonthlyTrafficStore.get(context) }.usage.collectAsState()
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TrafficPeriodPanel(
+            title = homeText("This session", "این جلسه"),
+            downloadBytes = stats.downloadBytes,
+            uploadBytes = stats.uploadBytes,
+        )
+        TrafficPeriodPanel(
+            title = homeText("This month", "این ماه"),
+            downloadBytes = monthly.downloadBytes,
+            uploadBytes = monthly.uploadBytes,
+        )
+    }
+}
+
+internal fun monthlyTrafficLabel(totalBytes: Long): String = formatBytesLabel(totalBytes)
+
+@Composable
+private fun TrafficPeriodPanel(
+    title: String,
+    downloadBytes: Long,
+    uploadBytes: Long,
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xE512202E), shape)
+            .border(1.dp, Color.White.copy(alpha = 0.08f), shape)
+            .padding(horizontal = 12.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(36.dp)
+                .clip(RoundedCornerShape(50))
+                .background(UacColors.ConnectingCyan),
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                title,
+                color = UacColors.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = homeLocalizedFont(),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                TrafficDirectionValue(
+                    icon = Icons.Rounded.ArrowDownward,
+                    bytes = downloadBytes,
+                    modifier = Modifier.weight(1f),
+                )
+                TrafficDirectionValue(
+                    icon = Icons.Rounded.ArrowUpward,
+                    bytes = uploadBytes,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrafficDirectionValue(
+    icon: ImageVector,
+    bytes: Long,
+    modifier: Modifier,
+) {
+    val formatted = formatBytes(bytes)
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = UacColors.ConnectingCyan, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(
+            formatted.amount,
+            color = UacColors.TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            formatted.unit,
+            color = UacColors.TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
 private data class FormattedBytes(val amount: String, val unit: String)
+
+private fun formatBytesLabel(bytes: Long): String {
+    val formatted = formatBytes(bytes)
+    return "${formatted.amount} ${formatted.unit}"
+}
 
 private fun formatBytes(bytes: Long): FormattedBytes {
     val value = bytes.coerceAtLeast(0L).toDouble()
