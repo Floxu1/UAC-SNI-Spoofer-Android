@@ -13,8 +13,8 @@ class PowWatchdogTest {
             rxBytes = 20L,
             previousTx = -1L,
             previousRx = -1L,
-            screenOn = true,
-            idleStrikes = 0,
+            processMisses = 0,
+            stallStrikes = 0,
         )
         assertEquals(PowWatchdog.Verdict.Healthy, verdict)
     }
@@ -27,83 +27,93 @@ class PowWatchdogTest {
             rxBytes = 40L,
             previousTx = 10L,
             previousRx = 20L,
-            screenOn = true,
-            idleStrikes = 1,
+            processMisses = 1,
+            stallStrikes = 1,
         )
         assertEquals(PowWatchdog.Verdict.Healthy, verdict)
     }
 
     @Test
-    fun screenOffIdleIsNotDead() {
+    fun idleIsNotDeadWhileScreenWouldBeOn() {
         val verdict = PowWatchdog.judge(
             processesAlive = true,
             txBytes = 10L,
             rxBytes = 20L,
             previousTx = 10L,
             previousRx = 20L,
-            screenOn = false,
-            idleStrikes = 0,
+            processMisses = 0,
+            stallStrikes = 0,
         )
         assertEquals(PowWatchdog.Verdict.Healthy, verdict)
     }
 
     @Test
-    fun processDeathIsImmediate() {
-        val verdict = PowWatchdog.judge(
+    fun screenOffIdleStretchesTheInterval() {
+        assertEquals(
+            PowWatchdog.INTERVAL_SCREEN_OFF_MS,
+            PowWatchdog.intervalMs(screenOn = false, activeStreams = 0),
+        )
+    }
+
+    @Test
+    fun backgroundStreamingKeepsTheShortInterval() {
+        assertEquals(PowWatchdog.INTERVAL_MS, PowWatchdog.intervalMs(screenOn = false, activeStreams = 2))
+        assertEquals(PowWatchdog.INTERVAL_MS, PowWatchdog.intervalMs(screenOn = true, activeStreams = 0))
+    }
+
+    @Test
+    fun processDeathNeedsTwoMisses() {
+        val first = PowWatchdog.judge(
             processesAlive = false,
             txBytes = 10L,
             rxBytes = 20L,
             previousTx = 10L,
             previousRx = 20L,
-            screenOn = true,
-            idleStrikes = 0,
-        )
-        assertTrue(verdict is PowWatchdog.Verdict.Dead)
-        assertEquals("engine process exited", (verdict as PowWatchdog.Verdict.Dead).reason)
-    }
-
-    @Test
-    fun screenOnIdleNeedsTwoStrikes() {
-        val first = PowWatchdog.judge(
-            processesAlive = true,
-            txBytes = 10L,
-            rxBytes = 20L,
-            previousTx = 10L,
-            previousRx = 20L,
-            screenOn = true,
-            idleStrikes = 0,
+            processMisses = 0,
+            stallStrikes = 0,
         )
         assertTrue(first is PowWatchdog.Verdict.Strike)
         assertEquals(1, (first as PowWatchdog.Verdict.Strike).nextStrikes)
 
         val second = PowWatchdog.judge(
-            processesAlive = true,
+            processesAlive = false,
             txBytes = 10L,
             rxBytes = 20L,
             previousTx = 10L,
             previousRx = 20L,
-            screenOn = true,
-            idleStrikes = 1,
+            processMisses = 1,
+            stallStrikes = 0,
         )
         assertTrue(second is PowWatchdog.Verdict.Dead)
-        assertEquals("the tunnel stopped passing traffic", (second as PowWatchdog.Verdict.Dead).reason)
+        assertEquals("engine process exited", (second as PowWatchdog.Verdict.Dead).reason)
     }
 
     @Test
-    fun txWithoutRxIsNotAPass() {
+    fun txWithoutRxNeedsTwoStrikes() {
         val first = PowWatchdog.judge(
             processesAlive = true,
             txBytes = 80L,
             rxBytes = 20L,
             previousTx = 10L,
             previousRx = 20L,
-            screenOn = true,
-            idleStrikes = 0,
+            processMisses = 0,
+            stallStrikes = 0,
         )
         assertTrue(first is PowWatchdog.Verdict.Strike)
         assertEquals(
             "the tunnel accepted traffic but answered nothing",
             (first as PowWatchdog.Verdict.Strike).reason,
         )
+
+        val second = PowWatchdog.judge(
+            processesAlive = true,
+            txBytes = 80L,
+            rxBytes = 20L,
+            previousTx = 10L,
+            previousRx = 20L,
+            processMisses = 0,
+            stallStrikes = 1,
+        )
+        assertTrue(second is PowWatchdog.Verdict.Dead)
     }
 }

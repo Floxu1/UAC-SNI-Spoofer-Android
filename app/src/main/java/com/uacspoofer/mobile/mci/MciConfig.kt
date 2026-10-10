@@ -16,11 +16,11 @@ object MciConfig {
     const val CARRIER_ID = "mci"
 
     
-    val PRIMARY_EDGE = MciEdge("104.18.1.1", 443, "primary")
-    val FALLBACK_EDGE = MciEdge("172.66.0.1", 443, "fallback")
+    val PRIMARY_EDGE = MciEdge("104.26.13.100", 443, "primary")
+    val FALLBACK_EDGE = MciEdge("104.26.14.200", 443, "fallback")
     
     
-    val IRANCELL_EDGE = MciEdge("104.18.1.1", 443, "irancell", finalmaskMaxSplit = 100)
+    val IRANCELL_EDGE = MciEdge("104.26.14.40", 443, "irancell", finalmaskMaxSplit = 100)
     val EDGES = listOf(PRIMARY_EDGE, IRANCELL_EDGE, FALLBACK_EDGE)
 
     
@@ -30,10 +30,35 @@ object MciConfig {
     const val PROTECTED_ROUTE_STRATEGY = "plain"
 
     
-    const val TLS_SERVER_NAME = "www.ignitelimit.com"
-    const val WEBSOCKET_HOST = "www.ignitelimit.com"
-    const val WEBSOCKET_PATH = "/assignment"
-    const val TROJAN_PASSWORD = "humanity"
+    const val TLS_SERVER_NAME = "jp3.yohototo.top"
+    /**
+     * Stable ClientHello for the built-in SNI. `unsafe` keeps the cipher list
+     * fixed so the fragment below always ends before the SNI extension.
+     */
+    const val TLS_FINGERPRINT = "unsafe"
+    const val TLS_CIPHER_SUITES =
+        "TLS_AES_256_GCM_SHA384:" +
+            "TLS_CHACHA20_POLY1305_SHA256:" +
+            "TLS_AES_128_GCM_SHA256:" +
+            "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:" +
+            "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:" +
+            "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:" +
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:" +
+            "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256:" +
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:" +
+            "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:" +
+            "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:" +
+            "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:" +
+            "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
+    /**
+     * First record stops at the end of the cipher-suite list (byte 104 of an
+     * unsafe hello). The SNI then leaves in its own record.
+     */
+    const val IRAN_HELLO_FINALMASK =
+        """"finalmask":{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","lengths":["0","104","1"],"delays":["0"],"maxSplit":"0"}},{"type":"fragment","settings":{"packets":"1-1","lengths":["114","1"],"delays":["1"],"maxSplit":"11"}}]}"""
+    const val WEBSOCKET_HOST = "jp3.yohototo.top"
+    const val WEBSOCKET_PATH = "/tyxyws"
+    const val TROJAN_PASSWORD = "4e4f1f70-5e56-4a76-bb9d-db087f4690c4"
 
     const val LOCAL_BRIDGE_ADDRESS = "127.0.0.1"
     const val LOCAL_BRIDGE_PORT = 40443

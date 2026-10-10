@@ -81,6 +81,14 @@ Config files:
   --wg-config <path>       identity config path for WireGuard
   --masque-config <path>   identity config path for MASQUE
 
+Key and certificate (no tunnel; prints JSON and exits):
+  --prepare-only           provision the WARP key and MASQUE certificate, then exit
+  --renew-cert             with --prepare-only, mint a new MASQUE certificate
+                           even when one is already saved
+  --api-camo <mode>        key-request camouflage: ech | fragment | external
+  --discovery <mode>       endpoint discovery: cache | fresh | clean
+  --scan-once              one failed hunt returns instead of rescanning
+
 Advanced:
   --tls-groups <list>      TLS key share groups, e.g. \"P-256:X25519:P-384\"
   --perf <low|medium|high> force a resource profile instead of auto-detecting from cpu/ram
@@ -181,6 +189,12 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<()> {
             "--config" => set("AETHER_CONFIG", next_value!()),
             "--wg-config" => set("AETHER_WG_CONFIG", next_value!()),
             "--masque-config" => set("AETHER_MASQUE_CONFIG", next_value!()),
+
+            "--prepare-only" => set("AETHER_PREPARE_ONLY", "1"),
+            "--renew-cert" => set("AETHER_RENEW_CERT", "1"),
+            "--api-camo" => set("AETHER_API_CAMO", next_value!()),
+            "--discovery" => set("AETHER_DISCOVERY", next_value!()),
+            "--scan-once" => set("AETHER_SCAN_ONCE", "1"),
 
             "--team" | "--organization" => set("AETHER_TEAM", next_value!()),
             "--access-id" => set("AETHER_ACCESS_CLIENT_ID", next_value!()),

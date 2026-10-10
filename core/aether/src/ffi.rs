@@ -130,6 +130,9 @@ struct NativeStartOptions {
     http_proxy: Option<String>,
     #[serde(default = "default_true")]
     scan_once: bool,
+    api_camo: String,
+    #[serde(default)]
+    renew_masque: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -167,6 +170,8 @@ impl Default for NativeStartOptions {
             upstream_proxy: None,
             http_proxy: None,
             scan_once: true,
+            api_camo: String::new(),
+            renew_masque: false,
         }
     }
 }
@@ -226,6 +231,8 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.gateway = value.gateway;
         options.upstream_proxy = value.upstream_proxy.filter(|v| !v.trim().is_empty());
         options.scan_once = value.scan_once;
+        options.api_camo = value.api_camo;
+        options.renew_masque = value.renew_masque;
         options.http_proxy = match value.http_proxy.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),

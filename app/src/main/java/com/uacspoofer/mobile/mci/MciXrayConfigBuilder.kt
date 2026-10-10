@@ -241,14 +241,20 @@ internal object MciXrayConfigBuilder {
         val alpnField = alpn.takeIf(List<String>::isNotEmpty)
             ?.joinToString(",", prefix = ",\"alpn\":[", postfix = "]") { "\"${q(it)}\"" }
             .orEmpty()
+        val iranHelloSplit = iranHelloSplit(identity)
         val fingerprint = identity.fingerprint.takeIf(String::isNotBlank)
             ?.let { ",\"fingerprint\":\"${q(it)}\"" }.orEmpty()
+        val cipherSuites = if (iranHelloSplit) {
+            ",\"cipherSuites\":\"${q(MciConfig.TLS_CIPHER_SUITES)}\""
+        } else {
+            ""
+        }
         val serverName = identity.sni.takeIf(String::isNotBlank)
             ?.let { "\"serverName\":\"${q(it)}\"," }.orEmpty()
         // A plain config has no TLS layer, so emitting tlsSettings would make Xray negotiate a
         // handshake the server never offers.
         val tls = if (identity.usesTls) {
-            """"tlsSettings":{$serverName"allowInsecure":${identity.allowInsecure}$alpnField$fingerprint}"""
+            """"tlsSettings":{$serverName"allowInsecure":${identity.allowInsecure}$alpnField$fingerprint$cipherSuites}"""
         } else {
             ""
         }
@@ -304,10 +310,11 @@ internal object MciXrayConfigBuilder {
         }
         // Fragmentation splits the TLS ClientHello. A plain config has none, so the fragmenter
         // would find nothing to cut and only add a code path that was never exercised.
-        val finalmask = if (runtimeOptions.finalmaskEnabled && identity.usesTls) {
-            """"finalmask":{"tcp":[{"type":"fragment","settings":{"packets":"${q(settings.finalmaskPacket)}","length":"${settings.finalmaskLength}","delay":"${settings.finalmaskDelayMs}"$compatibilityArrays,"maxSplit":"$maxSplit"}}]}"""
-        } else {
-            ""
+        val finalmask = when {
+            iranHelloSplit && runtimeOptions.finalmaskEnabled -> MciConfig.IRAN_HELLO_FINALMASK
+            runtimeOptions.finalmaskEnabled && identity.usesTls ->
+                """"finalmask":{"tcp":[{"type":"fragment","settings":{"packets":"${q(settings.finalmaskPacket)}","length":"${settings.finalmaskLength}","delay":"${settings.finalmaskDelayMs}"$compatibilityArrays,"maxSplit":"$maxSplit"}}]}"""
+            else -> ""
         }
         val sockopt = """"sockopt":{"domainStrategy":"${q(settings.domainStrategy)}","tcpKeepAliveInterval":${settings.keepAliveIntervalSeconds},"tcpKeepAliveIdle":${settings.keepAliveIdleSeconds}}"""
         return listOf(
@@ -319,6 +326,12 @@ internal object MciXrayConfigBuilder {
             sockopt,
         ).filter(String::isNotBlank).joinToString(",", prefix = "{", postfix = "}")
     }
+
+    /** Built-in SNI 1 only. A chrome hello moves the SNI, so the cut would miss it. */
+    private fun iranHelloSplit(identity: RuntimeProxyIdentity): Boolean =
+        identity.usesTls &&
+            identity.sni.equals(MciConfig.TLS_SERVER_NAME, ignoreCase = true) &&
+            identity.fingerprint.equals(MciConfig.TLS_FINGERPRINT, ignoreCase = true)
 
     private fun validateIdentity(identity: RuntimeProxyIdentity, runtimeOptions: MciXrayRuntimeOptions) {
         require(identity.credential.isNotBlank()) { "Selected profile credential is missing" }

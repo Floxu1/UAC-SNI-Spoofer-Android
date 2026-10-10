@@ -12,6 +12,42 @@ class PowNetworkRestoreTest {
     }
 
     @Test
+    fun lostNetworkIsVerifiedWhileTheSessionIsLive() {
+        assertTrue(
+            PowNetworkRestore.shouldVerifyOnLost(
+                sessionLive = true,
+                retuning = false,
+                stopRequested = false,
+            ),
+        )
+    }
+
+    @Test
+    fun lostNetworkIsIgnoredWhileRetuningOrStopped() {
+        assertFalse(
+            PowNetworkRestore.shouldVerifyOnLost(
+                sessionLive = true,
+                retuning = true,
+                stopRequested = false,
+            ),
+        )
+        assertFalse(
+            PowNetworkRestore.shouldVerifyOnLost(
+                sessionLive = true,
+                retuning = false,
+                stopRequested = true,
+            ),
+        )
+        assertFalse(
+            PowNetworkRestore.shouldVerifyOnLost(
+                sessionLive = false,
+                retuning = false,
+                stopRequested = false,
+            ),
+        )
+    }
+
+    @Test
     fun availableNetworkRetriesOnlyWhileWaiting() {
         assertTrue(
             PowNetworkRestore.shouldRetryOnAvailable(

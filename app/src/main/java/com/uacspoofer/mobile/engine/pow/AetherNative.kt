@@ -55,6 +55,8 @@ object AetherNative {
 
     fun lastError(): String = if (available) nativeLastError() else unavailableReason
 
+    fun lastLog(): String = if (available) nativeLastLog() else ""
+
     fun attach(service: VpnService) {
         checkAvailable()
         nativeAttach(service)
@@ -76,6 +78,7 @@ object AetherNative {
     @JvmStatic private external fun nativeIsRunning(): Boolean
     @JvmStatic private external fun nativeIsReady(): Boolean
     @JvmStatic private external fun nativeLastError(): String
+    @JvmStatic private external fun nativeLastLog(): String
     @JvmStatic private external fun nativeAttach(service: VpnService)
     @JvmStatic private external fun nativeDetach()
 }

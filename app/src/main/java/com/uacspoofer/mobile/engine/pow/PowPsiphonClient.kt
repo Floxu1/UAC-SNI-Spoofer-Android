@@ -83,9 +83,7 @@ internal class PowPsiphonClient(
             withTimeout(STOP_TIMEOUT_MS) { waiter.await() }
         }
         stopWaiter = null
-        withContext(Dispatchers.Main.immediate) {
-            unbindLocked()
-        }
+        unbindOnMain()
     }
 
     fun close() {
@@ -111,12 +109,22 @@ internal class PowPsiphonClient(
         try {
             withTimeout(BIND_TIMEOUT_MS) { waiter.await() }
         } catch (timeout: TimeoutCancellationException) {
-            unbindLocked()
+            unbindOnMain()
             throw IllegalStateException("UAC PoW inner hop did not start")
         } finally {
             bindWaiter = null
         }
         started.set(true)
+    }
+
+    private suspend fun unbindOnMain() {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            unbindLocked()
+            return
+        }
+        withContext(Dispatchers.Main) {
+            unbindLocked()
+        }
     }
 
     private fun unbindLocked() {

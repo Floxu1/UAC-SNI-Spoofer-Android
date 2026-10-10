@@ -104,10 +104,10 @@ pub fn install_verification(
     } else {
         // No pin-based verification configured — disable server cert verification.
         // This is required because Aether connects to Cloudflare edge IPs with
-        // SNI=consumer-masque.cloudflareclient.com but the edge may present a
-        // different certificate or the SNI may be empty/transformed for DPI bypass.
-        // Standard CA validation fails in this context. The security model relies on
-        // the encrypted MASQUE tunnel and ECH rather than TLS cert verification.
+        // SNI=www.cloudflare.com so the ClientHello looks like a normal Cloudflare
+        // page. The MASQUE host stays inside the encrypted request. Standard CA
+        // validation is skipped because the edge certificate is for that public
+        // name, not for the tunnel hostname.
         builder.set_verify(SslVerifyMode::NONE);
         announce_once("tls verification: disabled (no pin configured)".to_string());
     }

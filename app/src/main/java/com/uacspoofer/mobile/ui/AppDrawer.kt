@@ -48,6 +48,7 @@ import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SupportAgent
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -132,6 +133,9 @@ private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
     add(DrawerItem(DrawerDestination.APP_BYPASS, "App Bypass", Icons.Outlined.Block))
     add(DrawerItem(DrawerDestination.SETTINGS, "Settings", Icons.Outlined.Settings))
     add(DrawerItem(DrawerDestination.SUPPORT, "Support", Icons.Outlined.SupportAgent))
+    if (mode.isPow) {
+        add(DrawerItem(DrawerDestination.POW_SETTINGS, "PoW settings", Icons.Outlined.Tune))
+    }
 }
 
 @Composable
@@ -444,7 +448,7 @@ private fun DrawerNavItem(
                         DrawerDestination.APP_BYPASS -> "عبور انتخابی برنامه‌ها"
                         DrawerDestination.SETTINGS -> "تنظیمات"
                         DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات پیشرفته"
-                        DrawerDestination.POW_SETTINGS -> "UAC PoW"
+                        DrawerDestination.POW_SETTINGS -> "تنظیمات PoW"
                         DrawerDestination.TOR_SETTINGS -> "Tor"
                         DrawerDestination.SUPPORT -> "پشتیبانی"
                     },

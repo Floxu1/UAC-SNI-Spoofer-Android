@@ -15,6 +15,7 @@ import android.os.Process
 import android.os.RemoteException
 import android.util.Log
 import ca.psiphon.PsiphonTunnel
+import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -93,8 +94,28 @@ class PowPsiphonService : Service() {
     }
 
     private fun readServerEntries(): String = runCatching {
-        assets.open(PowPsiphonIpc.ASSET_SERVER_ENTRIES).bufferedReader().use { it.readText().trim() }
+        val raw = assets.open(PowPsiphonIpc.ASSET_SERVER_ENTRIES).bufferedReader().use { it.readText().trim() }
+        if (!meekOnReachableFronts()) return@runCatching raw
+        // Akamai fronts are reset on this carrier. Cloudflare and Fastly are the
+        // fronts whose TLS still completes, so the direct meek attempt uses only
+        // those server entries.
+        val kept = raw.lineSequence()
+            .filter { line -> "636c6f7564666c617265" in line || "666173746c79" in line }
+            .joinToString("\n")
+        if (kept.isBlank()) raw else kept
     }.getOrDefault("")
+
+    private fun meekOnReachableFronts(): Boolean {
+        val protocols = runCatching {
+            JSONObject(configJson).optJSONArray("LimitTunnelProtocols")
+        }.getOrNull() ?: return false
+        if (protocols.length() == 0) return false
+        for (index in 0 until protocols.length()) {
+            val name = protocols.optString(index)
+            if (!name.startsWith("FRONTED-MEEK")) return false
+        }
+        return true
+    }
 
     private fun emit(what: Int, extras: Bundle? = null, arg1: Int = 0) {
         val target = callback ?: return

@@ -77,9 +77,16 @@ internal object PowGhostHandover {
         protocol: String,
         settings: PowEngineSettings,
         chainPort: Int,
+        mci: Boolean = false,
     ): String {
-        // Reuse PowCoreConfig logic but override chain port for shadow.
-        val base = PowCoreConfig.chainOuterJson(appContext, protocol, settings, discovery = PowCoreConfig.DISCOVERY_FRESH, scanMode = PowCoreConfig.SCAN_TURBO)
+        val base = PowCoreConfig.chainOuterJson(
+            appContext,
+            protocol,
+            settings,
+            discovery = PowCoreConfig.DISCOVERY_FRESH,
+            scanMode = PowCoreConfig.SCAN_TURBO,
+            mci = mci,
+        )
         return runCatching {
             val obj = org.json.JSONObject(base)
             obj.put("listen", "127.0.0.1:$chainPort")

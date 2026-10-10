@@ -11,7 +11,7 @@ class MciRouteSelectorTest {
 
         assertEquals(listOf("primary", "irancell", "fallback"), selector.orderedEdges().map(MciEdge::role))
         selector.recordFailure(MciConfig.PRIMARY_EDGE)
-        assertEquals(listOf("fallback", "primary", "irancell"), selector.orderedEdges().map(MciEdge::role))
+        assertEquals(listOf("irancell", "fallback", "primary"), selector.orderedEdges().map(MciEdge::role))
 
         now += MciConfig.EDGE_FAILURE_COOLDOWN_MS + 1L
         assertEquals(listOf("primary", "irancell", "fallback"), selector.orderedEdges().map(MciEdge::role))

@@ -24,6 +24,16 @@ internal object PowQualityPolicy {
     const val BASELINE_SAMPLES = 3
     const val DNS_WARM_TIMEOUT_MS = 1_200
 
+    // --- Battery-friendly passive quality watch (optimized mode) ---
+    // Samples ride on real user traffic; an active probe is only fired when the
+    // relay has been quiet for a while, so a screen-on session still catches a
+    // degraded path without polling the radio every few seconds.
+    const val PASSIVE_INTERVAL_MS = 15_000L
+    const val PASSIVE_INTERVAL_IDLE_MS = 60_000L
+    const val IDLE_PROBE_AFTER_MS = 45_000L
+    const val PASSIVE_MAX_RETUNES = 3
+    const val PASSIVE_BAD_STREAK = 3
+
     fun isDegraded(baselineMs: Long, sampleMs: Long): Boolean {
         if (sampleMs <= 0L) return true
         if (baselineMs <= 0L) return false

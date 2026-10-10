@@ -30,7 +30,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -70,6 +69,8 @@ class PowConnectionCoordinator(
     @Volatile private var socksPort = PowCoreConfig.SOCKS_PORT
     @Volatile private var outerThread: Thread? = null
     @Volatile private var outerCommitted = false
+    @Volatile private var directPsiphon = false
+    @Volatile private var warpOnly = false
     @Volatile private var innerReady = false
     @Volatile private var routing = false
     @Volatile private var activeTunnelProtocol = ""
@@ -84,8 +85,11 @@ class PowConnectionCoordinator(
     @Volatile private var sessionMtu = PowTunRelayConfig.DEFAULT_MTU
     @Volatile private var qualityJob: Job? = null
     @Volatile private var watchdogJob: Job? = null
+    @Volatile private var passiveJob: Job? = null
     @Volatile private var retuneSignal: CompletableDeferred<Unit>? = null
     @Volatile private var lastOuterProtocol = ""
+    @Volatile private var wonTransport = ""
+    @Volatile private var wonIp = ""
     @Volatile private var lastRetuneAt = 0L
     @Volatile private var baselineRttMs = 0L
     @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -98,7 +102,8 @@ class PowConnectionCoordinator(
     private val restoreAttempts = AtomicInteger(0)
     private var watchdogTx = -1L
     private var watchdogRx = -1L
-    private var watchdogStrikes = 0
+    private var watchdogProcessMisses = 0
+    private var watchdogStallStrikes = 0
 
     val tunAddress: PowTun2Socks.PrivateAddress
         get() = PowTun2Socks.privateAddress
@@ -111,14 +116,15 @@ class PowConnectionCoordinator(
         !stopRequested.get() &&
             innerReady &&
             (proxyMode || PowTun2Socks.isRunning) &&
-            AetherNative.isRunning() &&
-            AetherNative.isReady()
+            (directPsiphon || (AetherNative.isRunning() && AetherNative.isReady()))
 
     fun isRunning(): Boolean {
         if (retuning.get()) {
             return !stopRequested.get() && (proxyMode || PowTun2Socks.isRunning)
         }
-        return innerReady && (proxyMode || (PowTun2Socks.isRunning && AetherNative.isRunning()))
+        return innerReady &&
+            (proxyMode || PowTun2Socks.isRunning) &&
+            (directPsiphon || AetherNative.isRunning())
     }
 
     fun isOuterRunning(): Boolean = AetherNative.isRunning()
@@ -155,9 +161,13 @@ class PowConnectionCoordinator(
         innerStarted = false
         routing = false
         outerCommitted = false
+        warpOnly = false
+        directPsiphon = false
         sessionMtu = PowTunRelayConfig.DEFAULT_MTU
         activeTunnelProtocol = ""
         lastOuterProtocol = ""
+        wonTransport = ""
+        wonIp = ""
         baselineRttMs = 0L
         lastRetuneAt = 0L
         qualityRetunes.set(0)
@@ -186,36 +196,52 @@ class PowConnectionCoordinator(
                 }
                 PowStatusStore.update(PowPhase.STARTING, 5, "Starting UAC PoW")
                 if (!proxyMode) {
-                    val address = PowTun2Socks.selectPrivateAddress()
+                    PowTun2Socks.selectPrivateAddress()
                     sessionMtu = PowTunRelayConfig.mtuForChain(settings.tunMtu, underlyingLinkMtu())
-                    PowStatusStore.update(PowPhase.STARTING, 10, "Creating device VPN interface")
-                    tunFd = establishTun(address, sessionMtu) ?: error("Android could not establish the VPN interface")
-                    ownsTun = true
                 }
                 AetherNative.attach(service)
                 val outer = raiseOuterLeg(
                     scanMode = PowCoreConfig.normalizeScanMode(currentSettings.scanMode),
-                ) ?: error(outerFailureMessage())
+                )
+                val chain = currentSettings.chainPsiphon
+                if (!chain && outer == null) {
+                    error("WARP did not come up")
+                }
+                val outerName: String
+                if (!chain) {
+                    outerName = outer ?: "WARP"
+                    if (!proxyMode) openDeviceTun(establishTun)
+                    finishWithoutPsiphon()
+                } else {
+                directPsiphon = outer == null
+                outerName = outer ?: "Psiphon"
+                if (directPsiphon) {
+                    AppLogRepository.warning(
+                        LogSource.POW,
+                        "No WARP transport came up; Psiphon will connect on its own",
+                    )
+                }
                 ensureActive()
                 PowStatusStore.update(
                     PowPhase.INNER,
                     55,
-                    "Starting Psiphon through $outer",
-                    outerLabel = outer,
+                    if (directPsiphon) "Starting Psiphon directly" else "Starting Psiphon through $outerName",
+                    outerLabel = outerName,
                 )
-                val connected = CompletableDeferred<Unit>()
-                connectedSignal = connected
+                connectedSignal = CompletableDeferred()
                 startPsiphonTunnel()
                 ladderJob = launch {
                     watchLadder()
                 }
+                val connected = connectedSignal ?: error("Psiphon connect was not started")
                 try {
                     withTimeout(INNER_CONNECT_TIMEOUT_MS) { connected.await() }
                 } catch (timeout: TimeoutCancellationException) {
-                    error("Psiphon did not connect through WARP in time")
+                    error("Psiphon did not connect in time")
                 }
                 ensureActive()
                 if (!proxyMode) {
+                    openDeviceTun(establishTun)
                     val fd = tunFd ?: error("VPN interface missing")
                     PowStatusStore.update(PowPhase.BRIDGING, 90, "Routing device traffic through UAC PoW")
                     if (!PowSocksConnectOnly.start(PowCoreConfig.TUN_SOCKS_PORT, socksPort)) {
@@ -234,17 +260,20 @@ class PowConnectionCoordinator(
                     }
                     routing = true
                 }
-                innerReady = true
-                val ready = if (proxyMode) {
-                    "UAC PoW ready · Proxy SOCKS 127.0.0.1:$socksPort"
-                } else {
-                    "UAC PoW ready · Tunnel VPN through Psiphon over WARP"
                 }
-                PowStatusStore.update(PowPhase.CONNECTED, 100, ready, outerLabel = outer)
+                innerReady = true
+                rememberConnectedMode()
+                val ready = when {
+                    proxyMode -> "UAC PoW ready · Proxy SOCKS 127.0.0.1:$socksPort"
+                    warpOnly -> "UAC PoW ready · Tunnel VPN through WARP"
+                    directPsiphon -> "UAC PoW ready · Tunnel VPN through Psiphon"
+                    else -> "UAC PoW ready · Tunnel VPN through Psiphon over WARP"
+                }
+                PowStatusStore.update(PowPhase.CONNECTED, 100, ready, outerLabel = outerName)
                 AppLogRepository.success(LogSource.POW, ready)
             }
             startSessionWatch()
-            PowPageTurbo.kick(qualityScope, socksPort, keepWarm = !currentSettings.optimizedMode)
+            PowPageTurbo.kick(qualityScope, socksPort, keepWarm = true)
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) { stop() }
             throw cancelled
@@ -324,8 +353,12 @@ class PowConnectionCoordinator(
             }
 
             override fun onLost(network: Network) {
-                if (PowNetworkRestore.shouldActOnLost()) {
-                    qualityScope.launch { runCatching { recoverBehindTun("network lost") } }
+                if (PowNetworkRestore.shouldVerifyOnLost(
+                        sessionLive = innerReady,
+                        retuning = retuning.get(),
+                        stopRequested = stopRequested.get(),
+                    )) {
+                    qualityScope.launch { verifyPathAfterNetworkChange() }
                 }
             }
         }
@@ -376,9 +409,8 @@ class PowConnectionCoordinator(
         restoreWaiting.set(false)
         restoreAttempts.set(0)
         crashRecovers.set(0)
-        restoreJob?.cancel()
         restoreJob = null
-        unregisterNetworkCallback()
+        // The network callback stays registered for the session — push-based, costs nothing.
         publishConnected()
         startSessionWatch()
     }
@@ -388,7 +420,7 @@ class PowConnectionCoordinator(
         restoreAttempts.set(0)
         restoreJob?.cancel()
         restoreJob = null
-        unregisterNetworkCallback()
+        // The network callback stays registered for the session — push-based, costs nothing.
     }
 
     private fun publishReconnecting(reason: String) {
@@ -407,17 +439,17 @@ class PowConnectionCoordinator(
         val outer = PowStatusStore.status.value.outerLabel.ifBlank {
             PowCoreConfig.outerLabel(lastOuterProtocol.ifBlank { store.rememberedOuterProtocol().orEmpty() })
         }
-        val ready = if (proxyMode) {
-            "UAC PoW ready · Proxy SOCKS 127.0.0.1:$socksPort"
-        } else {
-            "UAC PoW ready · Tunnel VPN through Psiphon over WARP"
+        val ready = when {
+            proxyMode -> "UAC PoW ready · Proxy SOCKS 127.0.0.1:$socksPort"
+            warpOnly -> "UAC PoW ready · Tunnel VPN through WARP"
+            else -> "UAC PoW ready · Tunnel VPN through Psiphon over WARP"
         }
         PowStatusStore.update(PowPhase.CONNECTED, 100, ready, outerLabel = outer)
         notificationSink?.invoke(true)
     }
 
     private suspend fun retuneInnerOnly(reason: String): Boolean {
-        if (stopRequested.get()) return false
+        if (stopRequested.get() || warpOnly) return !stopRequested.get() && warpOnly
         setRetuning(true)
         PowSocksConnectOnly.setFailFast(true)
         AppLogRepository.info(LogSource.POW, "Inner-only rebuild ($reason)")
@@ -439,13 +471,12 @@ class PowConnectionCoordinator(
             withTimeout(PowQualityPolicy.INNER_RETUNE_TIMEOUT_MS) { connected.await() }
             if (stopRequested.get()) return false
             lastRetuneAt = SystemClock.elapsedRealtime()
-            if (!currentSettings.optimizedMode) {
-                val sample = PowPathProbe.measureMs(socksPort)
-                if (sample > 0L) baselineRttMs = sample
-                AppLogRepository.success(LogSource.POW, "Inner-only path rebuilt" + if (sample > 0) " ${sample}ms" else "")
-            } else {
-                AppLogRepository.success(LogSource.POW, "Inner-only path rebuilt")
-            }
+            val sample = PowPathProbe.measureMsLite(socksPort)
+            if (sample > 0L) baselineRttMs = sample
+            AppLogRepository.success(
+                LogSource.POW,
+                "Inner-only path rebuilt" + if (sample > 0L) " ${sample}ms" else "",
+            )
             true
         } catch (_: TimeoutCancellationException) {
             AppLogRepository.warning(LogSource.POW, "Inner-only rebuild timeout — escalating to full handover")
@@ -461,13 +492,79 @@ class PowConnectionCoordinator(
         }
     }
 
+    private fun scanPulse(message: String): String {
+        val scanning = message.startsWith("Scanning ")
+        val body = if (scanning) {
+            message.removePrefix("Scanning ").substringBefore(" via")
+        } else {
+            message.removePrefix("Rejected ").substringBefore(":")
+        }
+        val why = when {
+            scanning -> "trying"
+            message.contains("status 400") -> "400"
+            message.contains("ACCESS_DENIED") -> "access-denied"
+            message.contains("CERTIFICATE") -> "certificate"
+            message.contains("timeout") -> "timeout"
+            message.contains("reset") -> "reset"
+            message.contains("unexpected EOF") -> "eof"
+            else -> "other"
+        }
+        return "Scan $body $why"
+    }
+
+    private fun stageLine(message: String): String? = when {
+        message.startsWith("Key:") -> message.removePrefix("Key:").trim().let { "Key $it" }
+        message.startsWith("Clean HTTP/2 list:") -> message
+        message.startsWith("Clean HTTP/2 list is empty. Starting") -> "Clean list empty. HTTP/2 scan is starting."
+        message.startsWith("Trying saved clean address") -> message
+        message.startsWith("Saved clean address accepted") -> message
+        message.startsWith("Saved clean address rejected") -> message
+        message.startsWith("Every saved address failed. Scan was not started") -> message
+        message.startsWith("Every saved address failed. Starting") -> "Saved addresses failed. HTTP/2 scan is starting."
+        message.startsWith("Scanning HTTP/2") -> message
+        message.startsWith("Saved clean HTTP/2 address") -> message
+        message.startsWith("Scanning ") -> scanPulse(message)
+        message.startsWith("Rejected ") -> scanPulse(message)
+        message.startsWith("HTTP/2 selected") -> "HTTP/2 started"
+        message.startsWith("MASQUE accepted") -> message
+        message.startsWith("MASQUE start") -> message
+        message.startsWith("Tunnel did not stay up") -> message
+        message.startsWith("MASQUE: dialing known gateways on UDP/1701") -> "Trying UDP/1701"
+        message.startsWith("MASQUE: no known gateway accepted UDP/1701") -> "UDP/1701 did not answer"
+        message.startsWith("MASQUE: UDP/1701 did not answer") -> "UDP/1701 did not answer, trying TCP"
+        message.startsWith("No usable MASQUE") -> message
+        message.startsWith("MASQUE identity refused") -> "Certificate refused. Requesting a new one."
+        message.startsWith("Certificate ") -> message
+        message.startsWith("Certificate refused during") -> message
+        message.startsWith("This certificate was refused") -> message
+        message.startsWith("New certificate saved") -> message
+        message.startsWith("New MASQUE certificate issued") -> "New certificate issued. Retrying the gateways."
+        message.startsWith("Could not refresh the MASQUE certificate") -> message
+        else -> null
+    }
+
     fun onNativeEvent(json: String) {
         val event = runCatching { JSONObject(json) }.getOrNull() ?: return
         when (event.optString("type")) {
             "log" -> {
                 val message = event.optString("message")
                 if (message.isNotBlank()) {
-                    AppLogRepository.debug(LogSource.POW, message.take(240))
+                    if (message.startsWith("Key:")) {
+                        AppLogRepository.info(LogSource.POW, message.take(500))
+                    } else {
+                        AppLogRepository.debug(LogSource.POW, message.take(240))
+                    }
+                    stageLine(message)?.let { line ->
+                        if (line.startsWith("Scan ")) {
+                            PowStatusStore.scan(line, line.substringAfterLast(' '))
+                        } else {
+                            val failed = line.startsWith("Every saved") ||
+                                line.startsWith("Tunnel did not") ||
+                                line.startsWith("UDP/1701 did not") ||
+                                line.startsWith("No usable MASQUE")
+                            PowStatusStore.note(line, failed)
+                        }
+                    }
                 }
             }
         }
@@ -480,20 +577,54 @@ class PowConnectionCoordinator(
         retune: Boolean = false,
         chainPort: Int = PowCoreConfig.CHAIN_SOCKS_PORT,
     ): String? {
-        val ladder = PowCoreConfig.candidates(currentSettings)
-        val auto = ladder.size > 1
+        val mci = PowCoreConfig.usesMciFirewall(appContext, currentSettings)
+        val plan = PowCoreConfig.outerPlan(currentSettings, mci)
+        val ladder = plan.protocols
+        val auto = ladder.size > 1 && !plan.fixedOrder
         val remembered = store.rememberedOuterProtocol()
         val ordered = when {
             retune -> PowQualityPolicy.outerOrder(ladder, lastOuterProtocol.ifBlank { remembered.orEmpty() })
-            auto && remembered != null && remembered in ladder ->
-                listOf(remembered) + ladder.filter { it != remembered }
+            plan.fixedOrder -> ladder
+            auto -> {
+                val first = ladder.firstOrNull()
+                buildList {
+                    if (first != null) add(first)
+                    if (remembered != null && remembered in ladder && remembered != first) add(remembered)
+                    addAll(ladder.filter { it != first && it != remembered })
+                }
+            }
             else -> ladder
+        }
+        if (!silent) {
+            val firewall = when (currentSettings.firewallProfile) {
+                PowCoreConfig.FIREWALL_MCI -> "Hamrah Aval"
+                PowCoreConfig.FIREWALL_IRANCELL -> "Irancell"
+                else -> when (PowCarrier.carrierClass(appContext)) {
+                    "mci" -> "Hamrah Aval from SIM"
+                    "irancell" -> "Irancell from SIM"
+                    else -> "unspecified network"
+                }
+            }
+            AppLogRepository.info(
+                LogSource.POW,
+                "Firewall $firewall · ${plan.summary} · key ${currentSettings.keyFetch} · " +
+                    if (currentSettings.chainPsiphon) "Psiphon chain" else "WARP only",
+            )
         }
         for ((offset, protocol) in ordered.withIndex()) {
             coroutineContext.ensureActive()
             if (stopRequested.get()) return null
             val label = PowCoreConfig.outerLabel(protocol)
-            val budget = PowCoreConfig.outerBudgetMs(protocol, retune = retune, scanMode = scanMode)
+            val attemptScan = if (!retune && offset == 0 && protocol == "masque") {
+                PowCoreConfig.SCAN_THOROUGH
+            } else {
+                scanMode
+            }
+            val budget = PowCoreConfig.outerBudgetMs(
+                protocol,
+                retune = retune,
+                scanMode = attemptScan,
+            )
             if (AetherNative.isRunning()) {
                 stopOuterLeg()
             }
@@ -507,13 +638,20 @@ class PowConnectionCoordinator(
             }
             AppLogRepository.info(
                 LogSource.POW,
-                "Outer attempt ${offset + 1}/${ordered.size}: $label (${budget / 1000}s, $scanMode)" +
+                "Outer attempt ${offset + 1}/${ordered.size}: $label (${budget / 1000}s, $attemptScan)" +
                     if (retune) " fresh" else "",
             )
             val config = if (chainPort == PowCoreConfig.CHAIN_SOCKS_PORT) {
-                PowCoreConfig.chainOuterJson(appContext, protocol, currentSettings, discovery = discovery, scanMode = scanMode)
+                PowCoreConfig.chainOuterJson(
+                    appContext,
+                    protocol,
+                    currentSettings,
+                    discovery = discovery,
+                    scanMode = attemptScan,
+                    mci = mci,
+                )
             } else {
-                PowGhostHandover.shadowChainJson(appContext, protocol, currentSettings, chainPort)
+                PowGhostHandover.shadowChainJson(appContext, protocol, currentSettings, chainPort, mci)
             }
             val prepared = runCatching { AetherNative.prepare(config) }
             if (prepared.isFailure) {
@@ -544,6 +682,8 @@ class PowConnectionCoordinator(
             if (awaitOuterProxy(budget, chainPort)) {
                 store.saveOuterProtocol(protocol)
                 lastOuterProtocol = protocol
+                wonTransport = if (protocol == "masque") plan.masqueTransport else ""
+                wonIp = plan.ipFor(protocol)
                 outerCommitted = true
                 AppLogRepository.success(LogSource.POW, "$label is carrying the outer leg")
                 return label
@@ -551,8 +691,26 @@ class PowConnectionCoordinator(
             if (stopRequested.get()) return null
             AppLogRepository.warning(LogSource.POW, "$label did not come up in ${budget / 1000}s")
             stopOuterLeg()
+            if (protocol == "masque") {
+                AppLogRepository.warning(
+                    LogSource.POW,
+                    "$label address scan finished. Staying on this method.",
+                )
+                PowStatusStore.note("Scan finished. Staying on this method.", true)
+                return null
+            }
         }
         return null
+    }
+
+    private fun rememberConnectedMode() {
+        val protocol = if (directPsiphon || lastOuterProtocol.isBlank()) "psiphon" else lastOuterProtocol
+        store.saveLastConnect(
+            protocol = protocol,
+            transport = if (protocol == "masque") wonTransport else "",
+            ip = if (protocol == "psiphon") "" else wonIp,
+            throughPsiphon = !warpOnly,
+        )
     }
 
     private fun outerFailureMessage(): String =
@@ -597,6 +755,34 @@ class PowConnectionCoordinator(
         outerThread = null
     }
 
+    private fun openDeviceTun(
+        establishTun: (PowTun2Socks.PrivateAddress, Int) -> ParcelFileDescriptor?,
+    ) {
+        if (tunFd != null) return
+        PowStatusStore.update(PowPhase.BRIDGING, 88, "Creating device VPN interface")
+        tunFd = establishTun(tunAddress, sessionMtu) ?: error("Android could not establish the VPN interface")
+        ownsTun = true
+    }
+
+    private suspend fun finishWithoutPsiphon() {
+        warpOnly = true
+        directPsiphon = false
+        val warpSocks = PowCoreConfig.CHAIN_SOCKS_PORT
+        if (proxyMode) {
+            if (socksPort != warpSocks && !PowSocksConnectOnly.start(socksPort, warpSocks)) {
+                error("Could not expose the WARP proxy")
+            }
+        } else {
+            val fd = tunFd ?: error("VPN interface missing")
+            PowStatusStore.update(PowPhase.BRIDGING, 90, "Routing device traffic through WARP")
+            if (!PowTun2Socks.start(appContext, fd, warpSocks, sessionMtu, tunAddress)) {
+                error("Could not start whole-device routing")
+            }
+            routing = true
+            socksPort = warpSocks
+        }
+    }
+
     private suspend fun startPsiphonTunnel(keepExit: Boolean = false, socks: Int = socksPort) {
         val generation = sessionGeneration.get()
         val strategy = PowPsiphonProtocols.LADDER.getOrElse(ladderIndex) { PowPsiphonProtocols.LADDER.first() }
@@ -611,15 +797,20 @@ class PowConnectionCoordinator(
             preferredRegion = preferred,
             strategy = strategy,
             optimizedMode = currentSettings.optimizedMode,
+            direct = directPsiphon,
         )
         psiphonGeneration.set(generation)
         innerStarted = true
         AppLogRepository.info(LogSource.POW, "Starting Psiphon inner hop in :uacpow")
         innerClient().start(configJson)
+        val protocolList = runCatching {
+            JSONObject(configJson).optJSONArray("LimitTunnelProtocols")?.toString()
+        }.getOrNull().orEmpty()
         AppLogRepository.info(
             LogSource.POW,
             "Psiphon starting strategy ${strategy.name} (${strategy.label})" +
-                if (preferred != null) " region=$preferred" else "",
+                (if (preferred != null) " region=$preferred" else "") +
+                (if (protocolList.isNotBlank()) " protocols=$protocolList" else ""),
         )
     }
 
@@ -634,6 +825,8 @@ class PowConnectionCoordinator(
             val strategy = PowPsiphonProtocols.LADDER.getOrElse(ladderIndex) { return }
             val seconds = if (regionPhase && PowRegions.egressRegion(currentSettings.exitCountryCode) != null) {
                 PowPsiphonProtocols.REGION_PHASE_TIMEOUT_SECONDS
+            } else if (directPsiphon && strategy.preferredProtocols.all { it.startsWith("FRONTED-") }) {
+                90
             } else {
                 strategy.timeoutSeconds
             }
@@ -772,7 +965,10 @@ class PowConnectionCoordinator(
             innerReady = true
             connectedSignal?.complete(Unit)
             retuneSignal?.complete(Unit)
-            AppLogRepository.success(LogSource.POW, "Psiphon connected through WARP")
+            AppLogRepository.success(
+                LogSource.POW,
+                if (directPsiphon) "Psiphon connected" else "Psiphon connected through WARP",
+            )
         }
 
         override fun onExiting() {
@@ -802,8 +998,11 @@ class PowConnectionCoordinator(
                         .optString("protocol")
                 }
             }
-            if (text.contains("error", ignoreCase = true) || text.startsWith("ActiveTunnel:")) {
-                AppLogRepository.debug(LogSource.POW, text.take(240))
+            AppLogRepository.info(LogSource.POW, text.take(300))
+            if (!text.contains("updated server")) {
+                runCatching {
+                    java.io.File(appContext.filesDir, "pow-diag.log").appendText(text.take(500) + "\n")
+                }
             }
         }
 
@@ -875,6 +1074,7 @@ class PowConnectionCoordinator(
     private fun processesAlive(): Boolean {
         if (stopRequested.get() || !innerReady) return false
         if (!proxyMode && !PowTun2Socks.isRunning) return false
+        if (directPsiphon) return true
         return AetherNative.isRunning()
     }
 
@@ -882,21 +1082,31 @@ class PowConnectionCoordinator(
         val stats = tunStats()
         watchdogTx = stats.txBytes
         watchdogRx = stats.rxBytes
-        watchdogStrikes = 0
+        watchdogProcessMisses = 0
+        watchdogStallStrikes = 0
     }
 
     private fun startSessionWatch() {
-        if (currentSettings.optimizedMode) startWatchdog() else startQualityWatch()
+        // Push-based and free: keep the network callback for the whole session so a
+        // Wi-Fi/cell handoff is verified in seconds instead of waiting on the poll.
+        registerNetworkCallback()
+        if (currentSettings.optimizedMode) {
+            startWatchdog()
+            startPassiveWatch()
+        } else {
+            startQualityWatch()
+        }
     }
 
     private fun startWatchdog() {
         qualityJob?.cancel()
         qualityJob = null
-        unregisterNetworkCallback()
+        // Liveness poll reads local byte counters only — never touches the radio.
         watchdogJob?.cancel()
         watchdogTx = -1L
         watchdogRx = -1L
-        watchdogStrikes = 0
+        watchdogProcessMisses = 0
+        watchdogStallStrikes = 0
         watchdogJob = qualityScope.launch {
             try {
                 watchLiveness()
@@ -924,20 +1134,125 @@ class PowConnectionCoordinator(
     }
 
     private fun cancelQualityWork() {
+        passiveJob?.cancel()
+        passiveJob = null
         qualityJob?.cancel()
         qualityJob = null
         watchdogJob?.cancel()
         watchdogJob = null
-        qualityScope.coroutineContext[Job]?.cancelChildren()
         retuneSignal?.cancel()
         retuneSignal = null
+    }
+    /**
+     * Battery-friendly quality watch for optimized mode.
+     *
+     * The RTT signal comes from the SOCKS relay itself, which already sits in the data
+     * path of every user connection — timing connect to first byte costs zero extra
+     * radio energy. An active probe is fired only when the relay has been quiet for a
+     * while, and it is the cheap single-target header-only variant.
+     */
+    private fun startPassiveWatch() {
+        passiveJob?.cancel()
+        passiveJob = qualityScope.launch {
+            try {
+                watchPassiveQuality()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                AppLogRepository.debug(LogSource.POW, "Passive watch ended: ${error.message}")
+            }
+        }
+    }
+
+    private suspend fun watchPassiveQuality() {
+        delay(PowQualityPolicy.SETTLE_MS)
+        if (stopRequested.get() || !innerReady) return
+        var badStreak = 0
+        while (!stopRequested.get()) {
+            val screenOn = isScreenOn()
+            val idle = PowSocksConnectOnly.msSinceLastActivity() > PowQualityPolicy.IDLE_PROBE_AFTER_MS
+            delay(
+                if (screenOn) PowQualityPolicy.PASSIVE_INTERVAL_MS
+                else PowQualityPolicy.PASSIVE_INTERVAL_IDLE_MS,
+            )
+            if (stopRequested.get() || retuning.get() || !innerReady) continue
+            // Screen off: liveness only. No probes, the radio stays asleep.
+            if (!screenOn) continue
+
+            val samples = PowSocksConnectOnly.recentLatencies()
+            val sample = if (samples.isEmpty() || idle) {
+                measureQualityProbeLite()
+            } else {
+                PowQualityPolicy.median(samples)
+            }
+            val jitterHigh = PowQualityPolicy.isJitterHigh(samples + sample)
+            PowAdaptiveObfuscation.onProbe(sample > 0L, jitterHigh)
+            if (jitterHigh && sample > 0L) {
+                PowAdaptiveObfuscation.shouldEnableFragmentation(appContext, true)
+            } else {
+                PowAdaptiveObfuscation.shouldDisableFragmentation(
+                    appContext,
+                    SystemClock.elapsedRealtime() - lastStableAt,
+                )
+            }
+
+            when {
+                sample <= 0L -> badStreak += 1
+                baselineRttMs <= 0L -> {
+                    baselineRttMs = sample
+                    badStreak = 0
+                    lastStableAt = SystemClock.elapsedRealtime()
+                }
+                PowQualityPolicy.isDegraded(baselineRttMs, sample) -> badStreak += 1
+                else -> {
+                    badStreak = 0
+                    lastStableAt = SystemClock.elapsedRealtime()
+                    if (sample < baselineRttMs) {
+                        baselineRttMs = (baselineRttMs * 3L + sample) / 4L
+                    }
+                }
+            }
+
+            if (badStreak < PowQualityPolicy.PASSIVE_BAD_STREAK) continue
+            val elapsed = SystemClock.elapsedRealtime() - lastRetuneAt
+            if (lastRetuneAt > 0L && elapsed < PowQualityPolicy.RETUNE_COOLDOWN_MS) continue
+            if (qualityRetunes.get() >= PowQualityPolicy.PASSIVE_MAX_RETUNES) continue
+            badStreak = 0
+            requestQualityRetune("passive rtt ${sample}ms vs ${baselineRttMs}ms")
+        }
+    }
+
+    private suspend fun measureQualityProbeLite(): Long {
+        PowUiProbeGate.beginEngineProbe()
+        return try {
+            PowPathProbe.measureMsLite(socksPort)
+        } finally {
+            PowUiProbeGate.endEngineProbe()
+        }
+    }
+
+    /**
+     * onLost is not proof the tunnel died — the default network may simply have
+     * changed. Verify cheaply first; only a failing probe starts the restore flow.
+     * This is what turns a Wi-Fi/cell handoff into a seconds-long blip instead of
+     * waiting on the full liveness poll.
+     */
+    private suspend fun verifyPathAfterNetworkChange() {
+        if (!isHealthyPath()) {
+            beginNetworkRestore("network changed")
+            return
+        }
+        val sample = measureQualityProbeLite()
+        if (sample <= 0L && !retuning.get() && !stopRequested.get()) {
+            beginNetworkRestore("network lost")
+        }
     }
 
     private suspend fun watchLiveness() {
         delay(PowWatchdog.SETTLE_MS)
         if (stopRequested.get() || !innerReady) return
         while (!stopRequested.get()) {
-            delay(PowWatchdog.INTERVAL_MS)
+            delay(PowWatchdog.intervalMs(isScreenOn(), PowSocksConnectOnly.activeStreamCount()))
             if (stopRequested.get() || retuning.get() || !innerReady) continue
             val stats = tunStats()
             when (
@@ -947,17 +1262,23 @@ class PowConnectionCoordinator(
                     rxBytes = stats.rxBytes,
                     previousTx = watchdogTx,
                     previousRx = watchdogRx,
-                    screenOn = isScreenOn(),
-                    idleStrikes = watchdogStrikes,
+                    processMisses = watchdogProcessMisses,
+                    stallStrikes = watchdogStallStrikes,
                 )
             ) {
                 is PowWatchdog.Verdict.Healthy -> {
-                    watchdogStrikes = 0
+                    watchdogProcessMisses = 0
+                    watchdogStallStrikes = 0
                     watchdogTx = stats.txBytes
                     watchdogRx = stats.rxBytes
                 }
                 is PowWatchdog.Verdict.Strike -> {
-                    watchdogStrikes = verdict.nextStrikes
+                    if (verdict.reason == "engine process exited") {
+                        watchdogProcessMisses = verdict.nextStrikes
+                    } else {
+                        watchdogProcessMisses = 0
+                        watchdogStallStrikes = verdict.nextStrikes
+                    }
                     watchdogTx = stats.txBytes
                     watchdogRx = stats.rxBytes
                     AppLogRepository.debug(
@@ -966,7 +1287,8 @@ class PowConnectionCoordinator(
                     )
                 }
                 is PowWatchdog.Verdict.Dead -> {
-                    watchdogStrikes = 0
+                    watchdogProcessMisses = 0
+                    watchdogStallStrikes = 0
                     watchdogTx = stats.txBytes
                     watchdogRx = stats.rxBytes
                     AppLogRepository.warning(LogSource.POW, "Watchdog: ${verdict.reason}")
@@ -1107,7 +1429,9 @@ class PowConnectionCoordinator(
         )
         innerReady = false
         return try {
-            if (!optimized) {
+            if (!optimized || !quality) {
+                // The cached WARP endpoint may be why the path died — forget it so the
+                // reconnect cannot land back on the same dead hop.
                 val forgotten = PowCoreConfig.forgetPathMemory(appContext)
                 if (forgotten > 0) {
                     AppLogRepository.info(LogSource.POW, "Cleared $forgotten cached WARP endpoint(s) for a fresh hop")
@@ -1122,7 +1446,7 @@ class PowConnectionCoordinator(
             if (stopRequested.get()) return false
             stopOuterLeg()
             if (stopRequested.get()) return false
-            val outer = if (optimized) {
+            val outer = if (optimized && quality) {
                 raiseOuterLeg(
                     discovery = PowCoreConfig.DISCOVERY_CACHE,
                     scanMode = PowCoreConfig.normalizeScanMode(currentSettings.scanMode),
@@ -1163,22 +1487,18 @@ class PowConnectionCoordinator(
             }
             if (stopRequested.get()) return false
             lastRetuneAt = SystemClock.elapsedRealtime()
-            if (!optimized) {
-                delay(900)
-                val sample = PowPathProbe.measureMs(socksPort)
-                if (sample > 0L) {
-                    baselineRttMs = sample
-                    recentSamples = mutableListOf(sample)
-                    lastStableAt = SystemClock.elapsedRealtime()
-                }
-                PowPageTurbo.kick(qualityScope, socksPort, keepWarm = true)
-                AppLogRepository.success(
-                    LogSource.POW,
-                    "UAC PoW path refreshed via $outer" + if (sample > 0L) " (${sample}ms)" else "",
-                )
-            } else {
-                AppLogRepository.success(LogSource.POW, "UAC PoW path refreshed via $outer")
+            delay(400)
+            val sample = PowPathProbe.measureMsLite(socksPort)
+            if (sample > 0L) {
+                baselineRttMs = sample
+                recentSamples = mutableListOf(sample)
+                lastStableAt = SystemClock.elapsedRealtime()
             }
+            PowPageTurbo.kick(qualityScope, socksPort, keepWarm = true)
+            AppLogRepository.success(
+                LogSource.POW,
+                "UAC PoW path refreshed via $outer" + if (sample > 0L) " (${sample}ms)" else "",
+            )
             true
         } catch (cancelled: CancellationException) {
             throw cancelled

@@ -11,6 +11,7 @@ import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import android.os.SystemClock
 
 internal object PowSocksConnectOnly {
     private const val CMD_CONNECT = 0x01
@@ -27,6 +28,12 @@ internal object PowSocksConnectOnly {
     private val liveSockets = ConcurrentHashMap.newKeySet<Socket>()
     // QoS counters isolated to PoW relay only.
     private val activeStreams = AtomicInteger(0)
+
+    // Level C: passive quality signal — measured on user traffic, costs zero extra radio.
+    private const val PASSIVE_WINDOW = 12
+    private val passiveLatencies = ArrayDeque<Long>()
+    @Volatile private var lastActivityAt = 0L
+    private val passiveFailures = AtomicInteger(0)
 
     @Volatile
     private var server: ServerSocket? = null
@@ -107,6 +114,43 @@ internal object PowSocksConnectOnly {
         runCatching { Thread.sleep(maxWaitMs.coerceIn(200L, 1500L)) }
     }
 
+    /** Passive, radio-free latency samples taken from real user traffic. */
+    fun recentLatencies(): List<Long> = synchronized(passiveLatencies) {
+        passiveLatencies.toList()
+    }
+
+    /** Elapsed ms since the last relayed byte, or Long.MAX_VALUE when never active. */
+    fun msSinceLastActivity(): Long {
+        val at = lastActivityAt
+        return if (at <= 0L) Long.MAX_VALUE else SystemClock.elapsedRealtime() - at
+    }
+
+    fun activeStreamCount(): Int = activeStreams.get()
+
+    /** Called when an upstream connect fails — mirrors a failed quality probe. */
+    fun recordPassiveFailure() {
+        if (passiveFailures.incrementAndGet() > 4) {
+            passiveFailures.set(4)
+        }
+    }
+
+    private fun recordPassiveLatency(ms: Long) {
+        if (ms <= 0L || ms > 60_000L) {
+            recordPassiveFailure()
+            return
+        }
+        passiveFailures.set(0)
+        lastActivityAt = SystemClock.elapsedRealtime()
+        synchronized(passiveLatencies) {
+            if (passiveLatencies.size >= PASSIVE_WINDOW) passiveLatencies.removeFirst()
+            passiveLatencies.addLast(ms)
+        }
+    }
+
+    private fun forgetPassiveSamples() {
+        synchronized(passiveLatencies) { passiveLatencies.clear() }
+    }
+
     fun setUpstreamPort(port: Int) {
         if (port > 0) upstreamPort = port
     }
@@ -124,12 +168,14 @@ internal object PowSocksConnectOnly {
         }
         liveSockets.clear()
         activeStreams.set(0)
+        forgetPassiveSamples()
     }
 
     private fun handle(client: Socket) {
         var upstream: Socket? = null
         track(client)
         activeStreams.incrementAndGet()
+        val started = SystemClock.elapsedRealtime()
         try {
             val timeout = connectTimeoutMs.get()
             client.tcpNoDelay = true
@@ -164,12 +210,11 @@ internal object PowSocksConnectOnly {
                 return
             }
             upOut.write(request)
-            upOut.flush()
             client.soTimeout = 0
             remote.soTimeout = 0
-            spliceWithQos(client, remote, input, output, upIn, upOut)
+            spliceWithQos(client, remote, input, output, upIn, upOut, started)
         } catch (_: Throwable) {
-        } finally {
+            recordPassiveFailure()
             activeStreams.decrementAndGet()
             untrack(upstream)
             untrack(client)
@@ -206,7 +251,6 @@ internal object PowSocksConnectOnly {
         }
         return head + extra
     }
-
     private fun spliceWithQos(
         client: Socket,
         upstream: Socket,
@@ -214,6 +258,7 @@ internal object PowSocksConnectOnly {
         clientOut: OutputStream,
         upIn: InputStream,
         upOut: OutputStream,
+        startedMs: Long,
     ) {
         val upload = Thread({
             runCatching {
@@ -230,23 +275,18 @@ internal object PowSocksConnectOnly {
         runCatching {
             val buf = ByteArray(16 * 1024)
             var n: Int
+            var firstByteRecorded = false
             while (upIn.read(buf).also { n = it } >= 0) {
+                if (!firstByteRecorded) {
+                    firstByteRecorded = true
+                    recordPassiveLatency(SystemClock.elapsedRealtime() - startedMs)
+                }
                 clientOut.write(buf, 0, n); clientOut.flush()
             }
         }
         runCatching { client.shutdownOutput() }
         runCatching { upload.join(1_000L) }
     }
-
-    @Suppress("unused")
-    private fun splice(
-        client: Socket,
-        upstream: Socket,
-        clientIn: InputStream,
-        clientOut: OutputStream,
-        upIn: InputStream,
-        upOut: OutputStream,
-    ) = spliceWithQos(client, upstream, clientIn, clientOut, upIn, upOut)
 
     private fun readExact(input: InputStream, count: Int): ByteArray {
         val buffer = ByteArray(count)

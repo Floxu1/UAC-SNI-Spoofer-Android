@@ -121,6 +121,9 @@ $env:RUSTFLAGS = "$env:RUSTFLAGS -C link-arg=-Wl,-soname,libaether.so -C link-ar
 Push-Location $crate
 try {
     cargo build --release --lib --target $targetTriple
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed for $Abi"
+    }
     $library = (Join-Path $target "$targetTriple/release/libaether.so").Replace('\', '/')
     foreach ($destination in @(
         (Join-Path $root "core/android-libs/$Abi"),

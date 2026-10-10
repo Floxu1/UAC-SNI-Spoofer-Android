@@ -862,6 +862,16 @@ private fun HomeScreenContent(
                     .clip(RectangleShape),
             )
         }
+        PowConnectSheet(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(
+                    start = 18.dp,
+                    end = 18.dp,
+                    bottom = safeDrawingPadding.calculateBottomPadding() + 10.dp,
+                )
+                .zIndex(4f),
+        )
         if (showGuide) {
             val step = checkNotNull(guideStep)
             HomeGuideOverlay(

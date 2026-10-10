@@ -20,7 +20,7 @@ class MciNativeXrayConfigTest {
         assertFalse(config.contains("104.18.9.83"))
         assertTrue(config.contains("\"ip\":[\"::/0\"]"))
         assertFalse(config.contains("telegram-balance"))
-        assertFalse(config.contains("unsafe"))
+        assertTrue(config.contains("\"fingerprint\":\"unsafe\""))
     }
 
     @Test

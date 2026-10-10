@@ -10,8 +10,17 @@ use crate::error::{AetherError, Result};
 use crate::fragment::{FragmentConfig, FragmentingStream};
 
 const EDGE_PREFIX: [u8; 3] = [141, 101, 113];
-const EDGE_SAMPLES: usize = 3;
-const RESOLVED_SAMPLES: usize = 2;
+/// MCI answers 188.114.97.6. Irancell often does not, so that address is only
+/// one member of the probe pool. The key request uses an address that accepted
+/// a TCP connection, not this list in order.
+const PINNED_KEY_EDGES: &[&str] = &[
+    "188.114.97.6:443",
+    "188.114.97.1:443",
+    "162.159.199.1:443",
+    "162.159.198.1:443",
+];
+const PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
+const SAMPLES_PER_RANGE: usize = 4;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
@@ -56,6 +65,12 @@ impl Fingerprint {
     }
 
     fn fragments(self) -> FragmentConfig {
+        // PattNG --fragment splits the WARP API ClientHello on every fingerprint.
+        // The legacy profile stays split even when that flag is off.
+        let configured = FragmentConfig::from_env();
+        if configured.enabled {
+            return configured;
+        }
         match self {
             Fingerprint::SplitLegacy => FragmentConfig {
                 enabled: true,
@@ -140,28 +155,98 @@ pub fn random_edge_address() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(ip), 443)
 }
 
-async fn candidates(host: &str) -> Vec<SocketAddr> {
-    let mut list: Vec<SocketAddr> = Vec::new();
+fn random_in(first: u8, second: u8, third_from: u8, third_to: u8) -> SocketAddr {
+    let mut rng = rand::thread_rng();
+    let third = rng.gen_range(third_from..=third_to);
+    let fourth = rng.gen_range(1..=254u8);
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(first, second, third, fourth)), 443)
+}
 
-    while list.len() < EDGE_SAMPLES {
-        let candidate = random_edge_address();
-        if !list.contains(&candidate) {
-            list.push(candidate);
-        }
-    }
-
-    if let Ok(resolved) = tokio::net::lookup_host((host, 443)).await {
-        for address in resolved
-            .filter(|entry| entry.is_ipv4())
-            .take(RESOLVED_SAMPLES)
-        {
-            if !list.contains(&address) {
-                list.push(address);
+fn local_key_edge_pool() -> Vec<SocketAddr> {
+    let mut list = pinned_key_edges();
+    for _ in 0..SAMPLES_PER_RANGE {
+        for candidate in [
+            random_in(162, 159, 192, 199),
+            random_in(188, 114, 96, 99),
+            random_edge_address(),
+        ] {
+            if !list.contains(&candidate) {
+                list.push(candidate);
             }
         }
     }
-
     list
+}
+
+fn order_answered(live: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let pinned = pinned_key_edges();
+    let mut preferred = Vec::new();
+    let mut rest = Vec::new();
+    for address in live {
+        if pinned.contains(&address) {
+            preferred.push(address);
+        } else {
+            rest.push(address);
+        }
+    }
+    preferred.extend(rest);
+    preferred
+}
+
+async fn tcp_answers(address: SocketAddr) -> Option<SocketAddr> {
+    match tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(address)).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            Some(address)
+        }
+        _ => None,
+    }
+}
+
+/// Find an edge that accepts TCP before any key request is sent.
+///
+/// The pinned MCI address is tried together with other Cloudflare ranges.
+/// An address that does not answer within the probe is not used for the key.
+async fn reachable_key_edges() -> Vec<SocketAddr> {
+    let pool = local_key_edge_pool();
+    note_key(&format!(
+        "probing {} addresses for a clean key edge",
+        pool.len()
+    ));
+    let mut pending = tokio::task::JoinSet::new();
+    for address in pool.iter().copied() {
+        pending.spawn(async move { tcp_answers(address).await });
+    }
+    let mut live = Vec::new();
+    while let Some(joined) = pending.join_next().await {
+        if let Ok(Some(address)) = joined {
+            note_key(&format!("clean key address {address} answered"));
+            live.push(address);
+        }
+    }
+    let ordered = order_answered(live);
+    if ordered.is_empty() {
+        note_key("no clean key address answered; the key request will try other edges before the pinned list");
+        let pinned = pinned_key_edges();
+        let mut rest: Vec<SocketAddr> = pool.into_iter().filter(|address| !pinned.contains(address)).collect();
+        rest.extend(pinned);
+        return rest;
+    }
+    note_key(&format!("key request will use {}", ordered[0]));
+    ordered
+}
+
+fn pinned_key_edges() -> Vec<SocketAddr> {
+    PINNED_KEY_EDGES
+        .iter()
+        .filter_map(|raw| raw.parse().ok())
+        .collect()
+}
+
+fn note_key(message: &str) {
+    let line = format!("Key: {message}");
+    log::info!("{line}");
+    crate::ffi::record_log(line);
 }
 
 fn render_request(request: &ApiRequest) -> Vec<u8> {
@@ -252,23 +337,81 @@ async fn exchange(
     request: &ApiRequest,
     address: SocketAddr,
     fingerprint: Fingerprint,
+    ech: Option<&[u8]>,
 ) -> Result<ApiResponse> {
-    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
+    let mut offered = ech.map(|list| list.to_vec());
+    let mut retried = false;
+    let mut tls = loop {
+        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
+            .await
+            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
+            .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?;
+        tcp.set_nodelay(true).ok();
+
+        let mut config = fingerprint.configure()?;
+        // The edge certificate is for whichever name ECH puts in the clear.
+        // PattNG does not verify it; a mismatch here is not a failed registration.
+        config.set_verify_hostname(false);
+        config.set_verify(boring::ssl::SslVerifyMode::NONE);
+        if let Some(list) = offered.as_deref() {
+            config.set_ech_config_list(list).map_err(|e| {
+                AetherError::Tls(format!(
+                    "{e} (ech {} bytes, head {:02x?})",
+                    list.len(),
+                    &list[..list.len().min(8)]
+                ))
+            })?;
+        }
+        let stream = FragmentingStream::new(tcp, fingerprint.fragments());
+
+        match tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            tokio_boring::connect(config, &request.host, stream),
+        )
         .await
-        .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
-        .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?;
-    tcp.set_nodelay(true).ok();
-
-    let config = fingerprint.configure()?;
-    let stream = FragmentingStream::new(tcp, fingerprint.fragments());
-
-    let mut tls = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        tokio_boring::connect(config, &request.host, stream),
-    )
-    .await
-    .map_err(|_| AetherError::Api(format!("tls handshake with {address} timed out")))?
-    .map_err(|e| AetherError::Api(format!("tls handshake with {address}: {e}")))?;
+        {
+            Ok(Ok(tls)) => {
+                if offered.is_some() && !tls.ssl().ech_accepted() {
+                    break Err(AetherError::Api(format!(
+                        "tls handshake with {address} finished without ECH"
+                    )));
+                }
+                break Ok(tls);
+            }
+            Ok(Err(error)) => {
+                // BoringSSL returns a 5-byte poison list unless this was an
+                // authenticated ECH reject. Offering that list fails the retry
+                // and hides the real handshake error.
+                let message = error.to_string();
+                let retry = if !retried && message.contains("ECH_REJECTED") {
+                    error
+                        .ssl()
+                        .and_then(|ssl| ssl.get_ech_retry_configs())
+                        .map(|configs| configs.to_vec())
+                        .filter(|configs| crate::dns::plausible_ech_list(configs))
+                } else {
+                    None
+                };
+                if let Some(configs) = retry {
+                    log::info!(
+                        "[apifront] {address} rejected ECH; retrying with the returned config ({} bytes)",
+                        configs.len()
+                    );
+                    offered = Some(configs);
+                    retried = true;
+                    continue;
+                }
+                break Err(AetherError::Api(format!(
+                    "tls handshake with {address}: {error}"
+                )));
+            }
+            Err(_) => {
+                break Err(AetherError::Api(format!(
+                    "tls handshake with {address} timed out"
+                )))
+            }
+        }
+    }?;
 
     if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
         return Err(AetherError::Api(format!(
@@ -310,51 +453,177 @@ async fn exchange(
 }
 
 pub async fn fetch(request: &ApiRequest) -> Result<ApiResponse> {
-    let addresses = candidates(&request.host).await;
+    let addresses = reachable_key_edges().await;
     if addresses.is_empty() {
         return Err(AetherError::Api(
             "no camouflaged route to the api was available".into(),
         ));
     }
 
-    let mut rejection: Option<ApiResponse> = None;
+    let first = addresses
+        .first()
+        .map(|address| address.to_string())
+        .unwrap_or_else(|| "-".into());
+    note_key(&format!(
+        "racing ECH and a split hello, first address {first}, {} addresses",
+        addresses.len()
+    ));
+
+    let ech = match crate::dns::fetch_ech_config().await {
+        Ok(list) if crate::dns::plausible_ech_list(&list) => Some(list),
+        Ok(_) | Err(_) => Some(crate::dns::ECH_CONFIG_FALLBACK.to_vec()),
+    };
+
     let mut failure: Option<AetherError> = None;
-
-    for fingerprint in Fingerprint::all() {
-        for address in &addresses {
-            match exchange(request, *address, fingerprint).await {
-                Ok(response) if (200..300).contains(&response.status) => {
-                    return Ok(response);
-                }
-                Ok(response) => {
-                    log::debug!(
-                        "[apifront] {} answered {} via {}",
-                        request.host,
-                        response.status,
-                        response.route
-                    );
-                    if rejection.is_none() || response.status != 403 {
-                        rejection = Some(response);
-                    }
-                }
-                Err(error) => {
-                    log::debug!("[apifront] {} attempt failed: {error}", fingerprint.label());
-                    failure = Some(error);
-                }
+    // A TCP accept is not a usable key address on Irancell: ECH handshakes
+    // time out there, while a fragmented ClientHello completes. Race both on
+    // each live address and keep the first real answer.
+    for address in addresses.iter().take(3) {
+        match race_key_exchange(request, *address, ech.as_deref()).await {
+            Ok(response) if (200..300).contains(&response.status) => return Ok(response),
+            Ok(response) => {
+                failure = Some(AetherError::Api(format!(
+                    "{address} answered HTTP {}",
+                    response.status
+                )));
             }
+            Err(error) => failure = Some(error),
         }
-    }
-
-    if let Some(response) = rejection {
-        return Ok(response);
     }
 
     Err(failure.unwrap_or_else(|| AetherError::Api("every camouflaged route failed".into())))
 }
 
+async fn race_key_exchange(
+    request: &ApiRequest,
+    address: SocketAddr,
+    ech: Option<&[u8]>,
+) -> Result<ApiResponse> {
+    note_key(&format!("trying {address} with ECH and a split hello"));
+    let ech_attempt = exchange(request, address, Fingerprint::ChromeLike, ech);
+    let split_attempt = exchange(request, address, Fingerprint::SplitLegacy, None);
+    tokio::pin!(ech_attempt);
+    tokio::pin!(split_attempt);
+    let mut ech_done = false;
+    let mut split_done = false;
+    let mut last_error: Option<AetherError> = None;
+    loop {
+        tokio::select! {
+            result = &mut ech_attempt, if !ech_done => {
+                ech_done = true;
+                match result {
+                    Ok(response) if (200..300).contains(&response.status) => {
+                        note_key(&format!(
+                            "{address} accepted the key request over ECH, HTTP {}",
+                            response.status
+                        ));
+                        return Ok(response);
+                    }
+                    Ok(response) => {
+                        note_key(&format!("{address} answered HTTP {} over ECH", response.status));
+                        last_error = Some(AetherError::Api(format!(
+                            "{address} answered HTTP {} over ECH",
+                            response.status
+                        )));
+                    }
+                    Err(error) => {
+                        note_key(&format!("{address} ECH failed: {error}"));
+                        last_error = Some(error);
+                    }
+                }
+            }
+            result = &mut split_attempt, if !split_done => {
+                split_done = true;
+                match result {
+                    Ok(response) if (200..300).contains(&response.status) => {
+                        note_key(&format!(
+                            "{address} accepted the key request over a split hello, HTTP {}",
+                            response.status
+                        ));
+                        return Ok(response);
+                    }
+                    Ok(response) => {
+                        note_key(&format!(
+                            "{address} answered HTTP {} over a split hello",
+                            response.status
+                        ));
+                        last_error = Some(AetherError::Api(format!(
+                            "{address} answered HTTP {} over a split hello",
+                            response.status
+                        )));
+                    }
+                    Err(error) => {
+                        note_key(&format!("{address} split hello failed: {error}"));
+                        last_error = Some(error);
+                    }
+                }
+            }
+        }
+        if ech_done && split_done {
+            break;
+        }
+    }
+    Err(last_error.unwrap_or_else(|| AetherError::Api(format!("key route to {address} failed"))))
+}
+
+async fn fetch_split_hello(request: &ApiRequest, addresses: &[SocketAddr]) -> Result<ApiResponse> {
+    log::info!("[apifront] WARP API ClientHello will be split, without ECH");
+    let mut failure: Option<AetherError> = None;
+    for address in addresses {
+        note_key(&format!("trying {address} with a split hello"));
+        match exchange(request, *address, Fingerprint::SplitLegacy, None).await {
+            Ok(response) if (200..300).contains(&response.status) => {
+                note_key(&format!("{address} accepted the key request, HTTP {}", response.status));
+                return Ok(response);
+            }
+            Ok(response) => {
+                note_key(&format!("{address} answered HTTP {}", response.status));
+                log::debug!(
+                    "[apifront] {} answered {} via split hello",
+                    request.host,
+                    response.status
+                );
+                failure = Some(AetherError::Api(format!(
+                    "split hello got HTTP {}",
+                    response.status
+                )));
+            }
+            Err(error) => {
+                note_key(&format!("{address} failed: {error}"));
+                log::debug!("[apifront] split hello failed: {error}");
+                failure = Some(error);
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| AetherError::Api("split hello route failed".into())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pinned_edge_is_only_one_member_of_the_key_pool() {
+        let pool = local_key_edge_pool();
+        let pinned: SocketAddr = "188.114.97.6:443".parse().unwrap();
+        assert!(pool.contains(&pinned));
+        assert!(pool.len() > pinned_key_edges().len());
+        assert!(pool.iter().any(|address| match address.ip() {
+            IpAddr::V4(ip) => ip.octets()[0] == 162,
+            IpAddr::V6(_) => false,
+        }));
+    }
+
+    #[test]
+    fn an_answered_random_edge_is_used_ahead_of_a_silent_pinned_address() {
+        let random = random_in(162, 159, 192, 199);
+        let pinned: SocketAddr = "188.114.97.6:443".parse().unwrap();
+        let ordered = order_answered(vec![random]);
+        assert_eq!(ordered, vec![random]);
+        assert!(!ordered.contains(&pinned));
+        let both = order_answered(vec![random, pinned]);
+        assert_eq!(both[0], pinned);
+    }
 
     #[test]
     fn every_random_edge_address_stays_inside_the_cloudflare_range() {
@@ -464,7 +733,7 @@ mod tests {
         let mut reached = 0;
         for fingerprint in Fingerprint::all() {
             let address = random_edge_address();
-            match exchange(&request, address, fingerprint).await {
+            match exchange(&request, address, fingerprint, None).await {
                 Ok(response) => {
                     reached += 1;
                     println!(

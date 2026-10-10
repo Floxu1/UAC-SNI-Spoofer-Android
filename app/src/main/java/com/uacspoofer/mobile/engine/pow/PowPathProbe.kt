@@ -46,6 +46,19 @@ internal object PowPathProbe {
         minOf(median, wall).coerceAtLeast(1L)
     }
 
+    /**
+     * Battery-cheap fallback: one target, header only — no 8KB body drain.
+     * Roughly 50-100x less radio energy than [measureMs]. Used only when the
+     * passive relay signal has been silent for a while.
+     */
+    suspend fun measureMsLite(
+        socksPort: Int,
+        timeoutMs: Int = PowQualityPolicy.PROBE_TIMEOUT_MS,
+    ): Long = withContext(Dispatchers.IO) {
+        val sample = measureSingleTargetMs(socksPort, timeoutMs, TARGETS.first(), drainBody = false)
+        if (sample > 0L) sample else -1L
+    }
+
     // DNS-level mapdns warm check — light probe for Page Turbo.
     suspend fun warmMapDns(socksPort: Int): Boolean = withContext(Dispatchers.IO) {
         runCatching {
@@ -61,6 +74,7 @@ internal object PowPathProbe {
         socksPort: Int,
         timeoutMs: Int,
         target: ProbeTarget,
+        drainBody: Boolean = true,
     ): Long {
         val started = SystemClock.elapsedRealtime()
         val ok = runCatching {
@@ -120,11 +134,13 @@ internal object PowPathProbe {
                 if (totalRead < 12) error("http short")
                 val text = String(buffer, 0, totalRead, Charsets.US_ASCII)
                 if (!text.contains(" 204") && !text.contains(" 200")) error("http status")
-                // Try to drain a bit more to account for throughput, but don't fail if not available.
-                runCatching {
-                    sock.soTimeout = 300
-                    val extra = ByteArray(EXTRA_READ_BYTES)
-                    input.read(extra)
+                if (drainBody) {
+                    // Try to drain a bit more to account for throughput, but don't fail if not available.
+                    runCatching {
+                        sock.soTimeout = 300
+                        val extra = ByteArray(EXTRA_READ_BYTES)
+                        input.read(extra)
+                    }
                 }
                 true
             }

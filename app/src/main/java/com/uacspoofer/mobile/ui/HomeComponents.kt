@@ -19,7 +19,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -78,6 +81,7 @@ import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.canChangeEngineMode
 import com.uacspoofer.mobile.engine.tor.TorStatusStore
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
+import com.uacspoofer.mobile.engine.pow.PowStepState
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.settings.NetworkGuardStore
@@ -655,6 +659,122 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
 }
 
 private const val CONNECTING_ROUTE_HINT_DELAY_MS = 2_000L
+
+@Composable
+internal fun PowConnectSheet(modifier: Modifier = Modifier) {
+    val engineMode = rememberDisplayedEngineMode()
+    val status by PowStatusStore.status.collectAsStateWithLifecycle()
+    val connection by ConnectionStateStore.state.collectAsStateWithLifecycle()
+    if (!engineMode.isPow) return
+    val visible = connection == ConnectionState.CONNECTING || connection == ConnectionState.ERROR
+    if (!visible || status.steps.isEmpty()) return
+    val persian = LocalHomePersian.current
+    val font = homeLocalizedFont()
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(UacColors.Surface.copy(alpha = 0.94f))
+            .border(1.dp, UacColors.TextSecondary.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = homeText("Connect steps", "مراحل اتصال"),
+            color = UacColors.TextPrimary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            fontFamily = font,
+        )
+        Column(
+            modifier = Modifier
+                .heightIn(max = 220.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+        status.steps.forEach { step ->
+            val mark = when (step.state) {
+                PowStepState.DONE -> "✓"
+                PowStepState.FAILED -> "×"
+                PowStepState.RUNNING -> "…"
+            }
+            val color = when (step.state) {
+                PowStepState.DONE -> UacColors.ConnectedGreen
+                PowStepState.FAILED -> UacColors.ErrorRed
+                PowStepState.RUNNING -> UacColors.TextPrimary
+            }
+            Text(
+                text = "$mark  ${stageLabel(step.text, persian)}",
+                color = color,
+                fontSize = 11.sp,
+                fontFamily = font,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(
+                    textDirection = if (persian) TextDirection.Rtl else TextDirection.Content,
+                ),
+            )
+        }
+        }
+    }
+}
+
+private fun scanLabel(body: String): String {
+    val parts = body.split(' ')
+    val address = parts.firstOrNull().orEmpty()
+    return when (parts.getOrNull(1)) {
+        "trying" -> "در حال اسکن $address"
+        "400" -> "رد شد $address · صفحهٔ ۴۰۰، این آدرس تونل MASQUE نیست"
+        "access-denied" -> "رد شد $address · گواهی دستگاه را نپذیرفت"
+        "certificate" -> "رد شد $address · گواهی ناشناس"
+        "timeout" -> "رد شد $address · تایم‌اوت، جوابی نیامد"
+        "reset" -> "رد شد $address · اتصال وسط سلام قطع شد"
+        "eof" -> "رد شد $address · سلام TLS نیمه‌کاره قطع شد"
+        else -> "رد شد $address · ${parts.drop(1).joinToString(" ")}"
+    }
+}
+
+private fun stageLabel(text: String, persian: Boolean): String {
+    if (!persian) return text
+    return when {
+        text.startsWith("Starting UAC PoW") -> "روشن کردن UAC PoW"
+        text.startsWith("Connecting MASQUE") -> "وصل شدن به MASQUE"
+        text.startsWith("Connecting WireGuard") -> "وصل شدن به WireGuard"
+        text.startsWith("Connecting WoW") -> "وصل شدن به WARP-in-WARP"
+        text.startsWith("Starting Psiphon") -> "روشن کردن تونل امن"
+        text.startsWith("Trying ") -> "راه بعدی"
+        text.startsWith("Creating device") -> "ساختن VPN"
+        text.startsWith("Routing device") -> "عبور ترافیک از تونل"
+        text.startsWith("UAC PoW ready") -> "وصل شد"
+        text.startsWith("Key ") -> "کلید: ${text.removePrefix("Key ").take(80)}"
+        text.startsWith("Clean HTTP/2 list:") -> "لیست تمیز: ${text.substringAfter(":").trim()}"
+        text.startsWith("Clean list empty") -> "لیست تمیز خالی است. اسکن HTTP/2 شروع می‌شود"
+        text.startsWith("Every saved address failed. Scan was not started") -> "همهٔ آدرس‌های ذخیره‌شده رد شدند. این حالت اسکن ندارد"
+        text.startsWith("Saved addresses failed") -> "آدرس‌های ذخیره‌شده رد شدند. اسکن HTTP/2 شروع شد"
+        text.startsWith("Trying saved clean address") -> "امتحان آدرس ذخیره‌شده ${text.substringAfterLast(" ")}"
+        text.startsWith("Saved clean address accepted") -> "آدرس ذخیره‌شده قبول شد ${text.substringAfterLast(" ")}"
+        text.startsWith("Saved clean address rejected") -> "آدرس ذخیره‌شده رد شد"
+        text.startsWith("Scanning HTTP/2") -> "اسکن HTTP/2 برای آدرس جدید"
+        text.startsWith("Saved clean HTTP/2 address") -> "آدرس تمیز ذخیره شد ${text.substringAfterLast(" ")}"
+        text.startsWith("HTTP/2 started") -> "HTTP/2 شروع شد"
+        text.startsWith("Scan ") -> scanLabel(text.removePrefix("Scan "))
+        text.startsWith("MASQUE accepted") -> "MASQUE قبول کرد ${text.substringAfterLast(" ")}"
+        text.startsWith("MASQUE start") -> "شروع MASQUE روی HTTP/2"
+        text.startsWith("No usable MASQUE") -> "هیچ دروازهٔ MASQUE قبول نشد: ${text.substringAfter("(").substringBefore(")")}"
+        text.startsWith("Certificate refused during") -> "گواهی وسط اسکن رد شد. اسکن قطع می‌شود تا گواهی تازه گرفته شود"
+        text.startsWith("Certificate refused") -> "گواهی رد شد. گواهی تازه گرفته می‌شود"
+        text.startsWith("Certificate ") -> "این گواهی هم رد شد. گواهی بعدی گرفته می‌شود"
+        text.startsWith("This certificate was refused") -> "این گواهی وسط اسکن رد شد. گواهی بعدی گرفته می‌شود"
+        text.startsWith("New certificate saved") -> "گواهی تازه ذخیره شد. جستجو با همین گواهی ادامه دارد"
+        text.startsWith("New certificate issued") -> "گواهی تازه صادر شد. دروازه‌ها دوباره امتحان می‌شوند"
+        text.startsWith("Scan finished") -> "اسکن تمام شد. روی همین روش می‌ماند"
+        text.startsWith("Tunnel did not stay up") -> "تونل روی این آدرس نماند. اسکن بعدی"
+        text.startsWith("Trying UDP/1701") -> "امتحان UDP/1701"
+        text.startsWith("UDP/1701 did not answer, trying TCP") -> "UDP/1701 جواب نداد. نوبت TCP"
+        text.startsWith("UDP/1701 did not answer") -> "UDP/1701 جواب نداد"
+        else -> text
+    }
+}
 
 @Composable
 internal fun FeatureCard(accent: Color, compact: Boolean, modifier: Modifier = Modifier) {

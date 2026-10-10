@@ -23,7 +23,7 @@ class CustomProfileXrayConfigTest {
             assertTrue(config.contains("\"protocol\":\"vless\""))
             assertTrue(config.contains("\"vnext\""))
             assertTrue(config.contains("30980fc4-8789-42df-80d1-0c8e5cd26881"))
-            assertTrue(config.contains("\"address\":\"104.18.1.1\""))
+            assertTrue(config.contains("\"address\":\"104.26.13.100\""))
             assertTrue(config.contains("\"serverName\":\"cdn.example\""))
             assertTrue(config.contains("\"path\":\"/custom\""))
             assertTrue(config.contains("\"length\":\"9\""))

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,12 @@ pub struct StartOptions {
     /// though the code to serve it was already here. Carried in the config now, and
     /// the environment variable is still honoured as a fallback for the CLI.
     pub http_proxy: Option<SocketAddr>,
+    /// How a missing WARP key is requested. `ech` hides the API name,
+    /// `fragment` splits the ClientHello with no ECH, `external` uses the
+    /// direct route so another VPN can carry it. Empty keeps both routes.
+    pub api_camo: String,
+    /// When set, prepare replaces the MASQUE certificate even if one is already saved.
+    pub renew_masque: bool,
     /// Android owns the outer-protocol ladder. One failed hunt must return so
     /// Kotlin can try the next transport instead of sleeping inside a rescan loop
     /// until the app kills the process.
@@ -96,6 +102,8 @@ impl MasqueTransport {
 pub enum EndpointDiscovery {
     Cache,
     Fresh,
+    /// Dial only addresses that already completed an HTTP/2 tunnel. No scan.
+    CleanOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +125,7 @@ impl EndpointDiscovery {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_lowercase().as_str() {
             "fresh" | "fresh_scan" => Self::Fresh,
+            "clean" | "saved" => Self::CleanOnly,
             _ => Self::Cache,
         }
     }
@@ -174,6 +183,8 @@ impl StartOptions {
             upstream_proxy: None,
             http_proxy: None,
             scan_once: false,
+            api_camo: String::new(),
+            renew_masque: false,
         }
     }
 
@@ -243,6 +254,24 @@ pub async fn run_cli() -> Result<()> {
     options.access_token = std::env::var("AETHER_ACCESS_TOKEN").ok();
     options.access_email = std::env::var("AETHER_ACCESS_EMAIL").ok();
     options.gateway = std::env::var("AETHER_GATEWAY").is_ok();
+    options.api_camo = std::env::var("AETHER_API_CAMO").unwrap_or_default();
+    options.endpoint_discovery =
+        EndpointDiscovery::parse(&std::env::var("AETHER_DISCOVERY").unwrap_or_default());
+    options.scan_once = std::env::var("AETHER_SCAN_ONCE").is_ok_and(|v| {
+        matches!(
+            v.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    options.renew_masque = std::env::var("AETHER_RENEW_CERT").is_ok();
+    if std::env::var("AETHER_PREPARE_ONLY").is_ok() {
+        let addresses = prepare(&options).await?;
+        println!(
+            "{{\"ipv4\":\"{}\",\"ipv6\":\"{}\",\"gateway_proxy\":\"{}\",\"organization\":\"{}\"}}",
+            addresses.ipv4, addresses.ipv6, addresses.gateway_proxy, addresses.organization
+        );
+        return Ok(());
+    }
 
     select_masque_transport().await;
     options.masque_transport = if std::env::var("AETHER_MASQUE_HTTP2").is_ok() {
@@ -261,7 +290,7 @@ pub async fn start(options: StartOptions) -> Result<()> {
         Protocol::Masque => {
             masque_h2::set_preferred(options.masque_transport == MasqueTransport::H2);
             let config_path = masque_config_path(&options);
-            let identity = load_or_provision_masque(&config_path).await?;
+            let identity = load_or_provision_masque(&config_path, false).await?;
             log::info!(
                 "[+] identity ready: device={} ipv4={} ipv6={}",
                 identity.device_id,
@@ -334,6 +363,10 @@ fn apply_runtime_options(options: &StartOptions) {
     } else {
         std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
     }
+    match options.api_camo.trim() {
+        "ech" | "fragment" | "external" => std::env::set_var("AETHER_API_CAMO", options.api_camo.trim()),
+        _ => std::env::remove_var("AETHER_API_CAMO"),
+    }
     crate::ffi::set_log_path(Some(core_log_path(&options.config_path)));
 
     set_optional("AETHER_NOIZE_PARAMETERS", &options.obfuscation_parameters);
@@ -363,7 +396,9 @@ pub async fn prepare(options: &StartOptions) -> Result<TunnelAddresses> {
     initialize();
 
     let identity = match options.protocol {
-        Protocol::Masque => load_or_provision_masque(&masque_config_path(options)).await?,
+        Protocol::Masque => {
+            load_or_provision_masque(&masque_config_path(options), options.renew_masque).await?
+        }
         Protocol::WireGuard => load_or_provision_warp(&warp_config_path(options)).await?,
         Protocol::WarpInWarp => {
             let primary_path = warp_config_path(options);
@@ -641,7 +676,9 @@ fn masque_config_path(options: &StartOptions) -> String {
     }
     match team_scope() {
         Some(team) => derive_sibling_path(&options.config_path, &format!("team-{team}")),
-        None => derive_sibling_path(&options.config_path, "masque"),
+        // One account per install. A fresh MASQUE connect reuses the key the
+        // user already fetched instead of registering a second device.
+        None => options.config_path.clone(),
     }
 }
 
@@ -674,6 +711,7 @@ fn keep_saved_identity() -> bool {
 async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> {
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing warp identity from {config_path}");
+        crate::ffi::record_log("Key: already saved, not requesting a new one");
         // NOTE on coverage: `adopt_team_profile` only calls the account API when a
         // Zero Trust team is configured, so on a personal WARP account a deleted
         // device is not detected here — there is no other request on the connect
@@ -695,6 +733,7 @@ async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> 
     }
 
     log::info!("[+] no warp identity found; provisioning dedicated wireguard account");
+    crate::ffi::record_log("Key: none saved, requesting one through the open address");
     let identity = provision_account().await?;
     let identity = adopt_team_profile(identity).await;
     config::save(config_path, &identity)?;
@@ -702,7 +741,34 @@ async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> 
     Ok(identity)
 }
 
-async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity> {
+async fn load_or_provision_masque(
+    config_path: &str,
+    force_new_cert: bool,
+) -> Result<account::Identity> {
+    if force_new_cert {
+        if let Some(identity) = config::load(config_path)? {
+            if !identity.device_id.is_empty() && !identity.access_token.is_empty() {
+                crate::ffi::record_log("Cert: requesting a new MASQUE certificate");
+                match account::renew_masque_certificate(&identity).await {
+                    Ok(enrollment) if enrollment.renewed => {
+                        let identity = apply_masque_enrollment(identity, enrollment);
+                        config::save(config_path, &identity)?;
+                        crate::ffi::record_log("Cert: new certificate saved");
+                        return Ok(identity);
+                    }
+                    Ok(_) => {
+                        crate::ffi::record_log("Cert: the API kept the certificate already on disk");
+                        return Ok(identity);
+                    }
+                    Err(error) => {
+                        crate::ffi::record_log(format!("Cert: {error}"));
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        crate::ffi::record_log("Cert: no key yet; getting a key and a certificate");
+    }
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing masque identity from {config_path}");
         let refused = if identity.has_masque_credentials() {
@@ -714,6 +780,7 @@ async fn load_or_provision_masque(config_path: &str) -> Result<account::Identity
             identity
         } else {
             log::info!("[+] masque identity needs a certificate; enrolling masque key");
+            crate::ffi::record_log("Key: enrolling the MASQUE certificate on the saved account");
             // This is the enrolment call, and on a personal (non-team) account it
             // is the one place a refusal actually surfaces: `adopt_team_profile`
             // only refreshes the profile when a Zero Trust team is configured, so
@@ -954,6 +1021,66 @@ fn lastconn_path(config_path: &str) -> String {
     derive_sibling_path(config_path, "lastconn")
 }
 
+fn clean_h2_path(config_path: &str) -> String {
+    match Path::new(config_path).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir
+            .join("uac-pow-clean-h2.json")
+            .to_string_lossy()
+            .into_owned(),
+        _ => "uac-pow-clean-h2.json".to_string(),
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CleanH2List {
+    peers: Vec<String>,
+}
+
+fn load_clean_h2(config_path: &str) -> Vec<SocketAddr> {
+    let Ok(text) = fs::read_to_string(clean_h2_path(config_path)) else {
+        return Vec::new();
+    };
+    let Ok(list) = serde_json::from_str::<CleanH2List>(&text) else {
+        return Vec::new();
+    };
+    list.peers
+        .into_iter()
+        .filter_map(|peer| peer.parse().ok())
+        .collect()
+}
+
+fn write_clean_h2(config_path: &str, peers: &[SocketAddr]) {
+    let path = clean_h2_path(config_path);
+    if let Some(parent) = Path::new(&path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    let list = CleanH2List {
+        peers: peers.iter().map(|peer| peer.to_string()).collect(),
+    };
+    if let Ok(json) = serde_json::to_vec(&list) {
+        let _ = fs::write(path, json);
+    }
+}
+
+fn remember_clean_h2(config_path: &str, peer: SocketAddr) {
+    let mut peers = load_clean_h2(config_path);
+    peers.retain(|saved| *saved != peer);
+    peers.insert(0, peer);
+    peers.truncate(16);
+    write_clean_h2(config_path, &peers);
+}
+
+fn forget_clean_h2(config_path: &str, peer: SocketAddr) {
+    let mut peers = load_clean_h2(config_path);
+    let before = peers.len();
+    peers.retain(|saved| *saved != peer);
+    if peers.len() != before {
+        write_clean_h2(config_path, &peers);
+    }
+}
+
 /// Where GOOL remembers its outer WARP endpoint.
 ///
 /// Deliberately a different file from `lastconn_path`, even though both hold a
@@ -1103,28 +1230,16 @@ fn masque_gateway_peers() -> Vec<SocketAddr> {
         .filter_map(|entry| entry.parse().ok())
         .collect();
 
-    for ip in &verified {
-        push(&mut out, *ip, consts::QUIC_PORT);
-    }
-
-    // Port-major, not gateway-major: one port across the gateways before moving
-    // on. Blocking is a property of the port on this path, not of the address, so
-    // trying several gateways on 1701 discriminates a blocked port in two
-    // attempts instead of walking one gateway through every port first.
-    //
-    // Capped so the whole ladder still fits MASQUE_H3_PROBE_LIMIT. With four
-    // verified gateways on 443 and four alternate ports, that leaves two
-    // gateways' worth of alternates — the two that answered 4/4 when measured.
-    // The connect budget is what the user waits on, so it does not grow.
-    let alt_gateways = MASQUE_H3_PROBE_LIMIT
-        .saturating_sub(verified.len())
-        .checked_div(prober::MASQUE_ALT_PORTS.len())
-        .unwrap_or(0);
-
-    for &port in prober::MASQUE_ALT_PORTS {
-        for ip in verified.iter().take(alt_gateways) {
+    // UDP/443 QUIC initials are dropped on Hamrah Aval. 1701 and 8095 lead
+    // so the twelve-rung start budget is spent there, not on a blackholed 443.
+    for port in [1701_u16, 8095] {
+        for ip in &verified {
             push(&mut out, *ip, port);
         }
+    }
+
+    for ip in &verified {
+        push(&mut out, *ip, consts::QUIC_PORT);
     }
 
     for seed in prober::MASQUE_SEEDS {
@@ -1144,6 +1259,12 @@ fn masque_gateway_peers() -> Vec<SocketAddr> {
         }
     }
 
+    for port in [500_u16, 4500] {
+        for ip in &verified {
+            push(&mut out, *ip, port);
+        }
+    }
+
     out
 }
 
@@ -1159,6 +1280,21 @@ fn masque_h2_gateway_peers() -> Vec<SocketAddr> {
         .into_iter()
         .filter(|peer| peer.port() == consts::QUIC_PORT)
         .collect()
+}
+
+/// The four addresses measured to answer connect-ip. A refused certificate is
+/// retried against these, not against the website ranges that answer HTTP 400.
+fn certificate_retry_peers() -> Vec<(SocketAddr, &'static str)> {
+    [
+        "162.159.199.1:443",
+        "162.159.199.2:443",
+        "162.159.198.1:443",
+        "162.159.198.2:443",
+    ]
+    .into_iter()
+    .filter_map(|raw| raw.parse().ok())
+    .map(|peer| (peer, "known gateway"))
+    .collect()
 }
 
 async fn quick_verify_masque_peer(
@@ -1278,6 +1414,71 @@ fn identity_rejected_error(count: u32) -> AetherError {
     )
 }
 
+const CERTIFICATE_ROUNDS: u32 = 8;
+
+/// Keep issuing a new MASQUE certificate and dialling the known gateways until
+/// one address accepts, or a new certificate cannot be issued.
+///
+/// A finished scan must not become a different transport. The certificate is
+/// what the gateway refused, so the next attempt is another certificate on
+/// this same method.
+async fn accept_with_fresh_certificates(
+    identity: &mut account::Identity,
+    options: &StartOptions,
+    peers: &[(SocketAddr, &'static str)],
+    allow_scan: bool,
+) -> Result<SocketAddr> {
+    for round in 1..=CERTIFICATE_ROUNDS {
+        let Some(fresh) = refresh_refused_masque_identity(identity, options).await else {
+            return Err(AetherError::Masque(
+                "could not issue another MASQUE certificate".into(),
+            ));
+        };
+        *identity = fresh;
+        prober::reset_identity_rejections();
+        match dial_masque_pass(identity, peers, options).await {
+            PassOutcome::Connected(peer) => return Ok(peer),
+            PassOutcome::IdentityRejected(_) => {
+                crate::ffi::record_log(format!(
+                    "Certificate {round} was refused. Requesting another."
+                ));
+                continue;
+            }
+            PassOutcome::Exhausted => {
+                if prober::identity_rejections() > 0 {
+                    crate::ffi::record_log(format!(
+                        "Certificate {round} was refused. Requesting another."
+                    ));
+                    continue;
+                }
+                if !allow_scan {
+                    return Err(AetherError::Other(
+                        "new certificate saved, but the known gateways did not answer".into(),
+                    ));
+                }
+                crate::ffi::record_log(
+                    "New certificate saved. The known gateways did not answer, so the scan continues with this certificate.",
+                );
+                prober::reset_identity_rejections();
+                match hunt_masque_peer(identity, options.scan_mode, options.ip_scan, options).await
+                {
+                    Ok(peer) => return Ok(peer),
+                    Err(error) => {
+                        if prober::identity_rejections() > 0 {
+                            crate::ffi::record_log(
+                                "This certificate was refused during the scan. Requesting another.",
+                            );
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+    Err(identity_rejected_error(CERTIFICATE_ROUNDS))
+}
+
 /// Result of dialling a whole candidate list with one transport.
 enum PassOutcome {
     /// A gateway accepted the connect-ip CONNECT.
@@ -1287,6 +1488,95 @@ enum PassOutcome {
     IdentityRejected(u32),
     /// Every candidate failed at the transport level. Worth trying another way.
     Exhausted,
+}
+
+async fn dial_saved_h2(
+    identity: &account::Identity,
+    peers: &[SocketAddr],
+) -> Option<SocketAddr> {
+    if peers.is_empty() {
+        return None;
+    }
+    crate::ffi::record_log(format!(
+        "Clean HTTP/2 list: {} saved address(es)",
+        peers.len()
+    ));
+    for peer in peers {
+        let peer = masque_h2::h2_peer(*peer);
+        crate::ffi::record_log(format!("Trying saved clean address {peer}"));
+        let cfg = masque_h2::H2TunnelConfig {
+            peer,
+            sni: consts::L4_CONNECT_SNI.to_string(),
+            authority: quic::default_authority().to_string(),
+            path: quic::default_path().to_string(),
+            cert_pem: identity.cert_pem.clone(),
+            key_pem: identity.key_pem.clone(),
+            local_ipv4: parse_local_v4(&identity.ipv4),
+            quiet: true,
+            pin_endpoint: false,
+            expected_pins: Vec::new(),
+        };
+        match masque_h2::verify_h2(&cfg, std::time::Duration::from_secs(8)).await {
+            Ok(_) => {
+                masque_h2::use_extended_connect(false);
+                crate::ffi::record_log(format!("Saved clean address accepted {peer}"));
+                return Some(peer);
+            }
+            Err(error) => {
+                prober::note_probe_failure(&error.to_string());
+                crate::ffi::record_log(format!("Saved clean address rejected {peer}: {error}"));
+            }
+        }
+    }
+    None
+}
+
+async fn dial_clean_edge_h2(identity: &account::Identity) -> Option<SocketAddr> {
+    let peers = [
+        "162.159.199.1:443",
+        "162.159.198.1:443",
+        "162.159.199.2:443",
+        "162.159.198.2:443",
+        "188.114.97.6:443",
+    ];
+    for raw in peers {
+        let Ok(peer) = raw.parse::<SocketAddr>() else {
+            continue;
+        };
+        crate::ffi::record_log(format!("Trying clean edge {peer} via HTTP/2"));
+        let cfg = masque_h2::H2TunnelConfig {
+            peer,
+            sni: consts::L4_CONNECT_SNI.to_string(),
+            authority: quic::default_authority().to_string(),
+            path: quic::default_path().to_string(),
+            cert_pem: identity.cert_pem.clone(),
+            key_pem: identity.key_pem.clone(),
+            local_ipv4: parse_local_v4(&identity.ipv4),
+            quiet: true,
+            pin_endpoint: false,
+            expected_pins: Vec::new(),
+        };
+        crate::ffi::record_log(format!("Trying clean edge {peer} via extended CONNECT"));
+        match masque_h2::verify_h2_extended(&cfg, std::time::Duration::from_secs(6)).await {
+            Ok(_) => {
+                masque_h2::use_extended_connect(true);
+                return Some(peer);
+            }
+            Err(error) => {
+                crate::ffi::record_log(format!("Rejected {peer} via extended CONNECT: {error}"));
+            }
+        }
+        match masque_h2::verify_h2(&cfg, std::time::Duration::from_secs(6)).await {
+            Ok(_) => {
+                masque_h2::use_extended_connect(false);
+                return Some(peer);
+            }
+            Err(error) => {
+                crate::ffi::record_log(format!("Rejected {peer} via HTTP/2: {error}"));
+            }
+        }
+    }
+    None
 }
 
 async fn dial_masque_pass(
@@ -1386,14 +1676,15 @@ async fn try_masque_peer(
             crate::ffi::record_log(format!("Accepted {peer} via {label}"));
             PeerOutcome::Accepted
         }
-        Err(error) => {
-            crate::ffi::record_log(format!("Rejected {peer} via {label}: {error}"));
-            if is_identity_rejection(&error) {
-                PeerOutcome::IdentityRejected
-            } else {
-                PeerOutcome::Unreachable
+            Err(error) => {
+                crate::ffi::record_log(format!("Rejected {peer} via {label}: {error}"));
+                if is_identity_rejection(&error) {
+                    prober::note_probe_failure(&error.to_string());
+                    PeerOutcome::IdentityRejected
+                } else {
+                    PeerOutcome::Unreachable
+                }
             }
-        }
     }
 }
 
@@ -1436,6 +1727,10 @@ fn is_identity_rejection(error: &AetherError) -> bool {
         {
             return true;
         }
+    }
+
+    if text.contains("TLSV1_ALERT_ACCESS_DENIED") {
+        return true;
     }
 
     text.contains(quic::CONNECT_STAGE_AFTER_REQUEST) && text.contains("TLS alert 49")
@@ -1501,7 +1796,7 @@ async fn hunt_masque_peer(
 ) -> Result<SocketAddr> {
     log::info!("[*] hunting for a working MASQUE gateway (CONNECT-IP verification)");
     let ports = if masque_h2::enabled() {
-        masque_h2_ports(prober::MASQUE_PORTS)
+        vec![consts::QUIC_PORT]
     } else {
         prober::MASQUE_PORTS.to_vec()
     };
@@ -1639,6 +1934,112 @@ async fn run_masque(
             known.len()
         ));
 
+        // HTTP/2 uses the saved clean list before any UDP pass. The UDP/1701
+        // list is what ate the second connect: the address that had just
+        // worked waited behind timeouts, and scan_once then gave up.
+        let prefer_h2 = masque_h2::enabled();
+        if prefer_h2 {
+            masque_h2::set_preferred(true);
+            masque_h2::use_extended_connect(false);
+            let saved = load_clean_h2(&options.config_path);
+            if saved.is_empty() {
+                crate::ffi::record_log(
+                    "Clean HTTP/2 list is empty. Starting the HTTP/2 scan.",
+                );
+            } else if let Some(peer) = dial_saved_h2(&identity, &saved).await {
+                quick_peer = Some(peer);
+            } else if prober::identity_rejections() > 0 {
+                let saved_peers: Vec<(SocketAddr, &'static str)> = saved
+                    .iter()
+                    .copied()
+                    .map(|peer| (peer, "saved clean"))
+                    .collect();
+                match accept_with_fresh_certificates(
+                    &mut identity,
+                    options,
+                    &saved_peers,
+                    options.endpoint_discovery != EndpointDiscovery::CleanOnly,
+                )
+                .await
+                {
+                    Ok(peer) => quick_peer = Some(peer),
+                    Err(error) => {
+                        if options.scan_once {
+                            return Err(error);
+                        }
+                    }
+                }
+            } else if options.endpoint_discovery == EndpointDiscovery::CleanOnly {
+                crate::ffi::record_log(
+                    "Every saved address failed. Scan was not started because the mode is saved-only.",
+                );
+                return Err(AetherError::Other(
+                    "saved clean IPs did not answer".into(),
+                ));
+            } else {
+                crate::ffi::record_log(
+                    "Every saved address failed. Starting the HTTP/2 scan.",
+                );
+            }
+        }
+        if !prefer_h2 {
+            masque_h2::clear_fallback();
+        }
+        let port_1701: Vec<(SocketAddr, &'static str)> = [
+            "162.159.192.1:1701",
+            "162.159.192.2:1701",
+            "162.159.193.1:1701",
+            "188.114.97.1:1701",
+            "188.114.97.6:1701",
+            "162.159.199.1:1701",
+            "162.159.198.1:1701",
+            "162.159.199.2:1701",
+            "162.159.198.2:1701",
+        ]
+        .into_iter()
+        .filter_map(|raw| raw.parse::<SocketAddr>().ok())
+        .map(|peer| (peer, "known gateway"))
+        .collect();
+        if prefer_h2 {
+            crate::ffi::record_log("HTTP/2 selected; not spending the budget on UDP/1701 first");
+        } else {
+        crate::ffi::record_log("MASQUE: dialing known gateways on UDP/1701");
+        match dial_masque_pass(&identity, &port_1701, options).await {
+            PassOutcome::Connected(peer) => {
+                crate::ffi::record_log(format!("MASQUE accepted {peer}"));
+                quick_peer = Some(peer);
+            }
+            PassOutcome::IdentityRejected(_) => {
+                match accept_with_fresh_certificates(&mut identity, options, &port_1701, false)
+                    .await
+                {
+                    Ok(peer) => {
+                        crate::ffi::record_log(format!("MASQUE accepted {peer}"));
+                        quick_peer = Some(peer);
+                    }
+                    Err(error) => {
+                        if options.scan_once {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            PassOutcome::Exhausted => {
+                crate::ffi::record_log("MASQUE: no known gateway accepted UDP/1701");
+            }
+        }
+        }
+        if quick_peer.is_none() && !prefer_h2 {
+            crate::ffi::record_log("MASQUE: UDP/1701 did not answer; trying 188.114.97.6 on TCP/443");
+            if let Some(peer) = dial_clean_edge_h2(&identity).await {
+                crate::ffi::record_log(format!("MASQUE accepted {peer}"));
+                quick_peer = Some(peer);
+            }
+        }
+        if prefer_h2 && quick_peer.is_none() {
+            masque_h2::set_preferred(true);
+        }
+
         // Pass 1 — HTTP/3, the transport that actually works.
         //
         // Measured: the gateway answers `:status 200` to an extended CONNECT with
@@ -1650,33 +2051,47 @@ async fn run_masque(
         // cannot succeed.
         let mut h3_candidates = known.clone();
         let mut h3_seen = seen.clone();
-        for peer in masque_gateway_peers()
-            .into_iter()
-            .take(MASQUE_H3_PROBE_LIMIT)
-        {
+        let gateway_peers = if masque_h2::enabled() {
+            masque_h2_gateway_peers()
+        } else {
+            masque_gateway_peers()
+        };
+        let gateway_limit = if masque_h2::enabled() {
+            MASQUE_H2_PROBE_LIMIT
+        } else {
+            MASQUE_H3_PROBE_LIMIT
+        };
+        for peer in gateway_peers.into_iter().take(gateway_limit) {
             if h3_seen.insert(peer) {
                 h3_candidates.push((peer, "masque gateway"));
             }
         }
 
         let mut identity_rejections = 0u32;
+        if quick_peer.is_none() {
         match dial_masque_pass(&identity, &h3_candidates, options).await {
             PassOutcome::Connected(peer) => quick_peer = Some(peer),
             PassOutcome::IdentityRejected(count) if count >= IDENTITY_REJECTED_LIMIT => {
-                // Refused certificate, not a dead peer list: re-enrol and dial
-                // again rather than surfacing a failure the user cannot act on.
-                match refresh_refused_masque_identity(&identity, options).await {
-                    Some(fresh) => {
-                        identity = fresh;
-                        match dial_masque_pass(&identity, &h3_candidates, options).await {
-                            PassOutcome::Connected(peer) => quick_peer = Some(peer),
-                            PassOutcome::IdentityRejected(count) => {
-                                return Err(identity_rejected_error(count));
-                            }
-                            PassOutcome::Exhausted => {}
+                let retry_peers = if masque_h2::enabled() {
+                    certificate_retry_peers()
+                } else {
+                    h3_candidates.clone()
+                };
+                match accept_with_fresh_certificates(
+                    &mut identity,
+                    options,
+                    &retry_peers,
+                    !masque_h2::enabled(),
+                )
+                .await
+                {
+                    Ok(peer) => quick_peer = Some(peer),
+                    Err(error) => {
+                        let unanswered = error.to_string().contains("did not answer");
+                        if options.scan_once && !unanswered {
+                            return Err(error);
                         }
                     }
-                    None => return Err(identity_rejected_error(count)),
                 }
             }
             PassOutcome::IdentityRejected(count) => identity_rejections = count,
@@ -1702,19 +2117,21 @@ async fn run_masque(
             // the CONNECT is a property of the certificate, not of the transport.
             match dial_masque_pass_from(&identity, &known, options, identity_rejections).await {
                 PassOutcome::Connected(peer) => quick_peer = Some(peer),
-                PassOutcome::IdentityRejected(count) => {
-                    match refresh_refused_masque_identity(&identity, options).await {
-                        Some(fresh) => {
-                            identity = fresh;
-                            match dial_masque_pass(&identity, &known, options).await {
-                                PassOutcome::Connected(peer) => quick_peer = Some(peer),
-                                PassOutcome::IdentityRejected(count) => {
-                                    return Err(identity_rejected_error(count));
-                                }
-                                PassOutcome::Exhausted => {}
+                PassOutcome::IdentityRejected(_) => {
+                    match accept_with_fresh_certificates(
+                        &mut identity,
+                        options,
+                        &certificate_retry_peers(),
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(peer) => quick_peer = Some(peer),
+                        Err(error) => {
+                            if options.scan_once {
+                                return Err(error);
                             }
                         }
-                        None => return Err(identity_rejected_error(count)),
                     }
                 }
                 PassOutcome::Exhausted => {}
@@ -1729,6 +2146,7 @@ async fn run_masque(
             if quick_peer.is_none() {
                 masque_h2::clear_fallback();
             }
+        }
         }
     }
 
@@ -1772,6 +2190,29 @@ async fn run_masque(
                     .await
                     {
                         Ok(peer) => peer,
+                        Err(e) if prober::identity_rejections() > 0 => {
+                            match accept_with_fresh_certificates(
+                                &mut identity,
+                                options,
+                                &certificate_retry_peers(),
+                                options.endpoint_discovery != EndpointDiscovery::CleanOnly,
+                            )
+                            .await
+                            {
+                                Ok(peer) => peer,
+                                Err(error) => {
+                                    log::warn!("[-] no usable MASQUE gateway found: {error}");
+                                    crate::ffi::record_log(format!(
+                                        "No usable MASQUE gateway ({error}); staying on this method"
+                                    ));
+                                    if options.scan_once {
+                                        return Err(error);
+                                    }
+                                    tokio::time::sleep(masque_reconnect_delay()).await;
+                                    continue;
+                                }
+                            }
+                        }
                         Err(e) => {
                             log::warn!(
                                 "[-] no usable MASQUE gateway found: {e}; rescanning shortly"
@@ -1817,7 +2258,16 @@ async fn run_masque(
             };
         log::warn!("[-] {reconnect_detail}");
         crate::ffi::record_log(&reconnect_detail);
-        if options.scan_once {
+        let startup_failed = reconnect_detail.contains("startup timed out")
+            || reconnect_detail.contains("before validation");
+        if startup_failed {
+            forget_clean_h2(&options.config_path, peer);
+            last_good_peer = None;
+            crate::ffi::record_log(format!(
+                "Tunnel did not stay up on {peer}. That address is no longer first; scanning for another."
+            ));
+        }
+        if options.scan_once && !startup_failed {
             return Err(AetherError::Other(reconnect_detail));
         }
 
@@ -1929,6 +2379,10 @@ async fn run_masque_tunnel(
         Ok(Ok(())) => {
             if let Some(path) = lastconn_path {
                 lastconn::save(path, &peer.to_string(), options.masque_profile());
+            }
+            if masque_h2::enabled() {
+                remember_clean_h2(&options.config_path, peer);
+                crate::ffi::record_log(format!("Saved clean HTTP/2 address {peer}"));
             }
             tunnel_task.await
         }
@@ -3412,8 +3866,8 @@ mod tests {
         // 80 ms, the best of any address measured. 162.159.198.2 stays on the
         // ladder — it is what the account API assigns once a MASQUE key is
         // enrolled — but it measured 3/4, so it no longer leads.
-        assert_eq!(peers.first(), Some(&"162.159.199.1:443".parse().unwrap()));
-        assert_eq!(peers.get(1), Some(&"162.159.199.2:443".parse().unwrap()));
+        assert_eq!(peers.first(), Some(&"162.159.199.1:1701".parse().unwrap()));
+        assert_eq!(peers.get(1), Some(&"162.159.198.1:1701".parse().unwrap()));
         assert!(peers.contains(&"162.159.198.2:443".parse().unwrap()));
 
         // Every /24 in the MASQUE list contributes its .1 and .2.
@@ -3450,21 +3904,20 @@ mod tests {
             peers.iter().position(|p| *p == want)
         };
 
-        // 443 on every verified gateway first, then port-major across the
-        // alternates, then the unmeasured seeds.
+        // Alternate UDP ports before 443. Hamrah Aval drops QUIC on 443.
         let last_443 = index("162.159.198.1:443").expect("verified gateway on 443");
         let first_alt = index("162.159.199.1:1701").expect("verified gateway on 1701");
         let first_seed = index("162.159.197.1:443").expect("seed on 443");
-        assert!(last_443 < first_alt);
+        assert!(first_alt < last_443);
         assert!(first_alt < first_seed);
 
         // Port-major: the second gateway on 1701 comes before the first reaches
         // the next alternate port.
-        assert!(index("162.159.199.2:1701").unwrap() < index("162.159.199.1:8095").unwrap());
+        assert!(index("162.159.198.1:1701").unwrap() < index("162.159.199.1:8095").unwrap());
 
-        // Every alternate port must appear, on the gateways that measured 4/4.
+        // Every alternate port must appear, on the two gateways dialled first.
         for &port in prober::MASQUE_ALT_PORTS {
-            for gateway in ["162.159.199.1", "162.159.199.2"] {
+            for gateway in ["162.159.199.1", "162.159.198.1"] {
                 assert!(
                     index(&format!("{gateway}:{port}")).is_some(),
                     "{gateway}:{port} must be on the ladder"
@@ -3574,9 +4027,9 @@ mod tests {
         )));
     }
 
-    /// The HTTP/2 request must carry the pseudo-header set extended CONNECT needs.
+    /// HTTP/2 uses PattNG's plain CONNECT. Extended CONNECT is what the edge answers 400 to.
     #[test]
-    fn h2_connect_request_is_an_extended_connect() {
+    fn h2_connect_request_is_a_plain_connect() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: "162.159.198.2:443".parse().unwrap(),
             sni: consts::CONNECT_SNI.to_string(),
@@ -3592,21 +4045,16 @@ mod tests {
 
         let request = masque_h2::connect_request_for_test(&cfg).expect("request builds");
         assert_eq!(request.method(), http::Method::CONNECT);
-
-        // Without this extension the h2 crate drops :protocol, :scheme and :path.
-        let protocol = request
-            .extensions()
-            .get::<h2::ext::Protocol>()
-            .expect(":protocol must be set for extended CONNECT");
-        assert_eq!(protocol.as_str(), consts::CF_CONNECT_PROTOCOL);
-
-        assert_eq!(request.uri().scheme_str(), Some("https"));
-        assert_eq!(request.uri().authority().map(|a| a.as_str()), Some("cloudflareaccess.com"));
-        assert_eq!(request.uri().path(), "/");
+        assert!(request.extensions().get::<h2::ext::Protocol>().is_none());
         assert_eq!(
-            request.headers().get("capsule-protocol").map(|v| v.as_bytes()),
-            Some(&b"?1"[..])
+            request.uri().authority().map(|a| a.as_str()),
+            Some("cloudflareaccess.com:443")
         );
+        assert_eq!(
+            request.headers().get("cf-connect-proto").map(|v| v.as_bytes()),
+            Some(consts::CF_CONNECT_PROTOCOL.as_bytes())
+        );
+        assert!(request.headers().get("capsule-protocol").is_none());
     }
 
     #[test]
@@ -3654,6 +4102,9 @@ mod tests {
             "verify {}: TLS alert 49 (access_denied)",
             quic::CONNECT_STAGE_AFTER_REQUEST
         ))));
+        assert!(is_identity_rejection(&AetherError::Masque(
+            "await response: [TLSV1_ALERT_ACCESS_DENIED]".to_string()
+        )));
 
         // Alert 49 *before* the request is a TLS-layer refusal of the handshake
         // itself, not a verdict on connect-ip: the peer may simply not be a
@@ -3675,7 +4126,7 @@ mod tests {
     // authority/path rather than the cloudflareaccess.com pair. Renamed because
     // two tests shared one name, which is a hard compile error in the test
     // profile — the whole crate's tests could not build.
-    fn h2_connect_request_over_l4_sni_is_an_extended_connect() {
+    fn h2_connect_request_over_l4_sni_is_a_plain_connect() {
         let cfg = masque_h2::H2TunnelConfig {
             peer: "162.159.196.1:443".parse().unwrap(),
             sni: consts::L4_CONNECT_SNI.to_string(),
@@ -3690,23 +4141,13 @@ mod tests {
         };
 
         let request = masque_h2::connect_request_for_test(&cfg).expect("request builds");
-
-        // Without :protocol the h2 crate drops :scheme and :path, which is what
-        // made every gateway answer 400.
-        assert_eq!(
-            request
-                .extensions()
-                .get::<h2::ext::Protocol>()
-                .map(|p| p.as_str()),
-            Some(consts::CF_CONNECT_PROTOCOL)
-        );
+        assert!(request.extensions().get::<h2::ext::Protocol>().is_none());
         assert_eq!(request.method(), http::Method::CONNECT);
-        assert_eq!(request.uri().scheme_str(), Some("https"));
         assert_eq!(request.uri().host(), Some(quic::default_authority()));
-        assert_eq!(request.uri().path(), "/");
+        assert_eq!(request.uri().port_u16(), Some(443));
         assert_eq!(
-            request.headers().get("capsule-protocol").map(|v| v.as_bytes()),
-            Some(b"?1".as_ref())
+            request.headers().get("cf-connect-proto").map(|v| v.as_bytes()),
+            Some(consts::CF_CONNECT_PROTOCOL.as_bytes())
         );
     }
 }

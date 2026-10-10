@@ -1,8 +1,8 @@
 pub const API_URL: &str = "https://api.cloudflareclient.com";
 pub const API_VERSION: &str = "v0a4471";
 
-pub const CONNECT_SNI: &str = "consumer-masque.cloudflareclient.com";
-pub const L4_CONNECT_SNI: &str = "consumer-masque-proxy.cloudflareclient.com";
+pub const CONNECT_SNI: &str = "www.cloudflare.com";
+pub const L4_CONNECT_SNI: &str = "www.cloudflare.com";
 pub const CONNECT_URI: &str = "https://cloudflareaccess.com";
 
 pub const ECH_PUBLIC_NAME: &str = "cloudflare-ech.com";

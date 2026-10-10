@@ -23,6 +23,7 @@ const H2_ALPN: &[u8] = b"\x02h2";
 const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 static H2_FALLBACK: AtomicBool = AtomicBool::new(false);
 static H2_PREFERRED: AtomicBool = AtomicBool::new(false);
+static H2_EXTENDED: AtomicBool = AtomicBool::new(false);
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -100,6 +101,14 @@ pub fn set_preferred(enabled: bool) {
     H2_FALLBACK.store(false, Ordering::Release);
 }
 
+pub fn use_extended_connect(enabled: bool) {
+    H2_EXTENDED.store(enabled, Ordering::Release);
+}
+
+fn extended_connect() -> bool {
+    H2_EXTENDED.load(Ordering::Acquire)
+}
+
 pub fn enable_fallback() {
     H2_FALLBACK.store(true, Ordering::Release);
 }
@@ -168,6 +177,10 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     builder.set_grease_enabled(true);
+    // Chrome's TLS 1.2 selection, the fingerprint PattNG sends on MASQUE.
+    builder
+        .set_cipher_list("ALL:!aPSK:!ECDSA+SHA1:!3DES")
+        .map_err(|e| AetherError::Tls(e.to_string()))?;
 
     let groups = std::env::var("AETHER_TLS_GROUPS").ok();
     let groups = groups
@@ -208,58 +221,53 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
     Ok(config)
 }
 
-/// Build the connect-ip request as an RFC 8441 *extended* CONNECT.
-///
-/// Header shape mirrors `masque::connect_ip_request`, the HTTP/3 path:
-///
-/// ```text
-/// :method    CONNECT
-/// :protocol  cf-connect-ip
-/// :scheme    https
-/// :authority cloudflareaccess.com
-/// :path      /
-/// capsule-protocol: ?1
-/// ```
-///
-/// This used to send a plain origin CONNECT — authority-form URI, and
-/// `cf-connect-proto` as an ordinary header. In the `h2` crate,
-/// `Pseudo::request` special-cases exactly that shape: when the method is
-/// CONNECT and no protocol is set, it sends neither `:scheme` nor `:path`. So the
-/// frame went out with no `:protocol`, no `:scheme` and no `:path`. The crate
-/// sends `:protocol` only when an `h2::ext::Protocol` sits in the request
-/// extensions; setting it also flips `Pseudo::request` into its normal branch,
-/// which is what makes `:scheme` and `:path` appear.
-///
-/// Fixing the shape did not make HTTP/2 work, and that is worth recording. Probed
-/// from a clean host with a freshly enrolled certificate, no Cloudflare edge
-/// serves connect-ip over HTTP/2: the two gateways that answer `:status 200` over
-/// HTTP/3 reply `RST_STREAM` here, and every other address answers `400`
-/// regardless of headers — including requests sent with no client certificate at
-/// all. No edge advertised `SETTINGS_ENABLE_CONNECT_PROTOCOL` either. So this
-/// path is standby only, kept correct in case Cloudflare enables extended CONNECT
-/// on TCP, which matters where UDP/443 is blocked outright.
-fn build_connect_request(cfg: &H2TunnelConfig) -> Result<http::Request<()>> {
-    let path = if cfg.path.is_empty() { "/" } else { &cfg.path };
-    // Authority-only host, exactly like the h3 request. The scheme and path are
-    // taken from this URI once `:protocol` is set.
-    let uri = format!("https://{}{}", cfg.authority, path);
+/// PattNG's HTTP/2 carrier: a plain CONNECT to `authority:443` with
+/// `cf-connect-proto`, not an extended CONNECT. Extended CONNECT (`:protocol`)
+/// is what the public edge answers 400 to. The h2 crate omits `:scheme` and
+/// `:path` for this shape, which is what that carrier sends.
+fn authority_host(cfg: &H2TunnelConfig) -> String {
+    let host = cfg.authority.trim();
+    if host.contains(':') {
+        host.to_string()
+    } else {
+        format!("{host}:443")
+    }
+}
 
+fn build_connect_request(cfg: &H2TunnelConfig) -> Result<http::Request<()>> {
+    build_connect_request_shape(cfg, extended_connect())
+}
+
+fn build_connect_request_shape(cfg: &H2TunnelConfig, extended: bool) -> Result<http::Request<()>> {
+    let authority = authority_host(cfg);
+    if !extended {
+        let uri = format!("https://{authority}");
+        return http::Request::builder()
+            .method(Method::CONNECT)
+            .uri(uri)
+            .header("cf-connect-proto", consts::CF_CONNECT_PROTOCOL)
+            .header("pq-enabled", "false")
+            .header("user-agent", "")
+            .body(())
+            .map_err(|e| AetherError::Masque(format!("build request: {e}")));
+    }
+    let host = cfg.authority.trim().trim_end_matches(":443");
+    let path = if cfg.path.starts_with('/') {
+        cfg.path.clone()
+    } else {
+        format!("/{}", cfg.path)
+    };
+    let uri = format!("https://{host}{path}");
     let mut request = http::Request::builder()
         .method(Method::CONNECT)
         .uri(uri)
-        // Tells the peer we speak the capsule protocol, i.e. the stream body is
-        // a sequence of capsules rather than raw bytes. RFC 9297.
         .header("capsule-protocol", "?1")
-        .header("cf-connect-proto", consts::CF_CONNECT_PROTOCOL)
-        .header("pq-enabled", "false")
         .header("user-agent", "")
         .body(())
         .map_err(|e| AetherError::Masque(format!("build request: {e}")))?;
-
     request
         .extensions_mut()
         .insert(h2::ext::Protocol::from_static(consts::CF_CONNECT_PROTOCOL));
-
     Ok(request)
 }
 
@@ -272,18 +280,105 @@ pub fn connect_request_for_test(cfg: &H2TunnelConfig) -> Result<http::Request<()
     build_connect_request(cfg)
 }
 
+/// Irancell completes a fragmented ClientHello and rejects ECH. MCI completes a
+/// whole ClientHello for www.cloudflare.com and drops the fragmented one. Race
+/// both, and do not require ECH.
+async fn connect_tls(
+    cfg: &H2TunnelConfig,
+) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
+    let fragmented = FragmentConfig::from_env();
+    if !fragmented.enabled {
+        return connect_tls_once(cfg, FragmentConfig::disabled()).await;
+    }
+    let plain = connect_tls_once(cfg, FragmentConfig::disabled());
+    let split = connect_tls_once(cfg, fragmented);
+    tokio::pin!(plain);
+    tokio::pin!(split);
+    let mut plain_err: Option<AetherError> = None;
+    let mut split_err: Option<AetherError> = None;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut plain, if plain_err.is_none() => match result {
+                Ok(tls) => return Ok(tls),
+                Err(error) => plain_err = Some(error),
+            },
+            result = &mut split, if split_err.is_none() => match result {
+                Ok(tls) => return Ok(tls),
+                Err(error) => split_err = Some(error),
+            },
+            else => break,
+        }
+    }
+    Err(plain_err.or(split_err).unwrap_or_else(|| {
+        AetherError::Tls("h2 tls handshake: no attempt".into())
+    }))
+}
+
+async fn connect_tls_once(
+    cfg: &H2TunnelConfig,
+    fragment: FragmentConfig,
+) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
+    let tls_config = build_tls(cfg)?;
+    let tcp = connect_tcp(cfg.peer).await?;
+    let _ = tcp.set_nodelay(true);
+    let stream = FragmentingStream::new(tcp, fragment);
+    match tokio::time::timeout(
+        Duration::from_secs(8),
+        tokio_boring::connect(tls_config, &cfg.sni, stream),
+    )
+    .await
+    {
+        Ok(Ok(tls)) => Ok(tls),
+        Ok(Err(error)) => Err(AetherError::Tls(format!("h2 tls handshake: {error}"))),
+        Err(_) => Err(AetherError::Tls(format!(
+            "h2 tls handshake with {} timed out{}",
+            cfg.peer,
+            if fragment.enabled { " (fragmented)" } else { "" }
+        ))),
+    }
+}
+
+async fn response_snippet(response: &mut http::Response<h2::RecvStream>) -> String {
+    let body = response.body_mut();
+    let chunk = match tokio::time::timeout(Duration::from_millis(700), body.data()).await {
+        Ok(Some(Ok(bytes))) => bytes,
+        _ => return String::new(),
+    };
+    let text: String = chunk
+        .iter()
+        .take(96)
+        .map(|byte| {
+            let c = *byte as char;
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let _ = body.flow_control().release_capacity(chunk.len());
+    text.trim().to_string()
+}
+
 pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Duration> {
+    verify_h2_shape(cfg, timeout, false).await
+}
+
+pub async fn verify_h2_extended(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Duration> {
+    verify_h2_shape(cfg, timeout, true).await
+}
+
+async fn verify_h2_shape(
+    cfg: &H2TunnelConfig,
+    timeout: Duration,
+    extended: bool,
+) -> Result<Duration> {
     let start = Instant::now();
     let data_check = data_check_enabled();
 
     let attempt = async {
-        let tls_config = build_tls(cfg)?;
-        let tcp = connect_tcp(cfg.peer).await?;
-        let _ = tcp.set_nodelay(true);
-        let fragment = FragmentingStream::new(tcp, FragmentConfig::from_env());
-        let tls = tokio_boring::connect(tls_config, &cfg.sni, fragment)
-            .await
-            .map_err(|e| AetherError::Tls(format!("h2 tls handshake: {e}")))?;
+        let tls = connect_tls(cfg).await?;
         let (h2, connection) = h2::client::handshake(tls)
             .await
             .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
@@ -294,18 +389,19 @@ pub async fn verify_h2(cfg: &H2TunnelConfig, timeout: Duration) -> Result<Durati
             .ready()
             .await
             .map_err(|e| AetherError::Masque(format!("h2 ready: {e}")))?;
-        let req = build_connect_request(cfg)?;
+        let req = build_connect_request_shape(cfg, extended)?;
         let (resp_fut, mut send_stream) = h2
             .send_request(req, false)
             .map_err(|e| AetherError::Masque(format!("send_request: {e}")))?;
-        let response = resp_fut
+        let mut response = resp_fut
             .await
             .map_err(|e| AetherError::Masque(format!("await response: {e}")))?;
         let status = response.status();
         if !status.is_success() {
+            let detail = response_snippet(&mut response).await;
             driver.abort();
             return Err(AetherError::Masque(format!(
-                "h2 connect-ip status {}",
+                "h2 connect-ip status {} {detail}",
                 status.as_u16()
             )));
         }
@@ -386,27 +482,8 @@ pub async fn run(
     let mut ready_fired = false;
     let mut validate_successes: u32 = 0;
 
-    let tls_config = build_tls(&cfg)?;
-
     log_or_debug(quiet, format!("[h2] connecting tcp to {}", cfg.peer));
-    let tcp = connect_tcp(cfg.peer).await?;
-    let _ = tcp.set_nodelay(true);
-
-    let frag_cfg = FragmentConfig::from_env();
-    if frag_cfg.enabled {
-        log_or_debug(
-            quiet,
-            format!(
-                "[h2] fragmenting client hello: size={}..{} delay={}..{}ms",
-                frag_cfg.size_min, frag_cfg.size_max, frag_cfg.delay_min_ms, frag_cfg.delay_max_ms
-            ),
-        );
-    }
-    let fragment = FragmentingStream::new(tcp, frag_cfg);
-
-    let tls = tokio_boring::connect(tls_config, &cfg.sni, fragment)
-        .await
-        .map_err(|e| AetherError::Tls(format!("h2 tls handshake: {e}")))?;
+    let tls = connect_tls(&cfg).await?;
     log_or_debug(
         quiet,
         format!(

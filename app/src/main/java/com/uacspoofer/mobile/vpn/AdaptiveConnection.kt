@@ -1227,15 +1227,15 @@ class AdaptiveCandidatePlanner(
 
     companion object {
         const val MAX_CANDIDATES = 11
-        private const val STRATEGY_VERSION = "adaptive-v9-offline-fingerprint-direct-signature"
+        private const val STRATEGY_VERSION = "adaptive-v10-iran-hello-split"
         const val MCI_DIRECT_COMPAT_ID = "uac-direct-compat"
         const val CONNECT_LAST_GOOD_ID = "connect-last-good"
         private const val MCI_EDGE_POOL_PORT = 443
         private val MCI_EDGE_POOL_ADDRESSES = listOf(
-            "104.26.14.85",
-            "188.114.97.6",
-            "104.21.71.238",
-            "104.17.148.22",
+            "104.26.13.100",
+            "104.26.14.40",
+            "104.26.14.200",
+            "104.26.13.50",
         )
         private val MCI_EDGE_POOL_RESOLVERS = listOf(
             AdaptiveDnsResolvers.GOOGLE,

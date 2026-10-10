@@ -15,6 +15,18 @@ internal object PowNetworkRestore {
 
     fun shouldActOnLost(): Boolean = false
 
+    /**
+     * A lost network is not by itself proof the tunnel died — the default network
+     * may have simply changed. But it is a reason to *verify* the path quickly so a
+     * Wi-Fi/cell handoff is recovered in seconds instead of waiting on the liveness
+     * poll. Push-based; costs nothing while idle.
+     */
+    fun shouldVerifyOnLost(
+        sessionLive: Boolean,
+        retuning: Boolean,
+        stopRequested: Boolean,
+    ): Boolean = sessionLive && !retuning && !stopRequested
+
     fun shouldRetryOnAvailable(
         waiting: Boolean,
         stopRequested: Boolean,

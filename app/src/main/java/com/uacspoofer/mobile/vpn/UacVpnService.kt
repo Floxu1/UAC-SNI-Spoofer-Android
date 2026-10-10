@@ -221,7 +221,14 @@ class UacVpnService : VpnService() {
         val interruptedRouteProbeId = activeRouteProbeId
         routeProbeJob?.cancel()
         serviceScope.cancel()
-        runBlocking(Dispatchers.IO) { runCatching { cleanupRoute() } }
+        if (ConnectionStateStore.state.value != ConnectionState.ERROR) {
+            ConnectionStateStore.markDisconnected()
+        }
+        Thread({
+            runBlocking {
+                runCatching { cleanupRoute() }
+            }
+        }, "uac-vpn-teardown").start()
         interruptedRouteProbeId?.let {
             RouteMtuProbeCoordinator.unregisterCancellation(it)
             RouteMtuProbeCoordinator.fail(it, CancellationException("VPN service stopped"))
@@ -229,9 +236,6 @@ class UacVpnService : VpnService() {
         activeRouteProbeId = null
         activeRouteProbeStartId = null
         routeProbeJob = null
-        if (ConnectionStateStore.state.value != ConnectionState.ERROR) {
-            ConnectionStateStore.markDisconnected()
-        }
         super.onDestroy()
     }
 
@@ -1457,22 +1461,6 @@ class UacVpnService : VpnService() {
                     if (powCoordinator.isAwaitingNetworkRestore() || powCoordinator.isRetuning()) {
                         nextDelayMs = 2_000L
                         continue
-                    }
-                    if (!activeCoreRunning()) {
-                        AppLogRepository.warning(
-                            LogSource.POW,
-                            "UAC PoW path dropped; refreshing behind the VPN",
-                        )
-                        val recovered = runCatching {
-                            powCoordinator.recoverBehindTun("engine process exited")
-                        }.getOrDefault(false)
-                        if (recovered) {
-                            nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
-                            continue
-                        }
-                        AppLogRepository.warning(LogSource.POW, "UAC PoW engine process exited; recovering")
-                        scheduleRuntimeRecovery(token, "UAC PoW engine process exited", penalizeCandidate = false)
-                        return@launch
                     }
                     nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
                     continue

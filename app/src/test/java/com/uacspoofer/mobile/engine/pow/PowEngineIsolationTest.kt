@@ -46,7 +46,7 @@ class PowEngineIsolationTest {
     @Test
     fun outerAutoTriesWireguardThenMasqueThenWow() {
         val auto = PowCoreConfig.candidates(PowEngineSettings.DEFAULT)
-        assertEquals(listOf("wireguard", "masque", "gool"), auto)
+        assertEquals(listOf("masque", "gool", "wireguard"), auto)
         assertEquals(
             listOf("masque"),
             PowCoreConfig.candidates(PowEngineSettings(outerTransport = "masque")),
@@ -54,7 +54,7 @@ class PowEngineIsolationTest {
         assertEquals("MASQUE", PowCoreConfig.outerLabel("masque"))
         assertEquals("WireGuard", PowCoreConfig.outerLabel("wireguard"))
         assertEquals("WoW", PowCoreConfig.outerLabel("gool"))
-        assertFalse(PowEngineSettings.DEFAULT.h2Fragmentation)
+        assertTrue(PowEngineSettings.DEFAULT.h2Fragmentation)
         assertTrue(PowEngineSettings.DEFAULT.optimizedMode)
         assertFalse(PowEngineSettings(optimizedMode = false).validated().optimizedMode)
         assertEquals(PowCoreConfig.SCAN_BALANCED, PowEngineSettings.DEFAULT.scanMode)
@@ -72,17 +72,46 @@ class PowEngineIsolationTest {
         assertTrue(PowCoreConfig.outerBudgetMs("masque", scanMode = "thorough") > PowCoreConfig.outerBudgetMs("masque", scanMode = "balanced"))
         assertTrue(PowCoreConfig.outerBudgetMs("masque", scanMode = "turbo") < PowCoreConfig.outerBudgetMs("masque", scanMode = "balanced"))
         assertTrue(PowCoreConfig.outerBudgetMs("wireguard", retune = true) < PowCoreConfig.outerBudgetMs("wireguard", scanMode = "turbo"))
+        val irancell = PowCoreConfig.outerPlan(PowEngineSettings(), mci = false)
+        assertEquals(listOf("masque", "gool", "wireguard"), irancell.protocols)
+        assertEquals("h3", irancell.masqueTransport)
+        assertEquals("v4", irancell.ipFor("wireguard"))
+        val hamrah = PowCoreConfig.outerPlan(PowEngineSettings(), mci = true)
+        assertEquals(listOf("masque"), hamrah.protocols)
+        assertEquals("both", hamrah.ipFor("masque"))
+        assertEquals("both", hamrah.ipFor("wireguard"))
+        assertEquals("h2", hamrah.masqueTransport)
+        assertTrue(hamrah.fixedOrder)
+        val h2 = PowCoreConfig.outerPlan(PowEngineSettings(linkRecipe = PowCoreConfig.RECIPE_MASQUE_H2), mci = false)
+        assertEquals(listOf("masque"), h2.protocols)
+        assertEquals("both", h2.ipFor("masque"))
+        assertFalse(h2.fragment)
+        assertTrue(
+            PowCoreConfig.outerPlan(
+                PowEngineSettings(linkRecipe = PowCoreConfig.RECIPE_MASQUE_H2_SPLIT),
+                mci = false,
+            ).fragment,
+        )
+        assertEquals(PowCoreConfig.RECIPE_AUTO, PowEngineSettings(linkRecipe = "nope").validated().linkRecipe)
+        assertEquals(PowCoreConfig.FIREWALL_AUTO, PowEngineSettings(firewallProfile = "mtn").validated().firewallProfile)
+        assertTrue(PowEngineSettings.DEFAULT.chainPsiphon)
+        assertEquals(PowCoreConfig.KEY_ECH, PowEngineSettings.DEFAULT.keyFetch)
+        val parsed = PowIdentityStatus.parseTomlScalars(
+            "device_id = \"abc\"\ncert_issued_at = 10\nwg_private_key = \"AAAA\"\n",
+        )
+        assertEquals("abc", parsed["device_id"])
+        assertEquals("10", parsed["cert_issued_at"])
         assertEquals(36_000L, PowCoreConfig.outerBudgetMs("wireguard"))
-        assertEquals(45_000L, PowCoreConfig.outerBudgetMs("masque"))
+        assertEquals(120_000L, PowCoreConfig.outerBudgetMs("masque"))
         assertEquals(55_000L, PowCoreConfig.outerBudgetMs("wireguard", scanMode = "thorough"))
-        assertEquals(75_000L, PowCoreConfig.outerBudgetMs("masque", scanMode = "thorough"))
+        assertEquals(180_000L, PowCoreConfig.outerBudgetMs("masque", scanMode = "thorough"))
     }
 
     @Test
     fun psiphonStrategiesPreferDirectOverMeekThenFallback() {
-        assertEquals("F,A", PowPsiphonProtocols.signature())
+        assertEquals("A,F", PowPsiphonProtocols.signature())
         assertEquals(2, PowPsiphonProtocols.LADDER.size)
-        assertEquals(PowPsiphonProtocols.FAST_DIRECT, PowPsiphonProtocols.LADDER[0].preferredProtocols)
+        assertEquals(PowPsiphonProtocols.FRONTED, PowPsiphonProtocols.LADDER[0].preferredProtocols)
         assertTrue(PowPsiphonProtocols.CHAINABLE.containsAll(PowPsiphonProtocols.FAST_DIRECT))
         assertTrue(PowPsiphonProtocols.CHAINABLE.containsAll(listOf("FRONTED-MEEK-OSSH", "TLS-OSSH", "OSSH")))
         assertFalse(PowPsiphonProtocols.FAST_DIRECT.any { it.contains("MEEK") })

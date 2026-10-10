@@ -43,7 +43,11 @@ data class ProxyProfile(
     fun runtimeIdentity(settings: AdvancedSettingsData): RuntimeProxyIdentity =
         if (usesAdvancedSettingsIdentity()) {
             RuntimeProxyIdentity(
-                protocol = ProxyProtocol.TROJAN,
+                protocol = if (settings.outboundProtocol.equals("vless", ignoreCase = true)) {
+                    ProxyProtocol.VLESS
+                } else {
+                    ProxyProtocol.TROJAN
+                },
                 credential = settings.trojanPassword,
                 network = settings.transportNetwork,
                 security = settings.transportSecurity,
@@ -94,17 +98,17 @@ data class ProxyProfile(
         val UAC_SNI_BUILT_IN = ProxyProfile(
             id = BUILT_IN_ID,
             name = "UAC SNI built-in",
-            protocol = ProxyProtocol.TROJAN,
-            credential = "humanity",
-            serverHost = "www.ignitelimit.com",
+            protocol = ProxyProtocol.VLESS,
+            credential = "4e4f1f70-5e56-4a76-bb9d-db087f4690c4",
+            serverHost = "jp3.yohototo.top",
             serverPort = 443,
             network = "ws",
             security = "tls",
-            sni = "www.ignitelimit.com",
-            host = "www.ignitelimit.com",
-            path = "/assignment",
+            sni = "jp3.yohototo.top",
+            host = "jp3.yohototo.top",
+            path = "/tyxyws",
             alpn = "http/1.1",
-            fingerprint = "chrome",
+            fingerprint = "unsafe",
             country = CountryMetadata.resolve("FR", "France"),
             isBuiltIn = true,
         )

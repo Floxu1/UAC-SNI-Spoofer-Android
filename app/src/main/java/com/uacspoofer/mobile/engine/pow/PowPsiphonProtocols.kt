@@ -57,17 +57,6 @@ internal object PowPsiphonProtocols {
 
     val LADDER: List<PowPsiphonStrategy> = listOf(
         PowPsiphonStrategy(
-            name = "F",
-            label = "direct through WARP",
-            timeoutSeconds = 28,
-            preferredProtocols = FAST_DIRECT,
-        ) { config ->
-            config.put("InitialLimitTunnelProtocols", JSONArray(FAST_DIRECT))
-            config.put("InitialLimitTunnelProtocolsCandidateCount", 16)
-            config.put("ConnectionWorkerPoolSize", 16)
-            config.put("NetworkLatencyMultiplier", 1.0)
-        },
-        PowPsiphonStrategy(
             name = "A",
             label = "domain-fronted (CDN)",
             timeoutSeconds = 40,
@@ -79,6 +68,17 @@ internal object PowPsiphonProtocols {
             config.put("ConnectionWorkerPoolSize", 12)
             config.put("NetworkLatencyMultiplier", 1.5)
         },
+        PowPsiphonStrategy(
+            name = "F",
+            label = "direct through WARP",
+            timeoutSeconds = 28,
+            preferredProtocols = FAST_DIRECT,
+        ) { config ->
+            config.put("InitialLimitTunnelProtocols", JSONArray(FAST_DIRECT))
+            config.put("InitialLimitTunnelProtocolsCandidateCount", 16)
+            config.put("ConnectionWorkerPoolSize", 16)
+            config.put("NetworkLatencyMultiplier", 1.0)
+        },
     )
 
     fun signature(): String = LADDER.joinToString(",") { it.name }
@@ -89,6 +89,7 @@ internal object PowPsiphonProtocols {
         preferredRegion: String?,
         strategy: PowPsiphonStrategy,
         optimizedMode: Boolean = true,
+        direct: Boolean = false,
     ): String {
         val config = JSONObject().apply {
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
@@ -113,7 +114,9 @@ internal object PowPsiphonProtocols {
             put("DNSResolverPreferredAlternateServers", JSONArray(ALTERNATE_DNS))
             put("DNSResolverPreferAlternateServerProbability", if (optimizedMode) 1.0 else 0.35)
             put("DNSResolverAttemptsPerPreferredServer", if (optimizedMode) 2 else 1)
-            put("UpstreamProxyURL", "socks5://127.0.0.1:${PowCoreConfig.CHAIN_SOCKS_PORT}")
+            if (!direct) {
+                put("UpstreamProxyURL", "socks5://127.0.0.1:${PowCoreConfig.CHAIN_SOCKS_PORT}")
+            }
             put("InproxyEnabled", false)
             put("InproxyAllowClient", false)
         }
@@ -126,7 +129,38 @@ internal object PowPsiphonProtocols {
             config.remove("InitialLimitTunnelProtocolsCandidateCount")
             config.remove("LimitTunnelProtocols")
         }
-        config.put("LimitTunnelProtocols", JSONArray(CHAINABLE))
+        if (direct) {
+            // The WARP outer hop did not come up. Plain OSSH and SSH sit on
+            // ports this carrier drops, and if they share the worker pool they
+            // burn the whole timeout before a fronted meek dial starts. The
+            // fronted strategy is meek only. The following strategy is TLS and
+            // Shadowsocks, which can finish a handshake on 443. Name lookup
+            // stays on the network resolver: 5353 and 9953 are dropped.
+            val meekOnly = strategy.preferredProtocols.all { it.startsWith("FRONTED-") }
+            val protocols = if (meekOnly) {
+                listOf("FRONTED-MEEK-OSSH", "FRONTED-MEEK-HTTP-OSSH")
+            } else {
+                listOf("TLS-OSSH", "SHADOWSOCKS-OSSH")
+            }
+            val selected = JSONArray(protocols)
+            config.put("LimitTunnelProtocols", selected)
+            config.put("InitialLimitTunnelProtocols", selected)
+            config.put("InitialLimitTunnelProtocolsCandidateCount", if (meekOnly) 16 else 8)
+            config.put("EstablishTunnelTimeoutSeconds", if (meekOnly) 90 else 35)
+            config.put("ConnectionWorkerPoolSize", if (meekOnly) 8 else 6)
+            config.put("DNSResolverPreferAlternateServerProbability", 0)
+            config.remove("DNSResolverPreferredAlternateServers")
+            if (meekOnly) {
+                // The Cloudflare front answers a normal ClientHello that names
+                // cdnjs.cloudflare.com and ignores one with no server name.
+                // The signed server entries disable SNI. Ask the tunnel core
+                // to put that name back on the handshake.
+                config.put("MeekTransformedHostName", "cdnjs.cloudflare.com")
+                config.put("MeekSNIServerName", "cdnjs.cloudflare.com")
+            }
+        } else {
+            config.put("LimitTunnelProtocols", JSONArray(CHAINABLE))
+        }
         val preference = config.optJSONArray("InitialLimitTunnelProtocols")
         if (preference != null) {
             val chainable = (0 until preference.length())

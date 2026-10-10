@@ -4,24 +4,28 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,22 +37,31 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.engine.pow.AetherNative
+import com.uacspoofer.mobile.engine.pow.PowPhase
+import com.uacspoofer.mobile.engine.pow.PowStatusStore
+import com.uacspoofer.mobile.logging.AppLogRepository
+import com.uacspoofer.mobile.logging.LogSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.uacspoofer.mobile.engine.pow.PowCoreConfig
+import com.uacspoofer.mobile.engine.pow.PowEngineSettings
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.pow.PowIdentityStatus
 import com.uacspoofer.mobile.engine.pow.PowLearnedPathSnapshot
 import com.uacspoofer.mobile.engine.pow.PowPathMemory
 import com.uacspoofer.mobile.ui.theme.UacColors
 
-private data class PowTransportChoice(
-    val id: String,
-    val title: String,
-    val subtitle: String,
-)
+private data class PowMenuChoice(val id: String, val title: String)
 
 @Composable
 internal fun PowSettingsScreen(onBack: () -> Unit) {
@@ -76,37 +89,48 @@ private fun PowSettingsPanel() {
     val context = LocalContext.current
     val store = remember(context) { PowEngineStore.get(context) }
     val settings by store.settings.collectAsStateWithLifecycle()
+    val lastConnect by store.lastConnect.collectAsStateWithLifecycle()
+    val powStatus by PowStatusStore.status.collectAsStateWithLifecycle()
+    val sessionUp = powStatus.phase == PowPhase.CONNECTED
+    val cleanPeers = remember(settings.linkRecipe, sessionUp) {
+        PowCoreConfig.cleanH2Peers(context)
+    }
     val accent = UacColors.DisconnectedBlue
-    val choices = listOf(
-        PowTransportChoice(
-            PowCoreConfig.OUTER_AUTO,
-            homeText("Auto (Recommended)", "خودکار (پیشنهادی)"),
-            homeText("Let the app pick the best one", "بسپار به خودش، بهترین راه رو پیدا می‌کنه"),
-        ),
-        PowTransportChoice(
-            "masque",
-            "MASQUE",
-            homeText("Often the fastest", "معمولا سریع‌تره"),
-        ),
-        PowTransportChoice(
-            "wireguard",
-            "WireGuard",
-            homeText("Works on most networks", "روی بیشتر اینترنت‌ها خوب جواب میده"),
-        ),
-        PowTransportChoice(
-            "gool",
-            "WoW",
-            homeText("Extra layer if others fail", "اگه بقیه وصل نشد اینو امتحان کن"),
-        ),
+    val firewalls = listOf(
+        PowMenuChoice(PowCoreConfig.FIREWALL_AUTO, homeText("Automatic", "خودکار")),
+        PowMenuChoice(PowCoreConfig.FIREWALL_IRANCELL, homeText("Irancell", "ایرانسل")),
+        PowMenuChoice(PowCoreConfig.FIREWALL_MCI, homeText("Hamrah Aval", "همراه اول")),
+    )
+    val recipes = listOf(
+        PowMenuChoice(PowCoreConfig.RECIPE_AUTO, homeText("Automatic", "خودکار")),
+        PowMenuChoice(PowCoreConfig.RECIPE_WARP_V6, "WireGuard · IPv6"),
+        PowMenuChoice(PowCoreConfig.RECIPE_WARP_ANY, "WireGuard · IPv4 + IPv6"),
+        PowMenuChoice(PowCoreConfig.RECIPE_WOW_V6, "WARP-in-WARP · IPv6"),
+        PowMenuChoice(PowCoreConfig.RECIPE_WOW_ANY, "WARP-in-WARP · IPv4 + IPv6"),
+        PowMenuChoice(PowCoreConfig.RECIPE_MASQUE_H2, "MASQUE · HTTP/2"),
+        PowMenuChoice(PowCoreConfig.RECIPE_MASQUE_H2_SAVED, "MASQUE · HTTP/2 · saved"),
+        PowMenuChoice(PowCoreConfig.RECIPE_MASQUE_H3, "MASQUE · HTTP/3"),
+        PowMenuChoice(PowCoreConfig.RECIPE_MASQUE_H2_SPLIT, "MASQUE · HTTP/2 · split"),
+    )
+    val scans = listOf(
+        PowMenuChoice(PowCoreConfig.SCAN_TURBO, homeText("Fast", "سریع")),
+        PowMenuChoice(PowCoreConfig.SCAN_BALANCED, homeText("Balanced", "بالانس")),
+        PowMenuChoice(PowCoreConfig.SCAN_THOROUGH, homeText("Deep", "عمیق")),
+    )
+    val exits = listOf(
+        PowMenuChoice("chain", homeText("WARP, then Psiphon", "وارپ، بعد سایفون")),
+        PowMenuChoice("warp", homeText("WARP only", "فقط وارپ")),
+    )
+    val fetches = listOf(
+        PowMenuChoice(PowCoreConfig.KEY_ECH, "ECH"),
+        PowMenuChoice(PowCoreConfig.KEY_FRAGMENT, homeText("Split hello", "قطع سلام")),
+        PowMenuChoice(PowCoreConfig.KEY_EXTERNAL, homeText("Current network", "شبکه فعلی")),
     )
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (!AetherNative.available) {
             Text(
-                homeText(
-                    AetherNative.unavailableReason,
-                    "این گوشی از UAC PoW پشتیبانی نمی‌کنه.",
-                ),
+                homeText(AetherNative.unavailableReason, "این گوشی از UAC PoW پشتیبانی نمی‌کنه."),
                 color = UacColors.ErrorRed,
                 fontSize = 12.5.sp,
                 lineHeight = 18.sp,
@@ -114,122 +138,105 @@ private fun PowSettingsPanel() {
                     .fillMaxWidth()
                     .background(UacColors.ErrorRed.copy(alpha = 0.08f), ToolCardShape)
                     .border(1.dp, UacColors.ErrorRed.copy(alpha = 0.24f), ToolCardShape)
-                    .padding(14.dp),
+                    .padding(12.dp),
             )
         }
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(ToolCardBrush, ToolCardShape)
-                .border(1.dp, Color.White.copy(alpha = 0.08f), ToolCardShape)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            SectionLabel(homeText("Connection mode", "روش اتصال"))
-            Text(
-                homeText(
-                    "Auto is best for most people. It tries each way until one works. Pick one by hand only if you know what you're doing.",
-                    "خودکار برای بیشتر آدما بهترینه. خودش دونه دونه امتحان می‌کنه تا وصل بشه. فقط اگه می‌دونی داری چی کار می‌کنی دستی انتخاب کن.",
-                ),
-                color = UacColors.TextSecondary,
-                fontSize = 12.sp,
-                lineHeight = 18.sp,
-                modifier = Modifier.fillMaxWidth(),
+        SettingsCard {
+            SectionLabel(homeText("Connection", "اتصال"))
+            PowDropField(
+                label = homeText("Firewall", "فایروال"),
+                choices = firewalls,
+                selectedId = settings.firewallProfile,
+                accent = accent,
+                onSelect = { store.save(settings.copy(firewallProfile = it)) },
             )
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                choices.chunked(2).forEach { row ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        row.forEach { choice ->
-                            PowTransportCard(
-                                title = choice.title,
-                                subtitle = choice.subtitle,
-                                selected = settings.outerTransport == choice.id,
-                                accent = accent,
-                                onClick = { store.save(settings.copy(outerTransport = choice.id)) },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-                    }
-                }
-            }
-            Text(
-                homeText("Search", "سرچ"),
-                color = UacColors.TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.fillMaxWidth(),
+            PowDropField(
+                label = homeText("Method", "روش"),
+                choices = recipes,
+                selectedId = settings.linkRecipe,
+                accent = accent,
+                onSelect = { store.save(settings.copy(linkRecipe = it)) },
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                listOf(
-                    PowCoreConfig.SCAN_TURBO to homeText("Fast", "سریع"),
-                    PowCoreConfig.SCAN_BALANCED to homeText("Balanced", "بالانس"),
-                    PowCoreConfig.SCAN_THOROUGH to homeText("Deep", "عمیق"),
-                ).forEach { (id, label) ->
-                    val selected = settings.scanMode == id
-                    Text(
-                        text = label,
-                        color = if (selected) Color.White else UacColors.TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(if (selected) accent else Color.White.copy(alpha = 0.04f))
-                            .border(
-                                1.dp,
-                                if (selected) accent else Color.White.copy(alpha = 0.12f),
-                                RoundedCornerShape(11.dp),
-                            )
-                            .clickable { store.save(settings.copy(scanMode = id)) }
-                            .padding(vertical = 8.dp),
+            Text(
+                if (settings.linkRecipe == PowCoreConfig.RECIPE_AUTO && sessionUp && lastConnect.protocol.isNotBlank()) {
+                    homeText("Connected with", "وصل شد با") + " " + lastConnect.describe()
+                } else if (settings.linkRecipe == PowCoreConfig.RECIPE_AUTO) {
+                    homeText(
+                        "After a connect, the mode that came up is shown here.",
+                        "بعد از وصل، روشی که بالا آمده اینجا می‌آید.",
                     )
-                }
-            }
-            Text(
-                homeText("Only the first connect.", "فقط وصل اول."),
-                color = UacColors.TextSecondary,
-                fontSize = 11.sp,
+                } else {
+                    recipeHint(settings.linkRecipe)
+                },
+                color = if (settings.linkRecipe == PowCoreConfig.RECIPE_AUTO && sessionUp && lastConnect.protocol.isNotBlank()) {
+                    UacColors.ConnectedGreen
+                } else {
+                    UacColors.TextSecondary
+                },
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                style = plainOrder,
                 modifier = Modifier.fillMaxWidth(),
             )
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(ToolCardBrush, ToolCardShape)
-                .border(1.dp, Color.White.copy(alpha = 0.08f), ToolCardShape)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-        ) {
+            Text(
+                if (cleanPeers.isEmpty()) {
+                    homeText(
+                        "Clean HTTP/2 list is empty. A connect that stays up adds the address.",
+                        "لیست آی‌پی تمیز HTTP/2 خالی است. وصلی که بالا بماند آدرس را اضافه می‌کند.",
+                    )
+                } else {
+                    homeText("Clean HTTP/2 list", "لیست آی‌پی تمیز HTTP/2") +
+                        ": " + cleanPeers.joinToString(", ")
+                },
+                color = UacColors.TextSecondary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                style = plainOrder,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            PowDropField(
+                label = homeText("Search", "سرچ"),
+                choices = scans,
+                selectedId = settings.scanMode,
+                accent = accent,
+                onSelect = { store.save(settings.copy(scanMode = it)) },
+            )
+            PowDropField(
+                label = homeText("Exit", "خروجی"),
+                choices = exits,
+                selectedId = if (settings.chainPsiphon) "chain" else "warp",
+                accent = accent,
+                onSelect = { store.save(settings.copy(chainPsiphon = it == "chain")) },
+            )
+            Text(
+                if (settings.chainPsiphon) {
+                    homeText(
+                        "Psiphon carries the exit. Plain WARP or MASQUE HTTP/2 suits this.",
+                        "Psiphon بعد از WARP. برای این حالت WireGuard یا MASQUE HTTP/2.",
+                    )
+                } else {
+                    homeText(
+                        "Traffic leaves through WARP. Psiphon stays off.",
+                        "WARP تنها. Psiphon خاموش می‌ماند.",
+                    )
+                },
+                color = UacColors.TextSecondary,
+                fontSize = 11.5.sp,
+                lineHeight = 16.sp,
+                style = plainOrder,
+                modifier = Modifier.fillMaxWidth(),
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text(
-                        homeText("Optimized mode", "حالت بهینه شده"),
-                        color = UacColors.TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text(
-                        homeText(
-                            "Uses less radio after connect. Turn this off if streams stutter.",
-                            "بعد از وصل رادیو کمتر درگیر می‌شود. اگر استریم قطع‌قطع شد خاموشش کن.",
-                        ),
-                        color = UacColors.TextSecondary,
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                Text(
+                    homeText("Optimized mode", "حالت بهینه"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
                 Switch(
                     checked = settings.optimizedMode,
                     onCheckedChange = { store.save(settings.copy(optimizedMode = it)) },
@@ -239,76 +246,430 @@ private fun PowSettingsPanel() {
                     ),
                 )
             }
-            Text(
-                homeText(
-                    "Will be used next time you connect.",
-                    "دفعه بعد که وصل بشی اعمال میشه.",
-                ),
-                color = UacColors.TextSecondary,
-                fontSize = 11.5.sp,
-                lineHeight = 17.sp,
+        }
+        PowKeyCard(store = store, settings = settings, fetches = fetches, accent = accent)
+        PowLearnedPathsCard(store = store, accent = accent)
+    }
+}
+
+@Composable
+private fun recipeHint(recipe: String): String = when (recipe) {
+    PowCoreConfig.RECIPE_WARP_V6 -> homeText(
+        "WireGuard on IPv6 only. It stops quickly if this phone has no IPv6.",
+        "WireGuard فقط IPv6. اگر IPv6 نباشد زود رد می‌شود.",
+    )
+    PowCoreConfig.RECIPE_WARP_ANY -> homeText(
+        "WireGuard on IPv4 and IPv6.",
+        "WireGuard روی IPv4 و IPv6.",
+    )
+    PowCoreConfig.RECIPE_WOW_V6 -> homeText(
+        "WARP inside WARP, IPv6 only.",
+        "WARP-in-WARP فقط IPv6.",
+    )
+    PowCoreConfig.RECIPE_WOW_ANY -> homeText(
+        "WARP inside WARP, either IP type.",
+        "WARP-in-WARP روی IPv4 و IPv6.",
+    )
+    PowCoreConfig.RECIPE_MASQUE_H2 -> homeText(
+        "Saved clean addresses first, then an HTTP/2 scan that adds any new one.",
+        "اول آی‌پی‌های تمیز ذخیره‌شده، بعد اسکن HTTP/2. آی‌پی جدید به لیست اضافه می‌شود.",
+    )
+    PowCoreConfig.RECIPE_MASQUE_H2_SAVED -> homeText(
+        "Only the saved clean addresses. No scan. If this fails, the saved address is the stuck stage.",
+        "فقط آی‌پی‌های تمیز ذخیره‌شده. اسکن نمی‌شود. اگر این رد شد، گیر همان آدرس ذخیره‌شده است.",
+    )
+    PowCoreConfig.RECIPE_MASQUE_H3 -> homeText(
+        "MASQUE over HTTP/3 and IPv4.",
+        "MASQUE HTTP/3 روی IPv4.",
+    )
+    PowCoreConfig.RECIPE_MASQUE_H2_SPLIT -> homeText(
+        "MASQUE over HTTP/2 with the ClientHello split.",
+        "MASQUE HTTP/2 با سلام قطع‌شده.",
+    )
+    else -> homeText(
+        "Irancell: MASQUE HTTP/3 then WARP. Hamrah Aval: MASQUE HTTP/2, saved addresses first.",
+        "ایرانسل: MASQUE HTTP/3 بعد WARP. همراه اول: MASQUE HTTP/2، اول آی‌پی تمیز.",
+    )
+}
+
+@Composable
+private fun SettingsCard(content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ToolCardBrush, ToolCardShape)
+            .border(1.dp, Color.White.copy(alpha = 0.08f), ToolCardShape)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        content = { content() },
+    )
+}
+
+@Composable
+private fun PowDropField(
+    label: String,
+    choices: List<PowMenuChoice>,
+    selectedId: String,
+    accent: Color,
+    onSelect: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    val selected = choices.firstOrNull { it.id == selectedId } ?: choices.first()
+    val shape = RoundedCornerShape(12.dp)
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            label,
+            color = UacColors.TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 6.dp),
-            )
+                    .clip(shape)
+                    .background(Color.White.copy(alpha = 0.04f))
+                    .border(1.dp, if (open) accent else Color.White.copy(alpha = 0.12f), shape)
+                    .clickable { open = true }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    selected.title,
+                    color = UacColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = plainOrder,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    if (open) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                    contentDescription = null,
+                    tint = UacColors.TextSecondary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            DropdownMenu(
+                expanded = open,
+                onDismissRequest = { open = false },
+                modifier = Modifier
+                    .widthIn(min = 220.dp)
+                    .background(Color(0xFF142231)),
+            ) {
+                choices.forEach { choice ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                choice.title,
+                                color = if (choice.id == selected.id) Color.White else UacColors.TextSecondary,
+                                fontSize = 13.sp,
+                                fontWeight = if (choice.id == selected.id) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = plainOrder,
+                            )
+                        },
+                        onClick = {
+                            open = false
+                            if (choice.id != selected.id) onSelect(choice.id)
+                        },
+                    )
+                }
+            }
         }
+    }
+}
 
-        PowLearnedPathsCard(store = store, accent = accent)
-        Column(
+@Composable
+private fun PowKeyCard(
+    store: PowEngineStore,
+    settings: PowEngineSettings,
+    fetches: List<PowMenuChoice>,
+    accent: Color,
+) {
+    val context = LocalContext.current
+    var revision by remember { mutableIntStateOf(0) }
+    val identity = remember(revision) {
+        runCatching { PowIdentityStatus.read(context) }.getOrDefault(PowIdentityStatus.EMPTY)
+    }
+    var expanded by remember { mutableStateOf(!identity.enrolled) }
+    var note by remember { mutableStateOf("") }
+    var fetching by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val fetchingLabel = homeText("Asking for the key…", "دارم کلید را می‌گیرم…")
+    val busyLabel = homeText("Disconnect PoW first.", "اول اتصال PoW را قطع کن.")
+    val fetchedLabel = homeText("Key saved.", "کلید ذخیره شد.")
+    val failedLabel = homeText("Key request failed.", "گرفتن کلید نشد.")
+    val certAskingLabel = homeText("Asking for a certificate…", "دارم گواهی تازه می‌گیرم…")
+    val certButtonLabel = homeText("Get a new certificate", "الان گواهی تازه بگیر")
+    val certSavedLabel = homeText("New certificate saved.", "گواهی تازه ذخیره شد.")
+    val certFailedLabel = homeText("Certificate request failed.", "گرفتن گواهی نشد.")
+    val status = when {
+        identity.enrolled && identity.masqueCertificate -> homeText("Saved", "گرفته شده")
+        identity.enrolled -> homeText("WARP key only", "فقط کلید وارپ")
+        identity.present -> homeText("Incomplete", "ناقص")
+        else -> homeText("Not saved", "گرفته نشده")
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(ToolCardBrush, ToolCardShape)
+            .border(1.dp, Color.White.copy(alpha = 0.08f), ToolCardShape),
+    ) {
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(ToolCardBrush, ToolCardShape)
-                .border(1.dp, Color.White.copy(alpha = 0.08f), ToolCardShape)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SectionLabel(homeText("Can't connect?", "وصل نمیشه؟"))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+            Column(Modifier.weight(1f)) {
+                Text(
+                    homeText("Account key", "کلید حساب"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    status,
+                    color = if (identity.enrolled) UacColors.ConnectedGreen else UacColors.TextSecondary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                contentDescription = null,
+                tint = UacColors.TextSecondary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text(
-                        homeText("Try harder to get through", "سخت‌تر تلاش کن رد بشی"),
-                        color = UacColors.TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                if (!identity.present) {
                     Text(
                         homeText(
-                            "Turn this on only if nothing connects. It sends data in smaller pieces to get past filters, but it will be a bit slower. Only works with MASQUE.",
-                            "فقط وقتی هیچ‌جوره وصل نمیشی روشنش کن. اطلاعات رو ریز ریز می‌فرسته تا از فیلتر رد بشه ولی یکم کندتر و پینگش بیشتر میشه. فقط روی MASQUE جواب میده.",
+                            "The next connect asks for a key. One key lasts about a year.",
+                            "وصل بعدی کلید را می‌گیرد. یک کلید حدود یک سال می‌ماند.",
                         ),
                         color = UacColors.TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 17.sp,
-                        modifier = Modifier.fillMaxWidth(),
                     )
+                } else {
+                    if (identity.deviceId.isNotBlank()) {
+                        PowMemoryLine(homeText("Device", "دستگاه"), shortId(identity.deviceId))
+                    }
+                    if (identity.ipv4.isNotBlank()) PowMemoryLine("IPv4", identity.ipv4)
+                    if (identity.ipv6.isNotBlank()) PowMemoryLine("IPv6", identity.ipv6)
+                    if (identity.endpoint.isNotBlank()) {
+                        PowMemoryLine(homeText("Endpoint", "آدرس"), identity.endpoint)
+                    }
+                    if (identity.organization.isNotBlank()) {
+                        PowMemoryLine(homeText("Org", "سازمان"), identity.organization)
+                    }
+                    PowMemoryLine(
+                        homeText("MASQUE cert", "گواهی MASQUE"),
+                        if (identity.masqueCertificate) {
+                            identity.issuedLabel().ifBlank { homeText("Yes", "دارد") }
+                        } else {
+                            homeText("Missing", "ندارد")
+                        },
+                    )
+                    if (identity.peerPublicPrefix.isNotBlank()) {
+                        PowMemoryLine(homeText("Peer", "همتا"), identity.peerPublicPrefix)
+                    }
                 }
-                Switch(
-                    checked = settings.h2Fragmentation,
-                    onCheckedChange = { store.save(settings.copy(h2Fragmentation = it)) },
-                    colors = SwitchDefaults.colors(
-                        checkedTrackColor = accent,
-                        checkedThumbColor = Color.White,
+                Text(
+                    homeText(
+                        "Gets the key from 188.114.97.6 and enrolls the MASQUE certificate on it.",
+                        "کلید را از 188.114.97.6 می‌گیرد و گواهی MASQUE را روی همان کلید می‌سازد.",
                     ),
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    style = plainOrder,
                 )
+                Text(
+                    if (fetching) fetchingLabel else homeText("Get key now", "الان کلید را بگیر"),
+                    color = if (fetching) UacColors.TextSecondary else Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (fetching) Color.White.copy(alpha = 0.06f) else accent)
+                        .clickable(enabled = !fetching) {
+                            if (AetherNative.isRunning()) {
+                                note = busyLabel
+                                return@clickable
+                            }
+                            fetching = true
+                            note = fetchingLabel
+                            scope.launch {
+                                val seen = mutableSetOf<String>()
+                                fun flushKeyLog() {
+                                    AetherNative.lastLog().lineSequence().forEach { line ->
+                                        if (line.startsWith("Key:") && seen.add(line)) {
+                                            AppLogRepository.info(LogSource.POW, line.take(500))
+                                        }
+                                    }
+                                }
+                                val failure = withContext(Dispatchers.IO) {
+                                    coroutineScope {
+                                        val work = async {
+                                            runCatching {
+                                            AetherNative.prepare(
+                                                PowCoreConfig.keyRequestJson(context, settings, "masque"),
+                                            )
+                                            }.exceptionOrNull()
+                                        }
+                                        while (work.isActive) {
+                                            flushKeyLog()
+                                            delay(400)
+                                        }
+                                        flushKeyLog()
+                                        work.await()
+                                    }
+                                }
+                                flushKeyLog()
+                                fetching = false
+                                revision += 1
+                                note = if (failure == null) {
+                                    fetchedLabel
+                                } else {
+                                    AetherNative.lastError().ifBlank { failure.message ?: failedLabel }
+                                }
+                            }
+                        }
+                        .padding(vertical = 10.dp),
+                )
+                Text(
+                    homeText(
+                        "Makes a new MASQUE certificate on the key you already have. Connect after it says saved.",
+                        "روی کلیدی که هست یک گواهی تازه می‌سازد. وقتی نوشت ذخیره شد، بعدش وصل شو.",
+                    ),
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    style = plainOrder,
+                )
+                Text(
+                    if (fetching) certAskingLabel else certButtonLabel,
+                    color = if (fetching) UacColors.TextSecondary else Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (fetching) Color.White.copy(alpha = 0.06f) else accent)
+                        .clickable(enabled = !fetching) {
+                            if (AetherNative.isRunning()) {
+                                note = busyLabel
+                                return@clickable
+                            }
+                            fetching = true
+                            note = certAskingLabel
+                            scope.launch {
+                                val seen = mutableSetOf<String>()
+                                fun flushCertLog() {
+                                    AetherNative.lastLog().lineSequence().forEach { line ->
+                                        if ((line.startsWith("Cert:") || line.startsWith("Key:")) && seen.add(line)) {
+                                            AppLogRepository.info(LogSource.POW, line.take(500))
+                                        }
+                                    }
+                                }
+                                val failure = withContext(Dispatchers.IO) {
+                                    coroutineScope {
+                                        val work = async {
+                                            runCatching {
+                                                AetherNative.prepare(PowCoreConfig.certRenewJson(context, settings))
+                                            }.exceptionOrNull()
+                                        }
+                                        while (work.isActive) {
+                                            flushCertLog()
+                                            delay(400)
+                                        }
+                                        flushCertLog()
+                                        work.await()
+                                    }
+                                }
+                                flushCertLog()
+                                fetching = false
+                                revision += 1
+                                note = if (failure == null) {
+                                    certSavedLabel
+                                } else {
+                                    AetherNative.lastError().ifBlank { failure.message ?: certFailedLabel }
+                                }
+                            }
+                        }
+                        .padding(vertical = 10.dp),
+                )
+                PowDropField(
+                    label = homeText("Next key request", "گرفتن کلید بعدی"),
+                    choices = fetches,
+                    selectedId = settings.keyFetch,
+                    accent = accent,
+                    onSelect = { store.save(settings.copy(keyFetch = it)) },
+                )
+                Text(
+                    when (settings.keyFetch) {
+                        PowCoreConfig.KEY_FRAGMENT -> homeText(
+                            "The API name stays visible and the ClientHello is split.",
+                            "اسم API دیده می‌شود و سلام قطع می‌شود.",
+                        )
+                        PowCoreConfig.KEY_EXTERNAL -> homeText(
+                            "Turn another VPN on first, connect once, then turn that VPN off.",
+                            "اول یک وی‌پی‌ان دیگر را روشن کن، یک بار وصل شو، بعد آن را خاموش کن.",
+                        )
+                        else -> homeText(
+                            "The API name is hidden. This is the usual way through a filter.",
+                            "اسم API پنهان می‌شود. راه معمول رد شدن از فیلتر همین است.",
+                        )
+                    },
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                )
+                val deletedNote = homeText("Deleted. The next connect asks again.", "پاک شد. وصل بعدی دوباره می‌گیرد.")
+                val missingNote = homeText("No key was saved.", "کلیدی ذخیره نشده بود.")
+                Text(
+                    homeText("Delete saved key", "پاک کردن کلید ذخیره‌شده"),
+                    color = accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            val removed = PowIdentityStatus.forget(context)
+                            revision += 1
+                            note = if (removed) deletedNote else missingNote
+                        }
+                        .padding(vertical = 4.dp),
+                )
+                if (note.isNotBlank()) {
+                    Text(note, color = UacColors.ConnectedGreen, fontSize = 12.sp)
+                }
             }
-            Text(
-                homeText(
-                    "Will be used next time you connect.",
-                    "دفعه بعد که وصل بشی اعمال میشه.",
-                ),
-                color = UacColors.TextSecondary,
-                fontSize = 11.5.sp,
-                lineHeight = 17.sp,
-                modifier = Modifier.fillMaxWidth(),
-            )
         }
     }
 }
+
+private val plainOrder = androidx.compose.ui.text.TextStyle(textDirection = TextDirection.Content)
+
+private fun shortId(value: String): String =
+    if (value.length <= 18) value else value.take(8) + "…" + value.takeLast(4)
 
 @Composable
 private fun PowLearnedPathsCard(
@@ -333,7 +694,7 @@ private fun PowLearnedPathsCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { expanded = !expanded }
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -365,7 +726,7 @@ private fun PowLearnedPathsCard(
         }
         if (expanded) {
             Column(
-                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+                modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (snapshot.isEmpty) {
@@ -380,10 +741,7 @@ private fun PowLearnedPathsCard(
                     )
                 } else {
                     snapshot.globalOuter?.let { outer ->
-                        PowMemoryLine(
-                            homeText("Outer", "لایه بیرونی"),
-                            PowCoreConfig.outerLabel(outer),
-                        )
+                        PowMemoryLine(homeText("Outer", "لایه بیرونی"), PowCoreConfig.outerLabel(outer))
                     }
                     snapshot.networks.take(3).forEach { row ->
                         val outer = row.outer?.let(PowCoreConfig::outerLabel) ?: "—"
@@ -457,56 +815,6 @@ private fun PowMemoryLine(title: String, value: String) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
             textAlign = TextAlign.End,
-        )
-    }
-}
-
-@Composable
-private fun PowTransportCard(
-    title: String,
-    subtitle: String,
-    selected: Boolean,
-    accent: Color,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val persian = LocalHomePersian.current
-    val shape = RoundedCornerShape(16.dp)
-    Column(
-        modifier = modifier
-            .heightIn(min = 88.dp)
-            .clip(shape)
-            .background(if (selected) accent else Color.White.copy(alpha = 0.04f))
-            .border(
-                1.dp,
-                if (selected) accent else Color.White.copy(alpha = 0.12f),
-                shape,
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        horizontalAlignment = if (persian) Alignment.End else Alignment.Start,
-    ) {
-        Text(
-            title,
-            color = if (selected) Color.White else UacColors.TextPrimary,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            softWrap = false,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = if (persian) TextAlign.End else TextAlign.Start,
-        )
-        Text(
-            subtitle,
-            color = if (selected) Color.White.copy(alpha = 0.88f) else UacColors.TextSecondary,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = if (persian) TextAlign.End else TextAlign.Start,
         )
     }
 }

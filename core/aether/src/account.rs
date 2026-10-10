@@ -231,7 +231,7 @@ pub fn generate_masque_keypair() -> Result<MasqueKeyPair> {
 fn http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(consts::UA_REGISTER)
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| AetherError::Api(e.to_string()))
 }
@@ -439,7 +439,9 @@ where
             Ok(response) => response,
             Err(error) => {
                 last_error = AetherError::Api(format!("{label}: {error}"));
-                continue;
+                // The name is filtered: more direct attempts only delay the
+                // camouflaged route. HTTP statuses still retry above.
+                break;
             }
         };
 
@@ -516,6 +518,19 @@ fn random_android_serial() -> String {
     hex::encode(s)
 }
 
+fn api_camo() -> &'static str {
+    match std::env::var("AETHER_API_CAMO")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
+        Some("ech") => "ech",
+        Some("fragment") | Some("ff") => "fragment",
+        Some("external") | Some("direct") => "external",
+        _ => "auto",
+    }
+}
+
 fn tos_timestamp() -> String {
     chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%.3f%:z")
@@ -547,28 +562,46 @@ pub async fn register(
     let encoded =
         serde_json::to_vec(&body).map_err(|e| AetherError::Api(format!("encode: {e}")))?;
 
-    let direct = send_with_retry("registration", || {
-        let mut req = http_client()?
-            .post(&url)
-            .headers(base_headers())
-            .json(&body);
-        if let Some(jwt) = jwt {
-            req = req.header("CF-Access-Jwt-Assertion", jwt);
+    let account = match api_camo() {
+        "external" => send_with_retry("registration", || {
+            let mut req = http_client()?
+                .post(&url)
+                .headers(base_headers())
+                .json(&body);
+            if let Some(jwt) = jwt {
+                req = req.header("CF-Access-Jwt-Assertion", jwt);
+            }
+            Ok(req)
+        })
+        .await
+        .map_err(|error| AetherError::Api(format!("registration: direct route -> {error}")))?,
+        "ech" | "fragment" => {
+            fallback_call("registration", "POST", &path, Some(encoded), None, jwt).await?
         }
-        Ok(req)
-    })
-    .await;
-
-    let account = match direct {
-        Ok(account) => account,
-        Err(primary) => {
-            log::warn!("[!] registration failed over the direct route: {primary}");
-            match fallback_call("registration", "POST", &path, Some(encoded), None, jwt).await {
+        _ => {
+            let direct = send_with_retry("registration", || {
+                let mut req = http_client()?
+                    .post(&url)
+                    .headers(base_headers())
+                    .json(&body);
+                if let Some(jwt) = jwt {
+                    req = req.header("CF-Access-Jwt-Assertion", jwt);
+                }
+                Ok(req)
+            })
+            .await;
+            match direct {
                 Ok(account) => account,
-                Err(secondary) => {
-                    return Err(AetherError::Api(format!(
-                        "registration: direct route -> {primary}; camouflaged route -> {secondary}"
-                    )));
+                Err(primary) => {
+                    log::warn!("[!] registration failed over the direct route: {primary}");
+                    match fallback_call("registration", "POST", &path, Some(encoded), None, jwt).await {
+                        Ok(account) => account,
+                        Err(secondary) => {
+                            return Err(AetherError::Api(format!(
+                                "registration: direct route -> {primary}; camouflaged route -> {secondary}"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -595,45 +628,63 @@ pub async fn enroll_key(
     let encoded =
         serde_json::to_vec(&body).map_err(|e| AetherError::Api(format!("encode: {e}")))?;
 
-    let direct = send_with_retry("key enrollment", || {
-        Ok(http_client()?
-            .patch(&url)
-            .headers(base_headers())
-            .bearer_auth(token)
-            .json(&body))
-    })
-    .await;
-
-    match direct {
-        Ok(account) => Ok(account),
-        Err(primary) => {
-            log::warn!("[!] key enrollment failed over the direct route: {primary}");
-            match fallback_call(
+    match api_camo() {
+        "external" => send_with_retry("key enrollment", || {
+            Ok(http_client()?
+                .patch(&url)
+                .headers(base_headers())
+                .bearer_auth(token)
+                .json(&body))
+        })
+        .await
+        .map_err(|error| AetherError::Api(format!("key enrollment: direct route -> {error}"))),
+        "ech" | "fragment" => {
+            fallback_call(
                 "key enrollment",
                 "PATCH",
                 &path,
-                Some(encoded),
+                Some(encoded.clone()),
                 Some(token),
                 None,
             )
             .await
-            {
+        }
+        _ => {
+            let direct = send_with_retry("key enrollment", || {
+                Ok(http_client()?
+                    .patch(&url)
+                    .headers(base_headers())
+                    .bearer_auth(token)
+                    .json(&body))
+            })
+            .await;
+            match direct {
                 Ok(account) => Ok(account),
-                // Combining the two routes into one Api error used to erase the
-                // refusal. If either route got a definitive "this device is gone",
-                // that is the finding — the other route's transport failure is
-                // noise beside it, and flattening both into `Api` would send the
-                // caller back to retrying a dead identity.
-                Err(secondary) => {
-                    let combined = format!(
-                        "key enrollment: direct route -> {primary}; camouflaged route -> {secondary}"
-                    );
-                    if matches!(primary, AetherError::IdentityRefused(_))
-                        || matches!(secondary, AetherError::IdentityRefused(_))
+                Err(primary) => {
+                    log::warn!("[!] key enrollment failed over the direct route: {primary}");
+                    match fallback_call(
+                        "key enrollment",
+                        "PATCH",
+                        &path,
+                        Some(encoded),
+                        Some(token),
+                        None,
+                    )
+                    .await
                     {
-                        Err(AetherError::IdentityRefused(combined))
-                    } else {
-                        Err(AetherError::Api(combined))
+                        Ok(account) => Ok(account),
+                        Err(secondary) => {
+                            let combined = format!(
+                                "key enrollment: direct route -> {primary}; camouflaged route -> {secondary}"
+                            );
+                            if matches!(primary, AetherError::IdentityRefused(_))
+                                || matches!(secondary, AetherError::IdentityRefused(_))
+                            {
+                                Err(AetherError::IdentityRefused(combined))
+                            } else {
+                                Err(AetherError::Api(combined))
+                            }
+                        }
                     }
                 }
             }

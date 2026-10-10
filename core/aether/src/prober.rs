@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -97,9 +98,9 @@ pub const MASQUE_SEEDS: &[&str] = &[
 /// escape from a carrier that degrades UDP/443 to this range specifically.
 pub const MASQUE_VERIFIED_GATEWAYS: &[&str] = &[
     "162.159.199.1",
+    "162.159.198.1",
     "162.159.199.2",
     "162.159.198.2",
-    "162.159.198.1",
 ];
 
 pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4500, 4443, 8443, 8095];
@@ -371,7 +372,30 @@ pub async fn host_has_ipv6() -> bool {
     }
 }
 
+static PROBE_IDENTITY_REJECTIONS: AtomicU32 = AtomicU32::new(0);
+
+pub fn reset_identity_rejections() {
+    PROBE_IDENTITY_REJECTIONS.store(0, Ordering::Relaxed);
+}
+
+pub fn identity_rejections() -> u32 {
+    PROBE_IDENTITY_REJECTIONS.load(Ordering::Relaxed)
+}
+
+/// Count a probe that refused the device certificate. Timeouts and HTTP 400
+/// do not count: those say nothing about the certificate.
+pub fn note_probe_failure(error: &str) {
+    let refused = error.contains("TLSV1_ALERT_ACCESS_DENIED")
+        || error.contains("connect-ip status 401")
+        || error.contains("connect-ip status 403")
+        || (error.contains("TLS alert 49") && error.contains(quic::CONNECT_STAGE_AFTER_REQUEST));
+    if refused {
+        PROBE_IDENTITY_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<ProbeResult> {
+    reset_identity_rejections();
     let mut st = mode.strategy();
     st.concurrency = crate::sysprofile::cap_concurrency(st.concurrency);
     let timeout = st.per_probe_timeout;
@@ -436,7 +460,15 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
             item = stream.next() => {
                 match item {
                     None => break,
-                    Some(None) => continue,
+                    Some(None) => {
+                        if best.is_none() && identity_rejections() >= 2 {
+                            crate::ffi::record_log(
+                                "Certificate refused during the scan. Stopping this sweep to request a new certificate.",
+                            );
+                            break;
+                        }
+                        continue;
+                    }
                     Some(Some(pr)) => {
                         log::info!("[+] candidate ok {}:{} rtt={:?}", pr.ip, pr.port, pr.rtt);
                         if st.early_exit_first {
@@ -573,6 +605,7 @@ async fn verify_one(
                 Some(ProbeResult { ip, port, rtt })
             }
             Err(e) => {
+                note_probe_failure(&e.to_string());
                 crate::ffi::record_log(format!("Rejected {ip}:{port}: {e}"));
                 log::trace!("h2 probe {ip}:{port} -> {e}");
                 None
@@ -608,6 +641,7 @@ async fn verify_one(
             Some(ProbeResult { ip, port, rtt })
         }
         Ok(Err(e)) => {
+            note_probe_failure(&e.to_string());
             crate::ffi::record_log(format!("Rejected {ip}:{port}: {e}"));
             log::debug!("probe {ip}:{port} -> {e}");
             None

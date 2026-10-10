@@ -3,10 +3,22 @@ package com.uacspoofer.mobile.engine.pow
 /**
  * Connected-session liveness for UAC PoW.
  * Local process flags plus byte movement. No HTTP.
- * A dark idle phone is not a dead tunnel.
+ * Idle traffic (screen on or off) is not a dead tunnel.
+ * A missing process must be seen twice before reconnect.
  */
 internal object PowWatchdog {
     const val INTERVAL_MS = 30_000L
+    const val INTERVAL_SCREEN_OFF_MS = 120_000L
+
+    /**
+     * Battery: screen off + no active streams means idle — the liveness poll can
+     * stretch to [INTERVAL_SCREEN_OFF_MS]. A background stream (music/video) keeps
+     * the short interval so a dead path is still caught fast.
+     */
+    fun intervalMs(screenOn: Boolean, activeStreams: Int): Long = when {
+        !screenOn && activeStreams <= 0 -> INTERVAL_SCREEN_OFF_MS
+        else -> INTERVAL_MS
+    }
     const val SETTLE_MS = 8_000L
     const val STRIKES_BEFORE_RECONNECT = 2
 
@@ -22,21 +34,25 @@ internal object PowWatchdog {
         rxBytes: Long,
         previousTx: Long,
         previousRx: Long,
-        screenOn: Boolean,
-        idleStrikes: Int,
+        processMisses: Int,
+        stallStrikes: Int,
     ): Verdict {
-        if (!processesAlive) return Verdict.Dead("engine process exited")
+        if (!processesAlive) {
+            val next = processMisses + 1
+            val reason = "engine process exited"
+            return if (next < STRIKES_BEFORE_RECONNECT) {
+                Verdict.Strike(next, reason)
+            } else {
+                Verdict.Dead(reason)
+            }
+        }
         if (previousTx < 0L || previousRx < 0L) return Verdict.Healthy
         val downstreamMoved = rxBytes != previousRx
         val upstreamMoved = txBytes != previousTx
         if (downstreamMoved) return Verdict.Healthy
-        if (!screenOn) return Verdict.Healthy
-        val next = idleStrikes + 1
-        val reason = if (upstreamMoved) {
-            "the tunnel accepted traffic but answered nothing"
-        } else {
-            "the tunnel stopped passing traffic"
-        }
+        if (!upstreamMoved) return Verdict.Healthy
+        val next = stallStrikes + 1
+        val reason = "the tunnel accepted traffic but answered nothing"
         return if (next < STRIKES_BEFORE_RECONNECT) {
             Verdict.Strike(next, reason)
         } else {
