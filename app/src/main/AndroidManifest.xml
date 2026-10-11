@@ -70,6 +70,13 @@
             android:process=":uacpow"
             android:stopWithTask="false" />
 
+        <!-- Optional second Psiphon tunnel ("two tunnels at once"); psi is one per process. -->
+        <service
+            android:name=".engine.pow.PowPsiphonSidecarService"
+            android:exported="false"
+            android:process=":uacpow2"
+            android:stopWithTask="false" />
+
         <service
             android:name=".vpn.UacQuickSettingsTileService"
             android:exported="true"

@@ -11,6 +11,7 @@ const char* aether_last_result();
 int aether_start_json_with_tun(const char* json, int tun_fd);
 int aether_start_json(const char* json);
 int aether_stop();
+int aether_cancel_prepare();
 int aether_is_running();
 int aether_is_ready();
 const char* aether_last_error();
@@ -131,6 +132,11 @@ Java_com_uacspoofer_mobile_engine_pow_AetherNative_nativeStartProxy(JNIEnv* env,
 extern "C" JNIEXPORT jint JNICALL
 Java_com_uacspoofer_mobile_engine_pow_AetherNative_nativeStop(JNIEnv*, jobject) {
     return aether_stop();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_uacspoofer_mobile_engine_pow_AetherNative_nativeCancelPrepare(JNIEnv*, jobject) {
+    return aether_cancel_prepare();
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

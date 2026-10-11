@@ -8,6 +8,8 @@ object PowCoreConfig {
     const val SOCKS_PORT = 1819
     const val TUN_SOCKS_PORT = 1818
     const val CHAIN_SOCKS_PORT = 1820
+    // Psiphon tunnel 2 ("two tunnels at once"); 1821/1822 belong to the ghost handover.
+    const val SIDECAR_SOCKS_PORT = 1823
     const val OUTER_AUTO = "auto"
     const val DISCOVERY_CACHE = "cache"
     const val DISCOVERY_FRESH = "fresh"
@@ -88,6 +90,7 @@ object PowCoreConfig {
         put("log_level", "info")
         put("perf_profile", "high")
         put("h2_fragmentation", plan.fragment && protocol == "masque")
+        put("quic_tuned", settings.quicTuned)
         put("api_camo", settings.keyFetch)
         put("gateway", false)
     }.toString()
@@ -158,10 +161,11 @@ object PowCoreConfig {
         RECIPE_MASQUE_H2_SAVED,
     )
 
+    const val KEY_AUTO = "auto"
     const val KEY_ECH = "ech"
     const val KEY_FRAGMENT = "fragment"
     const val KEY_EXTERNAL = "external"
-    val KEY_FETCHES = setOf(KEY_ECH, KEY_FRAGMENT, KEY_EXTERNAL)
+    val KEY_FETCHES = setOf(KEY_AUTO, KEY_ECH, KEY_FRAGMENT, KEY_EXTERNAL)
 
     fun keyProtocols(recipe: String): List<String> = when (recipe) {
         RECIPE_WOW_V6, RECIPE_WOW_ANY -> listOf("wireguard", "gool")
@@ -180,7 +184,7 @@ object PowCoreConfig {
             ),
         )
         json.put("protocol", protocol)
-        json.put("api_camo", KEY_ECH)
+        json.put("api_camo", settings.validated().keyFetch)
         return json.toString()
     }
 

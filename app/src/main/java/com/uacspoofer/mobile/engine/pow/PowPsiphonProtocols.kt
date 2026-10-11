@@ -55,6 +55,41 @@ internal object PowPsiphonProtocols {
 
     const val REGION_PHASE_TIMEOUT_SECONDS = 25
 
+    // Automatic exit: a short first try in a nearby country, then any country.
+    const val NEARBY_PHASE_TIMEOUT_SECONDS = 12
+
+    // The first light attempt behind WARP. TLS-OSSH/OSSH/SSH either finish
+    // through the WARP SOCKS hop quickly or not at all.
+    const val CHAINED_LIGHT_TIMEOUT_SECONDS = 20
+
+    // Head start for the last server that worked (Psiphon default is 1s,
+    // scaled by NetworkLatencyMultiplier). WARP adds a hop, so give it more.
+    const val SERVER_AFFINITY_GRACE_MS = 1_500
+
+    // "Two tunnels at once" runs a second, independent Psiphon (PowPsiphonSidecar)
+    // instead of TunnelPoolSize=2: the library spreads port forwards round-robin
+    // over pooled tunnels to different servers, so one service saw two exit IPs.
+    const val SIDECAR_ESTABLISH_TIMEOUT_SECONDS = 90
+    const val SIDECAR_WORKER_POOL_SIZE = 6
+
+    /** Tunnel 2 config: tunnel 1's winning config with its own data root and SOCKS port. */
+    fun sidecarConfig(primaryConfig: String, dataRoot: String, socksPort: Int): String {
+        val config = JSONObject(primaryConfig)
+        config.put("DataRootDirectory", dataRoot)
+        config.put("LocalSocksProxyPort", socksPort)
+        config.put("EstablishTunnelTimeoutSeconds", SIDECAR_ESTABLISH_TIMEOUT_SECONDS)
+        config.put(
+            "ConnectionWorkerPoolSize",
+            minOf(config.optInt("ConnectionWorkerPoolSize", SIDECAR_WORKER_POOL_SIZE), SIDECAR_WORKER_POOL_SIZE),
+        )
+        config.remove("TunnelPoolSize")
+        return config.toString()
+    }
+
+    // Destinations Psiphon itself may leave untunneled (direct mode only:
+    // there the untunneled dial goes out the phone's own network).
+    val SPLIT_TUNNEL_REGIONS = listOf("IR")
+
     val LADDER: List<PowPsiphonStrategy> = listOf(
         PowPsiphonStrategy(
             name = "A",
@@ -81,7 +116,38 @@ internal object PowPsiphonProtocols {
         },
     )
 
+    /**
+     * Strategy order for this leg. Direct Psiphon keeps the original order
+     * (fronted meek first). Behind WARP the light TLS-OSSH/OSSH/SSH/SS set goes
+     * first with a shorter timeout, and fronted meek is the fallback.
+     */
+    fun ladder(direct: Boolean): List<PowPsiphonStrategy> {
+        if (direct) return LADDER
+        val light = LADDER.first { it.name == "F" }.copy(timeoutSeconds = CHAINED_LIGHT_TIMEOUT_SECONDS)
+        val heavy = LADDER.first { it.name == "A" }
+        return listOf(light, heavy)
+    }
+
     fun signature(): String = LADDER.joinToString(",") { it.name }
+
+    fun signature(direct: Boolean): String = ladder(direct).joinToString(",") { it.name }
+
+    /**
+     * First strategy to try. When this network has RTTs saved for two or more
+     * strategies, the one with the lowest RTT wins; otherwise the remembered
+     * winner; otherwise the head of the ladder.
+     */
+    fun startIndex(
+        ladder: List<PowPsiphonStrategy>,
+        remembered: Int?,
+        rttByName: Map<String, Long>,
+    ): Int {
+        val measured = ladder.indices.filter { (rttByName[ladder[it].name] ?: 0L) > 0L }
+        if (measured.size >= 2) {
+            return measured.minByOrNull { rttByName.getValue(ladder[it].name) } ?: 0
+        }
+        return remembered?.takeIf { it in ladder.indices } ?: 0
+    }
 
     fun buildConfig(
         socksPort: Int,
@@ -90,6 +156,7 @@ internal object PowPsiphonProtocols {
         strategy: PowPsiphonStrategy,
         optimizedMode: Boolean = true,
         direct: Boolean = false,
+        regionBias: Boolean = false,
     ): String {
         val config = JSONObject().apply {
             put("PropagationChannelId", "FFFFFFFFFFFFFFFF")
@@ -119,15 +186,30 @@ internal object PowPsiphonProtocols {
             }
             put("InproxyEnabled", false)
             put("InproxyAllowClient", false)
+            put("EstablishTunnelServerAffinityGracePeriodMilliseconds", SERVER_AFFINITY_GRACE_MS)
+            if (direct) {
+                // Untunneled dials use UpstreamProxyURL when one is set, so
+                // behind WARP this would turn into a WARP-only exit. Only the
+                // direct leg, where the dial leaves on the phone's network
+                // (the :uacpow process is outside the VPN and protects its
+                // sockets), lets Psiphon send Iranian destinations direct.
+                put("SplitTunnelRegions", JSONArray(SPLIT_TUNNEL_REGIONS))
+            }
         }
         strategy.configure(config)
         config.put("EstablishTunnelTimeoutSeconds", strategy.timeoutSeconds)
         if (!preferredRegion.isNullOrBlank()) {
             config.put("EgressRegion", preferredRegion)
-            config.put("EstablishTunnelTimeoutSeconds", REGION_PHASE_TIMEOUT_SECONDS)
-            config.remove("InitialLimitTunnelProtocols")
-            config.remove("InitialLimitTunnelProtocolsCandidateCount")
-            config.remove("LimitTunnelProtocols")
+            if (regionBias) {
+                // Nearby-country head start for Automatic: keep the
+                // strategy's protocol preference, give it a short window.
+                config.put("EstablishTunnelTimeoutSeconds", NEARBY_PHASE_TIMEOUT_SECONDS)
+            } else {
+                config.put("EstablishTunnelTimeoutSeconds", REGION_PHASE_TIMEOUT_SECONDS)
+                config.remove("InitialLimitTunnelProtocols")
+                config.remove("InitialLimitTunnelProtocolsCandidateCount")
+                config.remove("LimitTunnelProtocols")
+            }
         }
         if (direct) {
             // The WARP outer hop did not come up. Plain OSSH and SSH sit on

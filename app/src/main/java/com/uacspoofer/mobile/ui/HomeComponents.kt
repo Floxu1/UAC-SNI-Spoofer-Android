@@ -31,6 +31,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Wifi
@@ -670,109 +676,281 @@ internal fun PowConnectSheet(modifier: Modifier = Modifier) {
     if (!visible || status.steps.isEmpty()) return
     val persian = LocalHomePersian.current
     val font = homeLocalizedFont()
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(UacColors.Surface.copy(alpha = 0.94f))
-            .border(1.dp, UacColors.TextSecondary.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+    val rows = remember(status.steps, persian) { powStepRows(status.steps, persian) }
+    val scroll = rememberScrollState()
+    LaunchedEffect(rows.size, rows.lastOrNull()) {
+        scroll.animateScrollTo(scroll.maxValue)
+    }
+    val shape = RoundedCornerShape(18.dp)
+    CompositionLocalProvider(
+        LocalLayoutDirection provides if (persian) LayoutDirection.Rtl else LayoutDirection.Ltr,
     ) {
-        Text(
-            text = homeText("Connect steps", "مراحل اتصال"),
-            color = UacColors.TextPrimary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = font,
-        )
         Column(
-            modifier = Modifier
-                .heightIn(max = 220.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(UacColors.Surface.copy(alpha = 0.96f))
+                .border(1.dp, UacColors.CardBorder, shape)
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-        status.steps.forEach { step ->
-            val mark = when (step.state) {
-                PowStepState.DONE -> "✓"
-                PowStepState.FAILED -> "×"
-                PowStepState.RUNNING -> "…"
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = homeText("Connection steps", "مراحل اتصال"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = font,
+                    textAlign = TextAlign.Start,
+                    style = TextStyle(textDirection = if (persian) TextDirection.Rtl else TextDirection.Ltr),
+                    modifier = Modifier.weight(1f),
+                )
             }
-            val color = when (step.state) {
-                PowStepState.DONE -> UacColors.ConnectedGreen
-                PowStepState.FAILED -> UacColors.ErrorRed
-                PowStepState.RUNNING -> UacColors.TextPrimary
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(UacColors.Divider),
+            )
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(scroll),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                rows.forEach { row -> PowStepLine(row, persian, font) }
+            }
+        }
+    }
+}
+
+private data class PowStepCopy(val title: String, val detail: String = "")
+
+private data class PowStepRow(
+    val title: String,
+    val detail: String,
+    val state: PowStepState,
+    val repeats: Int = 1,
+)
+
+/** Maps raw engine steps to display rows and folds back-to-back repeats into one row. */
+private fun powStepRows(steps: List<com.uacspoofer.mobile.engine.pow.PowStep>, persian: Boolean): List<PowStepRow> {
+    val rows = mutableListOf<PowStepRow>()
+    steps.forEach { step ->
+        val copy = stageLabel(step.text, persian)
+        val last = rows.lastOrNull()
+        if (last != null && last.title == copy.title && last.detail == copy.detail) {
+            rows[rows.lastIndex] = last.copy(state = step.state, repeats = last.repeats + 1)
+        } else {
+            rows += PowStepRow(copy.title, copy.detail, step.state)
+        }
+    }
+    return rows
+}
+
+@Composable
+private fun PowStepLine(row: PowStepRow, persian: Boolean, font: androidx.compose.ui.text.font.FontFamily?) {
+    val titleColor = when (row.state) {
+        PowStepState.DONE -> UacColors.TextPrimary.copy(alpha = 0.88f)
+        PowStepState.FAILED -> UacColors.TextPrimary.copy(alpha = 0.88f)
+        PowStepState.RUNNING -> UacColors.TextPrimary
+    }
+    val direction = TextStyle(textDirection = if (persian) TextDirection.Rtl else TextDirection.Ltr)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .size(18.dp)
+                .background(
+                    when (row.state) {
+                        PowStepState.DONE -> UacColors.ConnectedGreen.copy(alpha = 0.14f)
+                        PowStepState.FAILED -> UacColors.ErrorRed.copy(alpha = 0.14f)
+                        PowStepState.RUNNING -> Color.Transparent
+                    },
+                    CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            when (row.state) {
+                PowStepState.DONE -> Icon(
+                    Icons.Rounded.Check,
+                    contentDescription = null,
+                    tint = UacColors.ConnectedGreen,
+                    modifier = Modifier.size(13.dp),
+                )
+                PowStepState.FAILED -> Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = null,
+                    tint = UacColors.ErrorRed,
+                    modifier = Modifier.size(13.dp),
+                )
+                PowStepState.RUNNING -> CircularProgressIndicator(
+                    color = UacColors.ConnectingCyan,
+                    trackColor = UacColors.ConnectingCyan.copy(alpha = 0.15f),
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+        }
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            val title = if (row.repeats > 1) {
+                row.title + " " + homeLtr("×${row.repeats}")
+            } else {
+                row.title
             }
             Text(
-                text = "$mark  ${stageLabel(step.text, persian)}",
-                color = color,
-                fontSize = 11.sp,
+                text = homeLatinDigits(if (persian) localizePersian(title) else title),
+                color = titleColor,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                fontWeight = if (row.state == PowStepState.RUNNING) FontWeight.Medium else FontWeight.Normal,
                 fontFamily = font,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                style = TextStyle(
-                    textDirection = if (persian) TextDirection.Rtl else TextDirection.Content,
-                ),
+                textAlign = TextAlign.Start,
+                style = direction,
             )
-        }
+            if (row.detail.isNotBlank()) {
+                Text(
+                    text = homeLtr(row.detail),
+                    color = if (row.state == PowStepState.FAILED) {
+                        UacColors.ErrorRed.copy(alpha = 0.8f)
+                    } else {
+                        UacColors.TextSecondary
+                    },
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Default,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Start,
+                    style = direction,
+                )
+            }
         }
     }
 }
 
-private fun scanLabel(body: String): String {
+private fun lastWord(text: String): String = text.trim().substringAfterLast(" ").trimEnd('.')
+
+private fun scanLabel(body: String): PowStepCopy {
     val parts = body.split(' ')
     val address = parts.firstOrNull().orEmpty()
-    return when (parts.getOrNull(1)) {
-        "trying" -> "در حال اسکن $address"
-        "400" -> "رد شد $address · صفحهٔ ۴۰۰، این آدرس تونل MASQUE نیست"
-        "access-denied" -> "رد شد $address · گواهی دستگاه را نپذیرفت"
-        "certificate" -> "رد شد $address · گواهی ناشناس"
-        "timeout" -> "رد شد $address · تایم‌اوت، جوابی نیامد"
-        "reset" -> "رد شد $address · اتصال وسط سلام قطع شد"
-        "eof" -> "رد شد $address · سلام TLS نیمه‌کاره قطع شد"
-        else -> "رد شد $address · ${parts.drop(1).joinToString(" ")}"
+    val reason = when (parts.getOrNull(1)) {
+        "trying" -> return PowStepCopy("اسکن آدرس", address)
+        "400" -> "این آدرس دروازه MASQUE نیست"
+        "access-denied" -> "گواهی دستگاه پذیرفته نشد"
+        "certificate" -> "گواهی ناشناخته"
+        "timeout" -> "پاسخی نیامد"
+        "reset" -> "اتصال وسط دست‌دهی قطع شد"
+        "eof" -> "دست‌دهی TLS نیمه‌کاره ماند"
+        else -> "آدرس رد شد"
     }
+    return PowStepCopy("رد شد: $reason", address)
 }
 
-private fun stageLabel(text: String, persian: Boolean): String {
-    if (!persian) return text
+private fun psiphonRoute(label: String): String = when {
+    label.startsWith("domain-fronted") -> "Psiphon · CDN"
+    label.startsWith("direct through WARP") -> "Psiphon · WARP"
+    else -> label
+}
+
+private fun stageLabel(text: String, persian: Boolean): PowStepCopy {
+    if (!persian) {
+        return when {
+            text.startsWith("Key account key won via ") || text.startsWith("Key account key saved via ") -> {
+                val route = text.substringAfter(" via ").substringBefore(" ").trim().trimEnd(')')
+                PowStepCopy("Key saved", route)
+            }
+            text.startsWith("Key racing ") -> PowStepCopy("Getting key", "ECH · split · current network")
+            text.startsWith("MASQUE accepted") -> PowStepCopy("MASQUE connected", lastWord(text))
+            text.startsWith("Trying saved clean address") -> PowStepCopy("Trying saved address", lastWord(text))
+            text.startsWith("Saved clean address accepted") -> PowStepCopy("Saved address answered", lastWord(text))
+            text.startsWith("Saved clean HTTP/2 address") -> PowStepCopy("New clean address saved", lastWord(text))
+            text.startsWith("MASQUE start via") -> PowStepCopy(
+                "Starting MASQUE over " + text.removePrefix("MASQUE start via ").substringBefore(" with"),
+            )
+            text.startsWith("Scan ") && !text.startsWith("Scan finished") -> {
+                val parts = text.removePrefix("Scan ").split(' ')
+                val title = if (parts.getOrNull(1) == "trying") "Scanning address" else "Rejected: ${parts.drop(1).joinToString(" ")}"
+                PowStepCopy(title, parts.firstOrNull().orEmpty())
+            }
+            else -> PowStepCopy(text)
+        }
+    }
     return when {
-        text.startsWith("Starting UAC PoW") -> "روشن کردن UAC PoW"
-        text.startsWith("Connecting MASQUE") -> "وصل شدن به MASQUE"
-        text.startsWith("Connecting WireGuard") -> "وصل شدن به WireGuard"
-        text.startsWith("Connecting WoW") -> "وصل شدن به WARP-in-WARP"
-        text.startsWith("Starting Psiphon") -> "روشن کردن تونل امن"
-        text.startsWith("Trying ") -> "راه بعدی"
-        text.startsWith("Creating device") -> "ساختن VPN"
-        text.startsWith("Routing device") -> "عبور ترافیک از تونل"
-        text.startsWith("UAC PoW ready") -> "وصل شد"
-        text.startsWith("Key ") -> "کلید: ${text.removePrefix("Key ").take(80)}"
-        text.startsWith("Clean HTTP/2 list:") -> "لیست تمیز: ${text.substringAfter(":").trim()}"
-        text.startsWith("Clean list empty") -> "لیست تمیز خالی است. اسکن HTTP/2 شروع می‌شود"
-        text.startsWith("Every saved address failed. Scan was not started") -> "همهٔ آدرس‌های ذخیره‌شده رد شدند. این حالت اسکن ندارد"
-        text.startsWith("Saved addresses failed") -> "آدرس‌های ذخیره‌شده رد شدند. اسکن HTTP/2 شروع شد"
-        text.startsWith("Trying saved clean address") -> "امتحان آدرس ذخیره‌شده ${text.substringAfterLast(" ")}"
-        text.startsWith("Saved clean address accepted") -> "آدرس ذخیره‌شده قبول شد ${text.substringAfterLast(" ")}"
-        text.startsWith("Saved clean address rejected") -> "آدرس ذخیره‌شده رد شد"
-        text.startsWith("Scanning HTTP/2") -> "اسکن HTTP/2 برای آدرس جدید"
-        text.startsWith("Saved clean HTTP/2 address") -> "آدرس تمیز ذخیره شد ${text.substringAfterLast(" ")}"
-        text.startsWith("HTTP/2 started") -> "HTTP/2 شروع شد"
+        text.startsWith("Starting UAC PoW") -> PowStepCopy("راه‌اندازی UAC PoW")
+        text.startsWith("Reconnecting for country") -> PowStepCopy("اتصال دوباره برای کشور انتخاب‌شده", lastWord(text))
+        text.startsWith("Connecting MASQUE") -> PowStepCopy("اتصال به MASQUE")
+        text.startsWith("Connecting WireGuard") -> PowStepCopy("اتصال به WireGuard")
+        text.startsWith("Connecting WoW") -> PowStepCopy("اتصال به WARP-in-WARP")
+        text.startsWith("Starting Psiphon directly") -> PowStepCopy("راه‌اندازی تونل امن", "Psiphon")
+        text.startsWith("Starting Psiphon through") ->
+            PowStepCopy("راه‌اندازی تونل امن", "Psiphon · " + text.removePrefix("Starting Psiphon through ").trim())
+        text.startsWith("Starting Psiphon") -> PowStepCopy("راه‌اندازی تونل امن")
+        text.startsWith("Trying UDP/1701") -> PowStepCopy("امتحان UDP/1701")
+        text.startsWith("Trying saved clean address") -> PowStepCopy("امتحان آی‌پی ذخیره‌شده", lastWord(text))
+        text.startsWith("Trying ") -> PowStepCopy("امتحان مسیر بعدی", psiphonRoute(text.removePrefix("Trying ").trim()))
+        text.startsWith("Creating device") -> PowStepCopy("ساخت VPN دستگاه")
+        text.startsWith("Routing device") -> PowStepCopy("هدایت ترافیک به تونل")
+        text.startsWith("UAC PoW ready") -> PowStepCopy("اتصال برقرار شد")
+        text.startsWith("Key account key won via ") || text.startsWith("Key account key saved via ") -> {
+            val route = text.substringAfter(" via ").substringBefore(" ").trim().trimEnd(')')
+            val label = when (route) {
+                "ech" -> "ECH"
+                "fragment" -> "تکه‌کردن ClientHello"
+                "external" -> "از شبکه فعلی"
+                else -> route
+            }
+            PowStepCopy("کلید گرفته شد", label)
+        }
+        text.startsWith("Key racing ") -> PowStepCopy("گرفتن کلید", "ECH · تکه‌کردن · شبکه فعلی")
+        text.startsWith("Key ") || text.startsWith("Key:") -> PowStepCopy(
+            "کلید حساب",
+            text.removePrefix("Key:").removePrefix("Key ").trim().take(80),
+        )
+        text.startsWith("Clean HTTP/2 list:") -> PowStepCopy("آی‌پی‌های تمیز HTTP/2", text.substringAfter(":").trim())
+        text.startsWith("Clean list empty") -> PowStepCopy("آی‌پی تمیزی نیست؛ شروع اسکن HTTP/2")
+        text.startsWith("Every saved address failed. Scan was not started") ->
+            PowStepCopy("همه آی‌پی‌های ذخیره‌شده رد شدند (این حالت اسکن ندارد)")
+        text.startsWith("Saved addresses failed") -> PowStepCopy("آی‌پی‌های ذخیره‌شده جواب ندادند؛ شروع اسکن HTTP/2")
+        text.startsWith("Saved clean address accepted") -> PowStepCopy("آی‌پی ذخیره‌شده جواب داد", lastWord(text))
+        text.startsWith("Saved clean address rejected") -> PowStepCopy("آی‌پی ذخیره‌شده جواب نداد")
+        text.startsWith("Scanning HTTP/2") -> PowStepCopy("اسکن HTTP/2 برای آی‌پی جدید")
+        text.startsWith("Saved clean HTTP/2 address") -> PowStepCopy("آی‌پی تمیز جدید ذخیره شد", lastWord(text))
+        text.startsWith("HTTP/2 started") -> PowStepCopy("انتخاب HTTP/2")
+        text.startsWith("Scan finished") -> PowStepCopy("اسکن تمام شد؛ همین روش ادامه دارد")
         text.startsWith("Scan ") -> scanLabel(text.removePrefix("Scan "))
-        text.startsWith("MASQUE accepted") -> "MASQUE قبول کرد ${text.substringAfterLast(" ")}"
-        text.startsWith("MASQUE start") -> "شروع MASQUE روی HTTP/2"
-        text.startsWith("No usable MASQUE") -> "هیچ دروازهٔ MASQUE قبول نشد: ${text.substringAfter("(").substringBefore(")")}"
-        text.startsWith("Certificate refused during") -> "گواهی وسط اسکن رد شد. اسکن قطع می‌شود تا گواهی تازه گرفته شود"
-        text.startsWith("Certificate refused") -> "گواهی رد شد. گواهی تازه گرفته می‌شود"
-        text.startsWith("Certificate ") -> "این گواهی هم رد شد. گواهی بعدی گرفته می‌شود"
-        text.startsWith("This certificate was refused") -> "این گواهی وسط اسکن رد شد. گواهی بعدی گرفته می‌شود"
-        text.startsWith("New certificate saved") -> "گواهی تازه ذخیره شد. جستجو با همین گواهی ادامه دارد"
-        text.startsWith("New certificate issued") -> "گواهی تازه صادر شد. دروازه‌ها دوباره امتحان می‌شوند"
-        text.startsWith("Scan finished") -> "اسکن تمام شد. روی همین روش می‌ماند"
-        text.startsWith("Tunnel did not stay up") -> "تونل روی این آدرس نماند. اسکن بعدی"
-        text.startsWith("Trying UDP/1701") -> "امتحان UDP/1701"
-        text.startsWith("UDP/1701 did not answer, trying TCP") -> "UDP/1701 جواب نداد. نوبت TCP"
-        text.startsWith("UDP/1701 did not answer") -> "UDP/1701 جواب نداد"
-        else -> text
+        text.startsWith("MASQUE accepted") -> PowStepCopy("اتصال MASQUE برقرار شد", lastWord(text))
+        text.startsWith("MASQUE start via") ->
+            PowStepCopy("شروع MASQUE روی " + text.removePrefix("MASQUE start via ").substringBefore(" with").trim())
+        text.startsWith("MASQUE start") -> PowStepCopy("شروع MASQUE")
+        text.startsWith("No usable MASQUE") ->
+            PowStepCopy("هیچ دروازه MASQUE جواب نداد", text.substringAfter("(", "").substringBefore(")"))
+        text.startsWith("Certificate refused during") || text.startsWith("This certificate was refused") ->
+            PowStepCopy("گواهی وسط اسکن رد شد؛ گرفتن گواهی جدید")
+        text.startsWith("Certificate refused") -> PowStepCopy("گواهی رد شد؛ گرفتن گواهی جدید")
+        text.startsWith("Certificate ") -> PowStepCopy("این گواهی هم رد شد؛ گرفتن گواهی بعدی")
+        text.startsWith("New certificate saved") -> PowStepCopy("گواهی جدید ذخیره شد؛ ادامه جستجو")
+        text.startsWith("New certificate issued") -> PowStepCopy("گواهی جدید صادر شد؛ امتحان دوباره دروازه‌ها")
+        text.startsWith("Could not refresh the MASQUE certificate") -> PowStepCopy("تمدید گواهی MASQUE نشد")
+        text.startsWith("Tunnel did not stay up") -> PowStepCopy(
+            "تونل روی این آدرس پایدار نماند؛ اسکن دوباره",
+            text.removePrefix("Tunnel did not stay up on ").substringBefore(". "),
+        )
+        text.startsWith("UDP/1701 did not answer, trying TCP") -> PowStepCopy("UDP/1701 جواب نداد؛ امتحان TCP")
+        text.startsWith("UDP/1701 did not answer") -> PowStepCopy("UDP/1701 جواب نداد")
+        else -> PowStepCopy(PowStatusCopy.errorHint(true, text) ?: text)
     }
 }
 

@@ -2,6 +2,7 @@ package com.uacspoofer.mobile.engine.pow
 
 internal object PowPsiphonIpc {
     const val SERVICE_CLASS = "com.uacspoofer.mobile.engine.pow.PowPsiphonService"
+    const val SIDECAR_SERVICE_CLASS = "com.uacspoofer.mobile.engine.pow.PowPsiphonSidecarService"
     const val KEY_CONFIG = "config"
     const val ASSET_SERVER_ENTRIES = "server_entries.txt"
     const val KEY_MESSAGE = "message"

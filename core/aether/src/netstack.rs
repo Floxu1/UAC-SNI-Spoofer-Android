@@ -32,10 +32,34 @@ fn app_queue() -> usize {
     crate::sysprofile::channel_capacity()
 }
 
+/// Packets smoltcp produced that are waiting for room in the outbound
+/// channel. Past this they are dropped (TCP retransmits them).
+fn tx_hold_cap() -> usize {
+    (app_queue() * 2).max(256)
+}
+
+/// New TCP socket with congestion control on. Without it smoltcp sends a full
+/// peer window at once, overruns the tunnel queue and loses packets.
+///
+/// Reno, not Cubic: smoltcp 0.12's Cubic recomputes cwnd in `pre_transmit`
+/// every 100 ms from a curve in *bytes* (C = 0.4, w_max starting at 2 KB), so
+/// cwnd sits near one MSS for ~11 s after start or after any loss and then
+/// grows by a few hundred bytes per second. Reno does slow start, halves on
+/// retransmit timeout and grows by an MSS per ACK, which suits this path.
+fn new_tcp_socket(rx: usize, tx: usize) -> tcp::Socket<'static> {
+    let rx_buf = tcp::SocketBuffer::new(vec![0u8; rx]);
+    let tx_buf = tcp::SocketBuffer::new(vec![0u8; tx]);
+    let mut socket = tcp::Socket::new(rx_buf, tx_buf);
+    socket.set_nagle_enabled(false);
+    socket.set_congestion_control(tcp::CongestionControl::Reno);
+    socket
+}
+
 const MAX_INGEST_PER_TICK: usize = 512;
 const MAX_RECV_CHUNKS: usize = 128;
 const BACKPRESSURE_RETRY: std::time::Duration = std::time::Duration::from_millis(2);
 const DROP_REPORT_STEP: usize = 512;
+const HOLD_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_IDLE_TICK: std::time::Duration = std::time::Duration::from_millis(250);
 
 type OpenTcpResp = oneshot::Sender<std::result::Result<TcpConn, String>>;
@@ -291,6 +315,8 @@ struct TcpState {
     pending: Vec<u8>,
     established: bool,
     half_closed: bool,
+    /// Holds the large High-tier buffers (counted against the cap).
+    big: bool,
 }
 
 struct UdpState {
@@ -463,6 +489,10 @@ async fn run(
     let mut last_report = std::time::Instant::now();
     let mut tx_dropped: usize = 0;
     let mut next_drop_report: usize = DROP_REPORT_STEP;
+    let mut outbound_closed = false;
+    let mut held_events: u64 = 0;
+    let mut held_peak: usize = 0;
+    let mut last_hold_report = std::time::Instant::now();
 
     loop {
         let now = Instant::now();
@@ -475,8 +505,24 @@ async fn run(
         }
         let tcp_busy = service_tcp(&mut s);
         let udp_busy = service_udp(&mut s);
-        let (sent, dropped) = flush_tx(&mut s, &outbound_tx);
-        tx_total = tx_total.saturating_add(sent);
+        let flush = flush_tx(&mut s, &outbound_tx, tx_hold_cap());
+        tx_total = tx_total.saturating_add(flush.sent);
+        let dropped = flush.dropped;
+        if flush.closed {
+            outbound_closed = true;
+        }
+        if flush.held > 0 {
+            held_events += 1;
+            held_peak = held_peak.max(flush.held);
+        }
+        if held_events > 0 && last_hold_report.elapsed() >= HOLD_REPORT_EVERY {
+            log::debug!(
+                "[netstack] outbound backpressure: waited {held_events} times, peak {held_peak} packets queued"
+            );
+            held_events = 0;
+            held_peak = 0;
+            last_hold_report = std::time::Instant::now();
+        }
 
         if last_report.elapsed() >= std::time::Duration::from_millis(1000) {
             ffi::emit_traffic(tx_total, rx_total);
@@ -490,9 +536,14 @@ async fn run(
 
         if dropped > 0 {
             tx_dropped = tx_dropped.saturating_add(dropped);
-            if tx_dropped >= next_drop_report {
+            if tx_dropped >= next_drop_report || tx_dropped == dropped {
                 next_drop_report = tx_dropped + DROP_REPORT_STEP;
-                log::debug!("[netstack] dropped {tx_dropped} outbound packets under pressure");
+                let message = format!(
+                    "[netstack] dropped {tx_dropped} outbound packets (tunnel queue full past {} held)",
+                    tx_hold_cap()
+                );
+                log::info!("{message}");
+                ffi::record_log(message);
             }
         }
 
@@ -544,10 +595,9 @@ async fn run(
                         if s.accept_tx.is_some() && is_tcp_syn(&pkt) {
                             if let Some((dst_ip, dst_port, src_ip, src_port)) = parse_tcp_syn(&pkt) {
                                 // Create a listening socket for this destination
-                                let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-                                let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-                                let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-                                socket.set_nagle_enabled(false);
+                                // Transparent accept serves many short app
+                                // connections: normal buffers.
+                                let mut socket = new_tcp_socket(tcp_buf(), tcp_buf());
 
                                 let local_ep = IpEndpoint::new(to_ip_address(dst_ip), dst_port);
                                 if socket.listen(local_ep).is_ok() {
@@ -565,6 +615,7 @@ async fn run(
                                             pending: Vec::new(),
                                             established: false,
                                             half_closed: false,
+                                            big: false,
                                         },
                                     );
                                     log::debug!(
@@ -593,6 +644,23 @@ async fn run(
                         }
                     }
                     None => return Ok(()),
+                }
+            }
+
+            // Packets are waiting for the tunnel: wake as soon as it has room
+            // instead of dropping them. Never blocks the other arms.
+            permit = outbound_tx.reserve(), if !outbound_closed && !s.device.tx.is_empty() => {
+                match permit {
+                    Ok(permit) => {
+                        if let Some(pkt) = s.device.tx.pop_front() {
+                            tx_total = tx_total.saturating_add(pkt.len() as u64);
+                            permit.send(pkt);
+                        }
+                    }
+                    Err(_) => {
+                        outbound_closed = true;
+                        s.device.tx.clear();
+                    }
                 }
             }
 
@@ -627,10 +695,17 @@ async fn sleep_opt(delay: Option<std::time::Duration>) {
 fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
     match cmd {
         Cmd::OpenTcp { dst, resp } => {
-            let rx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-            let tx_buf = tcp::SocketBuffer::new(vec![0u8; tcp_buf()]);
-            let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-            socket.set_nagle_enabled(false);
+            // Outbound dials are the chain legs (Psiphon SSH through WARP), so
+            // on the High tier the first few get large windows. The cap bounds
+            // memory when many dials are open at once.
+            let (big_rx, big_tx, big_cap) = crate::sysprofile::netstack_tcp_big();
+            let big_live = s.tcp_conns.values().filter(|c| c.big).count();
+            let big = big_cap > 0 && big_live < big_cap && big_rx > tcp_buf();
+            let mut socket = if big {
+                new_tcp_socket(big_rx, big_tx)
+            } else {
+                new_tcp_socket(tcp_buf(), tcp_buf())
+            };
 
             let local_port = alloc_port(&mut s.next_port);
             let remote = to_ip_endpoint(dst);
@@ -656,8 +731,18 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
                     pending: Vec::new(),
                     established: false,
                     half_closed: false,
+                    big,
                 },
             );
+            if big {
+                log::debug!(
+                    "[netstack] tcp id={id} to {dst}: large buffers {}KB/{}KB ({}/{})",
+                    big_rx / 1024,
+                    big_tx / 1024,
+                    big_live + 1,
+                    big_cap
+                );
+            }
         }
         Cmd::OpenUdp { resp } => {
             let rx_meta = vec![udp::PacketMetadata::EMPTY; udp_meta()];
@@ -938,18 +1023,47 @@ fn service_udp(s: &mut NetStack) -> bool {
     backpressured
 }
 
-fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>) -> (u64, usize) {
+struct Flush {
+    sent: u64,
+    /// Packets still queued because the outbound channel is full.
+    held: usize,
+    /// Packets dropped because the held queue went past its cap.
+    dropped: usize,
+    closed: bool,
+}
+
+/// Moves smoltcp's output into the tunnel channel. When the channel is full the
+/// rest stays queued (in order) for the run loop to send once there is room;
+/// only packets past `hold_cap` are dropped. Never awaits.
+fn flush_tx(s: &mut NetStack, outbound_tx: &mpsc::Sender<Vec<u8>>, hold_cap: usize) -> Flush {
     let mut sent = 0u64;
-    let mut dropped = 0;
+    let mut closed = false;
     while let Some(pkt) = s.device.tx.pop_front() {
         let len = pkt.len() as u64;
         match outbound_tx.try_send(pkt) {
             Ok(()) => sent = sent.saturating_add(len),
-            Err(mpsc::error::TrySendError::Full(_)) => dropped += 1,
-            Err(mpsc::error::TrySendError::Closed(_)) => break,
+            Err(mpsc::error::TrySendError::Full(pkt)) => {
+                s.device.tx.push_front(pkt);
+                break;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                closed = true;
+                s.device.tx.clear();
+                break;
+            }
         }
     }
-    (sent, dropped)
+    let mut dropped = 0;
+    while s.device.tx.len() > hold_cap {
+        s.device.tx.pop_back();
+        dropped += 1;
+    }
+    Flush {
+        sent,
+        held: s.device.tx.len(),
+        dropped,
+        closed,
+    }
 }
 
 #[cfg(test)]
@@ -1154,7 +1268,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn flush_tx_drops_instead_of_blocking_when_outbound_is_full() {
+    async fn flush_tx_holds_then_drops_past_cap_instead_of_blocking() {
         let (outbound_tx, outbound_rx) = mpsc::channel::<Vec<u8>>(2);
         let mut stack = NetStack {
             iface: {
@@ -1179,14 +1293,26 @@ mod tests {
             stack.device.tx.push_back(vec![1, 2, 3]);
         }
 
-        let (sent, dropped) = flush_tx(&mut stack, &outbound_tx);
+        let flush = flush_tx(&mut stack, &outbound_tx, 5);
 
-        assert!(stack.device.tx.is_empty(), "the tx queue must be drained");
-        assert_eq!(sent, 6, "sent bytes are counted");
-        assert_eq!(
-            dropped, 8,
-            "everything past the channel capacity is dropped"
-        );
+        assert_eq!(flush.sent, 6, "sent bytes are counted");
+        assert_eq!(flush.held, 5, "packets that do not fit wait, up to the cap");
+        assert_eq!(flush.dropped, 3, "only packets past the hold cap are dropped");
+        assert!(!flush.closed);
         assert_eq!(outbound_rx.len(), 2, "the channel keeps what fits");
+
+        // Room appears: the held packets go out in order, nothing is lost.
+        let mut outbound_rx = outbound_rx;
+        outbound_rx.recv().await.unwrap();
+        outbound_rx.recv().await.unwrap();
+        let flush = flush_tx(&mut stack, &outbound_tx, 5);
+        assert_eq!(flush.sent, 6);
+        assert_eq!(flush.held, 3);
+        assert_eq!(flush.dropped, 0);
+
+        drop(outbound_rx);
+        let flush = flush_tx(&mut stack, &outbound_tx, 5);
+        assert!(flush.closed, "a closed tunnel is reported");
+        assert!(stack.device.tx.is_empty(), "and its queue is released");
     }
 }

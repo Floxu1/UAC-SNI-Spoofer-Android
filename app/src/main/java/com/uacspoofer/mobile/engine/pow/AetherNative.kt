@@ -1,7 +1,11 @@
 package com.uacspoofer.mobile.engine.pow
 
 import android.net.VpnService
+import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicLong
 
 object AetherNative {
     @Volatile
@@ -39,6 +43,66 @@ object AetherNative {
         )
     }
 
+    @Volatile
+    private var prepareThread: Thread? = null
+    private val prepareGeneration = AtomicLong(0L)
+
+    /**
+     * Runs the blocking native prepare (key race, certificate renewal) on its own
+     * thread so the caller can be cancelled. Cancelling the caller asks the native
+     * core to abort the prepare and returns immediately instead of waiting for it.
+     */
+    suspend fun prepareCancellable(config: String): TunnelAddresses {
+        awaitPrepareIdle(PREPARE_IDLE_WAIT_MS)
+        val generation = prepareGeneration.incrementAndGet()
+        val outcome = CompletableDeferred<Result<TunnelAddresses>>()
+        val worker = Thread({
+            outcome.complete(runCatching { prepare(config) })
+        }, "uac-pow-prepare-$generation")
+        worker.isDaemon = true
+        prepareThread = worker
+        worker.start()
+        try {
+            return outcome.await().getOrThrow()
+        } catch (cancelled: CancellationException) {
+            abortPrepare()
+            throw cancelled
+        }
+    }
+
+    /** Non-blocking: keeps asking the native core to drop an in-flight prepare until it returns. */
+    fun abortPrepare() {
+        if (!available) return
+        val worker = prepareThread ?: return
+        if (!worker.isAlive) return
+        val generation = prepareGeneration.get()
+        nativeCancelPrepare()
+        val reaper = Thread({
+            val deadline = SystemClock.elapsedRealtime() + PREPARE_ABORT_WINDOW_MS
+            while (
+                worker.isAlive &&
+                prepareGeneration.get() == generation &&
+                SystemClock.elapsedRealtime() < deadline
+            ) {
+                nativeCancelPrepare()
+                runCatching { Thread.sleep(100L) }
+            }
+        }, "uac-pow-prepare-abort")
+        reaper.isDaemon = true
+        reaper.start()
+    }
+
+    fun isPreparing(): Boolean = prepareThread?.isAlive == true
+
+    private fun awaitPrepareIdle(timeoutMs: Long) {
+        val worker = prepareThread ?: return
+        if (!worker.isAlive) return
+        runCatching { worker.join(timeoutMs) }
+    }
+
+    private const val PREPARE_IDLE_WAIT_MS = 3_000L
+    private const val PREPARE_ABORT_WINDOW_MS = 10_000L
+
     fun startProxy(config: String): Int {
         checkAvailable()
         return nativeStartProxy(config)
@@ -75,6 +139,7 @@ object AetherNative {
     @JvmStatic private external fun nativeLastResult(): String
     @JvmStatic private external fun nativeStartProxy(config: String): Int
     @JvmStatic private external fun nativeStop(): Int
+    @JvmStatic private external fun nativeCancelPrepare(): Int
     @JvmStatic private external fun nativeIsRunning(): Boolean
     @JvmStatic private external fun nativeIsReady(): Boolean
     @JvmStatic private external fun nativeLastError(): String

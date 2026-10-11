@@ -3,7 +3,10 @@ package com.uacspoofer.mobile.ui
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -47,6 +50,34 @@ internal fun homeLocalizedTextStyle(base: TextStyle = LocalTextStyle.current): T
 }
 
 internal fun homeLtr(value: String): String = "$LRI$value$PDI"
+
+/**
+ * The Persian UI font draws Persian digits. Inside left-to-right isolated runs
+ * (addresses, ports, protocol versions) switch to the default font so values
+ * like 162.159.198.1:1701 or HTTP/2 keep Latin digits.
+ */
+internal fun homeLatinDigits(text: String): AnnotatedString = buildAnnotatedString {
+    append(text)
+    val latin = SpanStyle(fontFamily = FontFamily.Default)
+    var depth = 0
+    var runStart = -1
+    text.forEachIndexed { index, char ->
+        when (char) {
+            '\u2066', '\u2068' -> {
+                if (depth == 0) runStart = index
+                depth++
+            }
+            '\u2067' -> depth++
+            '\u2069' -> {
+                depth = (depth - 1).coerceAtLeast(0)
+                if (depth == 0 && runStart >= 0) {
+                    if ((runStart..index).any { text[it] in '0'..'9' }) addStyle(latin, runStart, index + 1)
+                    runStart = -1
+                }
+            }
+        }
+    }
+}
 
 internal fun localizePersian(text: String): String {
     val isolated = isolateUnwrappedLtrRuns(text.replace("\u200C", "\u2060\u200C\u2060"))

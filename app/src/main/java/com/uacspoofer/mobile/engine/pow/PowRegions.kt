@@ -63,6 +63,32 @@ object PowRegions {
 
     val RECOMMENDED: List<String> = listOf("de", "nl", "us", "fr", "gb", "ca", "se", "sg", "jp", "au")
 
+    /** Countries close to Iran and to the usual WARP exits, nearest first. */
+    val NEARBY: List<String> = listOf(
+        "DE", "NL", "AT", "PL", "CH", "SE", "FR", "GB", "CZ", "DK",
+        "BE", "IT", "RS", "RO", "LT", "FI", "NO", "IE", "ES",
+    )
+
+    /**
+     * Country for the short head-start attempt when the user left the exit on
+     * Automatic. A nearby country that worked on this network wins; otherwise
+     * the first nearby country Psiphon has advertised; otherwise Germany, which
+     * has the most nearby servers in the bundled list. Null when Psiphon told
+     * us its regions and none of them is nearby.
+     */
+    fun autoBiasRegion(
+        remembered: String?,
+        available: Collection<String>,
+        rememberedOnly: Boolean = false,
+    ): String? {
+        val live = available.map { it.trim().uppercase(Locale.US) }.filter(::isCode).toSet()
+        val usable = { code: String -> live.isEmpty() || code in live }
+        val last = remembered?.trim()?.uppercase(Locale.US)
+        if (last != null && last in NEARBY && usable(last)) return last
+        if (rememberedOnly) return null
+        return NEARBY.firstOrNull(usable)
+    }
+
     fun isCode(code: String): Boolean {
         val key = code.trim().uppercase(Locale.US)
         return key.length == 2 && key.all { it in 'A'..'Z' }

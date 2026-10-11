@@ -192,6 +192,18 @@ pub fn build_config(params: &TlsParams) -> Result<quiche::Config> {
     Ok(config)
 }
 
+/// DATAGRAM queue length used by the optional HTTP/3 tuning (default is 65536).
+pub const TUNED_DGRAM_QUEUE: usize = 2048;
+
+/// Optional HTTP/3 tuning (`AETHER_QUIC_TUNED=1`): BBRv2 congestion control and
+/// short DATAGRAM queues, so a burst waits in the device's TCP instead of
+/// sitting seconds deep inside QUIC. Off leaves `build_config` untouched.
+pub fn apply_quic_tuning(config: &mut quiche::Config) {
+    config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Bbr2Gcongestion);
+    config.enable_pacing(true);
+    config.enable_dgram(true, TUNED_DGRAM_QUEUE, TUNED_DGRAM_QUEUE);
+}
+
 pub fn inject_ech(conn: &mut quiche::Connection, ech_config_list: &[u8]) -> Result<()> {
     if ech_config_list.is_empty() {
         return Err(AetherError::Ech("empty ech config list".into()));

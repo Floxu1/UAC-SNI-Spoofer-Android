@@ -309,29 +309,29 @@ fn front_headers(bearer: Option<&str>, jwt: Option<&str>) -> Vec<(String, String
     headers
 }
 
-async fn fallback_call(
-    label: &str,
+fn note_key_route(message: &str) {
+    let line = format!("Key: {message}");
+    log::info!("{line}");
+    crate::ffi::record_log(line);
+}
+
+fn camo_request(
     method: &str,
     path: &str,
     body: Option<Vec<u8>>,
     bearer: Option<&str>,
     jwt: Option<&str>,
-) -> Result<AccountData> {
-    log::info!(
-        "[*] {label} retrying over a camouflaged route: random cloudflare edge address, \
-         no dns lookup, split client hello, alternate tls fingerprints"
-    );
-
-    let request = apifront::ApiRequest {
+) -> apifront::ApiRequest {
+    apifront::ApiRequest {
         method: method.to_string(),
         host: api_host().to_string(),
         path: path.to_string(),
         headers: front_headers(bearer, jwt),
         body,
-    };
+    }
+}
 
-    let response = apifront::fetch(&request).await?;
-
+fn decode_camo_account(label: &str, response: apifront::ApiResponse) -> Result<AccountData> {
     if (200..300).contains(&response.status) {
         log::info!(
             "[+] {label} went through the camouflaged route ({})",
@@ -350,12 +350,165 @@ async fn fallback_call(
         response.route,
         describe_status(response.status, &response.body)
     );
-    // The camouflaged route reports a bare u16, so match the codes directly here
-    // rather than going through refuses_identity.
     if matches!(response.status, 401 | 404 | 410) {
         return Err(AetherError::IdentityRefused(described));
     }
     Err(AetherError::Api(described))
+}
+
+async fn fallback_call_route(
+    label: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    bearer: Option<&str>,
+    jwt: Option<&str>,
+    route: &str,
+) -> Result<AccountData> {
+    let request = camo_request(method, path, body, bearer, jwt);
+    let response = match route {
+        "fragment" => apifront::fetch_fragment(&request).await?,
+        _ => apifront::fetch_ech(&request).await?,
+    };
+    decode_camo_account(label, response)
+}
+
+/// Handshake-first race across ECH, split ClientHello, and the current network.
+///
+/// Each racer opens TLS without sending the HTTP body. The first session that
+/// becomes ready claims an atomic gate and alone sends register/enroll. The
+/// other tasks are aborted immediately so a second POST cannot leave the phone.
+async fn race_auto_call(
+    label: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    bearer: Option<&str>,
+    jwt: Option<&str>,
+) -> Result<AccountData> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use tokio::task::JoinSet;
+
+    note_key_route("racing ECH, split ClientHello, and the current network");
+    let request = camo_request(method, path, body, bearer, jwt);
+    let host = request.host.clone();
+    let claimed = Arc::new(AtomicBool::new(false));
+    let mut set = JoinSet::new();
+
+    {
+        let claimed = claimed.clone();
+        let request = request.clone();
+        let host = host.clone();
+        let label = label.to_string();
+        set.spawn(async move {
+            let session = apifront::open_external_session(&host).await?;
+            claim_and_send(&label, "external", session, request, &claimed).await
+        });
+    }
+
+    let edges = apifront::probe_key_edges().await;
+    if edges.is_empty() {
+        note_key_route(
+            "clean-edge probe returned nothing; camouflaged racers will still try the pinned list",
+        );
+    }
+    {
+        let claimed = claimed.clone();
+        let request = request.clone();
+        let edges = edges.clone();
+        let host = host.clone();
+        let label = label.to_string();
+        set.spawn(async move {
+            let session = apifront::open_ech_session(&host, &edges).await?;
+            claim_and_send(&label, "ech", session, request, &claimed).await
+        });
+    }
+    {
+        let claimed = claimed.clone();
+        let request = request.clone();
+        let edges = edges.clone();
+        let host = host.clone();
+        let label = label.to_string();
+        set.spawn(async move {
+            let session = apifront::open_fragment_session(&host, &edges).await?;
+            claim_and_send(&label, "fragment", session, request, &claimed).await
+        });
+    }
+
+    let mut last_error = AetherError::Api(format!("{label}: every key route failed"));
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(account)) => {
+                set.abort_all();
+                return Ok(account);
+            }
+            Ok(Err(error)) => {
+                log::warn!("[!] {label} race lane failed: {error}");
+                last_error = error;
+            }
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => {
+                last_error = AetherError::Api(format!("{label}: race lane panicked: {error}"));
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn claim_and_send(
+    label: &str,
+    route: &'static str,
+    session: apifront::ReadySession,
+    request: apifront::ApiRequest,
+    claimed: &std::sync::atomic::AtomicBool,
+) -> Result<AccountData> {
+    use std::sync::atomic::Ordering;
+
+    // First handshake ready wins the right to send the body. Dropping the
+    // session here closes TCP without ever writing register/enroll.
+    if claimed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        note_key_route(&format!(
+            "{route} ready at {} but another route already claimed the send",
+            session.address
+        ));
+        return Err(AetherError::Api(format!(
+            "{label}: {route} lost the race after handshake"
+        )));
+    }
+
+    note_key_route(&format!(
+        "account key won via {route} (sending over {})",
+        session.address
+    ));
+    let response = match apifront::send_on_session(session, &request).await {
+        Ok(response) => response,
+        Err(error) => {
+            claimed.store(false, Ordering::SeqCst);
+            return Err(error);
+        }
+    };
+    let account = decode_camo_account(label, response)?;
+    note_key_route(&format!("account key saved via {route}"));
+    Ok(account)
+}
+
+
+async fn fallback_call(
+    label: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    bearer: Option<&str>,
+    jwt: Option<&str>,
+) -> Result<AccountData> {
+    log::info!(
+        "[*] {label} retrying over a camouflaged route: random cloudflare edge address,          no dns lookup, ECH or split client hello"
+    );
+    fallback_call_route(label, method, path, body, bearer, jwt, "ech").await
 }
 
 fn describe_status(status: u16, body: &str) -> String {
@@ -527,7 +680,32 @@ fn api_camo() -> &'static str {
         Some("ech") => "ech",
         Some("fragment") | Some("ff") => "fragment",
         Some("external") | Some("direct") => "external",
+        Some("auto") | Some("") | None => "auto",
         _ => "auto",
+    }
+}
+
+async fn routed_account_call<F>(
+    label: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    bearer: Option<&str>,
+    jwt: Option<&str>,
+    build_direct: F,
+) -> Result<AccountData>
+where
+    F: Fn() -> Result<reqwest::RequestBuilder>,
+{
+    match api_camo() {
+        "external" => send_with_retry(label, build_direct)
+            .await
+            .map_err(|error| AetherError::Api(format!("{label}: direct route -> {error}"))),
+        "ech" => fallback_call_route(label, method, path, body, bearer, jwt, "ech").await,
+        "fragment" => {
+            fallback_call_route(label, method, path, body, bearer, jwt, "fragment").await
+        }
+        _ => race_auto_call(label, method, path, body, bearer, jwt).await,
     }
 }
 
@@ -562,8 +740,14 @@ pub async fn register(
     let encoded =
         serde_json::to_vec(&body).map_err(|e| AetherError::Api(format!("encode: {e}")))?;
 
-    let account = match api_camo() {
-        "external" => send_with_retry("registration", || {
+    let account = routed_account_call(
+        "registration",
+        "POST",
+        &path,
+        Some(encoded),
+        None,
+        jwt,
+        || {
             let mut req = http_client()?
                 .post(&url)
                 .headers(base_headers())
@@ -572,40 +756,9 @@ pub async fn register(
                 req = req.header("CF-Access-Jwt-Assertion", jwt);
             }
             Ok(req)
-        })
-        .await
-        .map_err(|error| AetherError::Api(format!("registration: direct route -> {error}")))?,
-        "ech" | "fragment" => {
-            fallback_call("registration", "POST", &path, Some(encoded), None, jwt).await?
-        }
-        _ => {
-            let direct = send_with_retry("registration", || {
-                let mut req = http_client()?
-                    .post(&url)
-                    .headers(base_headers())
-                    .json(&body);
-                if let Some(jwt) = jwt {
-                    req = req.header("CF-Access-Jwt-Assertion", jwt);
-                }
-                Ok(req)
-            })
-            .await;
-            match direct {
-                Ok(account) => account,
-                Err(primary) => {
-                    log::warn!("[!] registration failed over the direct route: {primary}");
-                    match fallback_call("registration", "POST", &path, Some(encoded), None, jwt).await {
-                        Ok(account) => account,
-                        Err(secondary) => {
-                            return Err(AetherError::Api(format!(
-                                "registration: direct route -> {primary}; camouflaged route -> {secondary}"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    };
+        },
+    )
+    .await?;
 
     Ok((account, wg_private))
 }
@@ -628,68 +781,22 @@ pub async fn enroll_key(
     let encoded =
         serde_json::to_vec(&body).map_err(|e| AetherError::Api(format!("encode: {e}")))?;
 
-    match api_camo() {
-        "external" => send_with_retry("key enrollment", || {
+    routed_account_call(
+        "key enrollment",
+        "PATCH",
+        &path,
+        Some(encoded),
+        Some(token),
+        None,
+        || {
             Ok(http_client()?
                 .patch(&url)
                 .headers(base_headers())
                 .bearer_auth(token)
                 .json(&body))
-        })
-        .await
-        .map_err(|error| AetherError::Api(format!("key enrollment: direct route -> {error}"))),
-        "ech" | "fragment" => {
-            fallback_call(
-                "key enrollment",
-                "PATCH",
-                &path,
-                Some(encoded.clone()),
-                Some(token),
-                None,
-            )
-            .await
-        }
-        _ => {
-            let direct = send_with_retry("key enrollment", || {
-                Ok(http_client()?
-                    .patch(&url)
-                    .headers(base_headers())
-                    .bearer_auth(token)
-                    .json(&body))
-            })
-            .await;
-            match direct {
-                Ok(account) => Ok(account),
-                Err(primary) => {
-                    log::warn!("[!] key enrollment failed over the direct route: {primary}");
-                    match fallback_call(
-                        "key enrollment",
-                        "PATCH",
-                        &path,
-                        Some(encoded),
-                        Some(token),
-                        None,
-                    )
-                    .await
-                    {
-                        Ok(account) => Ok(account),
-                        Err(secondary) => {
-                            let combined = format!(
-                                "key enrollment: direct route -> {primary}; camouflaged route -> {secondary}"
-                            );
-                            if matches!(primary, AetherError::IdentityRefused(_))
-                                || matches!(secondary, AetherError::IdentityRefused(_))
-                            {
-                                Err(AetherError::IdentityRefused(combined))
-                            } else {
-                                Err(AetherError::Api(combined))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+        },
+    )
+    .await
 }
 
 fn extract_wg_peer(reg: &AccountData) -> Result<[u8; 32]> {

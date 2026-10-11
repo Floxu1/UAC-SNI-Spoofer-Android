@@ -34,7 +34,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
 import androidx.compose.material.icons.outlined.Block
-import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Home
@@ -44,7 +43,6 @@ import androidx.compose.material.icons.outlined.Speed
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeStore
-import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SupportAgent
@@ -52,8 +50,6 @@ import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -63,7 +59,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.graphicsLayer
@@ -207,17 +202,13 @@ internal fun AppDrawer(
     val context = LocalContext.current.applicationContext
     val engineStore = remember(context) { EngineModeStore.get(context) }
     val engineMode by engineStore.mode.collectAsStateWithLifecycle()
-    val powStore = remember(context) { PowEngineStore.get(context) }
-    val powSettings by powStore.settings.collectAsStateWithLifecycle()
     val items = remember(engineMode) { drawerItemsFor(engineMode) }
     val firstItemFocus = remember { FocusRequester() }
     val lastNavFocus = remember { FocusRequester() }
-    val optimizedFocus = remember { FocusRequester() }
     val githubFocus = remember { FocusRequester() }
     val languageFocus = remember { FocusRequester() }
-    val showOptimized = engineMode.isPow
     val navBottomFocus = if (items.size <= 1) firstItemFocus else lastNavFocus
-    val supportUpFocus = if (showOptimized) optimizedFocus else navBottomFocus
+    val supportUpFocus = navBottomFocus
 
     LaunchedEffect(drawerOpen, items.firstOrNull()?.destination) {
         if (!drawerOpen) return@LaunchedEffect
@@ -282,7 +273,7 @@ internal fun AppDrawer(
                         .then(
                             if (index == items.lastIndex) {
                                 Modifier.dpadMovesFocus(
-                                    down = if (showOptimized) optimizedFocus else githubFocus,
+                                    down = githubFocus,
                                 )
                             } else {
                                 Modifier
@@ -293,20 +284,6 @@ internal fun AppDrawer(
                 if (index != items.lastIndex) {
                     Spacer(Modifier.height(if (compact) 1.dp else 3.dp))
                 }
-            }
-
-            if (showOptimized) {
-                Spacer(Modifier.height(if (compact) 1.dp else 3.dp))
-                DrawerOptimizedSwitch(
-                    checked = powSettings.optimizedMode,
-                    compact = compact,
-                    enabled = drawerOpen,
-                    onCheckedChange = { powStore.save(powSettings.copy(optimizedMode = it)) },
-                    modifier = Modifier
-                        .focusRequester(optimizedFocus)
-                        .dpadMovesFocus(down = githubFocus, up = navBottomFocus)
-                        .keepFocusInDrawerHorizontally(),
-                )
             }
 
             Spacer(Modifier.weight(1f))
@@ -457,88 +434,6 @@ private fun DrawerNavItem(
                 fontSize = if (compact) 12.5.sp else 14.sp,
                 fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                 fontFamily = homeLocalizedFont(),
-            )
-        }
-    }
-}
-
-@Composable
-private fun DrawerOptimizedSwitch(
-    checked: Boolean,
-    compact: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    enabled: Boolean = true,
-    modifier: Modifier = Modifier,
-) {
-    val shape = RoundedCornerShape(16.dp)
-    val background = if (checked) {
-        Brush.horizontalGradient(
-            colors = listOf(
-                DrawerBlue.copy(alpha = 0.18f),
-                DrawerBlue.copy(alpha = 0.075f),
-            ),
-        )
-    } else {
-        Brush.horizontalGradient(listOf(Color.Transparent, Color.Transparent))
-    }
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(if (compact) 35.dp else 46.dp)
-            .clip(shape)
-            .background(background)
-            .then(
-                if (checked) Modifier.border(1.dp, DrawerBlue.copy(alpha = 0.19f), shape)
-                else Modifier,
-            )
-            .clickable(enabled = enabled, role = Role.Switch) { onCheckedChange(!checked) },
-    ) {
-        if (checked) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .width(3.dp)
-                    .height(if (compact) 20.dp else 26.dp)
-                    .background(DrawerBlue, RoundedCornerShape(50)),
-            )
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(
-                    start = if (compact) 14.dp else 18.dp,
-                    end = 8.dp,
-                ),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Bolt,
-                contentDescription = null,
-                tint = if (checked) Color(0xFFAAD7FF) else Color(0xFF95A9C4),
-                modifier = Modifier.size(if (compact) 18.dp else 22.dp),
-            )
-            Spacer(Modifier.width(if (compact) 11.dp else 14.dp))
-            Text(
-                text = homeText("Optimized mode", "حالت بهینه شده"),
-                color = if (checked) DrawerText else Color(0xFFC2CEE0),
-                fontSize = if (compact) 12.5.sp else 14.sp,
-                fontWeight = if (checked) FontWeight.Medium else FontWeight.Normal,
-                fontFamily = homeLocalizedFont(),
-                modifier = Modifier.weight(1f),
-            )
-            Switch(
-                checked = checked,
-                onCheckedChange = null,
-                enabled = enabled,
-                modifier = Modifier.scale(if (compact) 0.72f else 0.82f),
-                colors = SwitchDefaults.colors(
-                    checkedTrackColor = DrawerBlue,
-                    checkedThumbColor = Color.White,
-                    uncheckedTrackColor = Color(0xFF1B2C41),
-                    uncheckedThumbColor = Color(0xFFC2CEE0),
-                    uncheckedBorderColor = Color.Transparent,
-                ),
             )
         }
     }

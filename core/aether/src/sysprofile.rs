@@ -15,6 +15,13 @@ pub struct Tuning {
     pub scan_concurrency_cap: usize,
     pub udp_socket_buf: usize,
     pub netstack_tcp_buf: usize,
+    /// Receive buffer for the few long-lived outbound TCP sockets (the
+    /// Psiphon/SSH legs through WARP). Equal to `netstack_tcp_buf` when the
+    /// tier does not get large buffers.
+    pub netstack_tcp_big_rx: usize,
+    pub netstack_tcp_big_tx: usize,
+    /// How many outbound sockets may hold large buffers at the same time.
+    pub netstack_big_sockets: usize,
     pub netstack_udp_buf: usize,
     pub channel_capacity: usize,
 }
@@ -167,6 +174,14 @@ fn build_tuning() -> Tuning {
         ),
     };
 
+    // Large windows only where memory allows; Low/Medium stay as they were.
+    // High worst case: 6 x (2 MB + 1 MB) = 18 MB, and pages are only touched
+    // as data actually queues.
+    let (netstack_tcp_big_rx, netstack_tcp_big_tx, netstack_big_sockets) = match tier {
+        Tier::High => (2 * 1024 * 1024, 1024 * 1024, 6usize),
+        _ => (netstack_tcp_buf, netstack_tcp_buf, 0usize),
+    };
+
     Tuning {
         tier,
         cpus,
@@ -174,6 +189,9 @@ fn build_tuning() -> Tuning {
         scan_concurrency_cap,
         udp_socket_buf,
         netstack_tcp_buf,
+        netstack_tcp_big_rx,
+        netstack_tcp_big_tx,
+        netstack_big_sockets,
         netstack_udp_buf,
         channel_capacity,
     }
@@ -195,7 +213,7 @@ pub fn log_summary() {
         t.scan_concurrency_cap.to_string()
     };
     log::info!(
-        "[*] performance profile: {:?} (cpus={} mem={}); scan concurrency cap={}, udp socket buffer={}KB, netstack buffers={}KB/{}KB, channel capacity={}",
+        "[*] performance profile: {:?} (cpus={} mem={}); scan concurrency cap={}, udp socket buffer={}KB, netstack buffers={}KB/{}KB, large tcp={}KB/{}KB x{}, channel capacity={}",
         t.tier,
         t.cpus,
         mem,
@@ -203,6 +221,9 @@ pub fn log_summary() {
         t.udp_socket_buf / 1024,
         t.netstack_tcp_buf / 1024,
         t.netstack_udp_buf / 1024,
+        t.netstack_tcp_big_rx / 1024,
+        t.netstack_tcp_big_tx / 1024,
+        t.netstack_big_sockets,
         t.channel_capacity,
     );
 }
@@ -217,6 +238,12 @@ pub fn udp_socket_buf_bytes() -> usize {
 
 pub fn netstack_tcp_buf_bytes() -> usize {
     tuning().netstack_tcp_buf
+}
+
+/// (rx, tx, max concurrent sockets) for large outbound TCP buffers.
+pub fn netstack_tcp_big() -> (usize, usize, usize) {
+    let t = tuning();
+    (t.netstack_tcp_big_rx, t.netstack_tcp_big_tx, t.netstack_big_sockets)
 }
 
 pub fn netstack_udp_buf_bytes() -> usize {

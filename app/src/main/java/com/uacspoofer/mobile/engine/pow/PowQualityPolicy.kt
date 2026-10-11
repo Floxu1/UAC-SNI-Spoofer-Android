@@ -32,7 +32,34 @@ internal object PowQualityPolicy {
     const val PASSIVE_INTERVAL_IDLE_MS = 60_000L
     const val IDLE_PROBE_AFTER_MS = 45_000L
     const val PASSIVE_MAX_RETUNES = 3
-    const val PASSIVE_BAD_STREAK = 3
+    // Four bad checks in a row (about a minute of screen-on use) before the
+    // path is judged; one slow page load or a brief stall is not enough.
+    const val PASSIVE_BAD_STREAK = 4
+
+    // Busy gate. Latency measured while the tunnel is moving bulk data is
+    // queueing delay behind that data, not a slow path, so the passive watch
+    // does not judge the path at those times.
+    const val BUSY_BYTES_PER_SEC = 200L * 1024L
+    const val BUSY_ACTIVE_STREAMS = 16
+    const val BUSY_SPOT_WINDOW_MS = 2_000L
+
+    fun bytesPerSecond(deltaBytes: Long, elapsedMs: Long): Long =
+        if (deltaBytes <= 0L || elapsedMs <= 0L) 0L else deltaBytes * 1000L / elapsedMs
+
+    fun isBusy(bytesPerSec: Long, activeStreams: Int): Boolean =
+        bytesPerSec >= BUSY_BYTES_PER_SEC || activeStreams >= BUSY_ACTIVE_STREAMS
+
+    /** Nearest-rank percentile of the positive samples; 0 when there are none. */
+    fun percentile(samples: List<Long>, pct: Int): Long {
+        val clean = samples.filter { it > 0L }.sorted()
+        if (clean.isEmpty()) return 0L
+        val p = pct.coerceIn(0, 100)
+        val rank = ((p * clean.size + 99) / 100).coerceIn(1, clean.size)
+        return clean[rank - 1]
+    }
+
+    /** Low quartile: what the path can do, without the slow outliers that queueing adds. */
+    fun p25(samples: List<Long>): Long = percentile(samples, 25)
 
     fun isDegraded(baselineMs: Long, sampleMs: Long): Boolean {
         if (sampleMs <= 0L) return true

@@ -20,7 +20,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-class PowPsiphonService : Service() {
+open class PowPsiphonService : Service() {
     private val worker = HandlerThread("uac-pow-inner", Process.THREAD_PRIORITY_FOREGROUND).apply { start() }
     private val incoming = Messenger(Handler(worker.looper, ::onCommand))
     private val host = Host()

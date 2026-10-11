@@ -25,6 +25,7 @@ import kotlinx.coroutines.withTimeout
 internal class PowPsiphonClient(
     private val vpn: VpnService,
     private val callbacks: Callbacks,
+    private val serviceClass: String = PowPsiphonIpc.SERVICE_CLASS,
 ) {
     interface Callbacks {
         fun onConnecting()
@@ -219,7 +220,7 @@ internal class PowPsiphonClient(
     }
 
     private fun serviceIntent(): Intent =
-        Intent().setClassName(vpn.packageName, PowPsiphonIpc.SERVICE_CLASS)
+        Intent().setClassName(vpn.packageName, serviceClass)
 
     companion object {
         private const val BIND_TIMEOUT_MS = 15_000L

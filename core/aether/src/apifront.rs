@@ -333,15 +333,23 @@ fn dechunk(body: &str) -> String {
     out
 }
 
-async fn exchange(
-    request: &ApiRequest,
+/// TLS session that has finished the handshake but has not sent the HTTP body yet.
+pub struct ReadySession {
+    tls: tokio_boring::SslStream<FragmentingStream<TcpStream>>,
+    pub address: SocketAddr,
+    fingerprint: Fingerprint,
+    pub route: &'static str,
+}
+
+async fn handshake(
+    host: &str,
     address: SocketAddr,
     fingerprint: Fingerprint,
     ech: Option<&[u8]>,
-) -> Result<ApiResponse> {
+) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
     let mut offered = ech.map(|list| list.to_vec());
     let mut retried = false;
-    let mut tls = loop {
+    loop {
         let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
             .await
             .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
@@ -366,17 +374,17 @@ async fn exchange(
 
         match tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
-            tokio_boring::connect(config, &request.host, stream),
+            tokio_boring::connect(config, host, stream),
         )
         .await
         {
             Ok(Ok(tls)) => {
                 if offered.is_some() && !tls.ssl().ech_accepted() {
-                    break Err(AetherError::Api(format!(
+                    return Err(AetherError::Api(format!(
                         "tls handshake with {address} finished without ECH"
                     )));
                 }
-                break Ok(tls);
+                return Ok(tls);
             }
             Ok(Err(error)) => {
                 // BoringSSL returns a 5-byte poison list unless this was an
@@ -401,18 +409,26 @@ async fn exchange(
                     retried = true;
                     continue;
                 }
-                break Err(AetherError::Api(format!(
+                return Err(AetherError::Api(format!(
                     "tls handshake with {address}: {error}"
                 )));
             }
             Err(_) => {
-                break Err(AetherError::Api(format!(
+                return Err(AetherError::Api(format!(
                     "tls handshake with {address} timed out"
                 )))
             }
         }
-    }?;
+    }
+}
 
+async fn write_and_read(
+    mut tls: tokio_boring::SslStream<FragmentingStream<TcpStream>>,
+    request: &ApiRequest,
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    route: &'static str,
+) -> Result<ApiResponse> {
     if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
         return Err(AetherError::Api(format!(
             "{address} negotiated http/2 which this path does not speak"
@@ -420,7 +436,6 @@ async fn exchange(
     }
 
     let wire = render_request(request);
-
     let collected = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
         tls.write_all(&wire).await?;
         tls.flush().await?;
@@ -444,158 +459,167 @@ async fn exchange(
     .map_err(|e| AetherError::Api(format!("exchange with {address}: {e}")))?;
 
     let (status, body) = parse_response(&collected)?;
-
     Ok(ApiResponse {
         status,
         body,
-        route: format!("{address} / {}", fingerprint.label()),
+        route: format!("{address} / {} / {route}", fingerprint.label()),
     })
 }
 
-pub async fn fetch(request: &ApiRequest) -> Result<ApiResponse> {
+async fn exchange(
+    request: &ApiRequest,
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    ech: Option<&[u8]>,
+) -> Result<ApiResponse> {
+    let tls = handshake(&request.host, address, fingerprint, ech).await?;
+    let route = match fingerprint {
+        Fingerprint::ChromeLike if ech.is_some() => "ech",
+        Fingerprint::SplitLegacy => "fragment",
+        _ => "tls",
+    };
+    write_and_read(tls, request, address, fingerprint, route).await
+}
+
+pub async fn send_on_session(session: ReadySession, request: &ApiRequest) -> Result<ApiResponse> {
+    write_and_read(
+        session.tls,
+        request,
+        session.address,
+        session.fingerprint,
+        session.route,
+    )
+    .await
+}
+
+async fn load_ech_config() -> Option<Vec<u8>> {
+    match crate::dns::fetch_ech_config().await {
+        Ok(list) if crate::dns::plausible_ech_list(&list) => Some(list),
+        Ok(_) | Err(_) => Some(crate::dns::ECH_CONFIG_FALLBACK.to_vec()),
+    }
+}
+
+/// Open a TLS session with ECH on the first edge that finishes the handshake.
+pub async fn open_ech_session(host: &str, addresses: &[SocketAddr]) -> Result<ReadySession> {
+    let ech = load_ech_config().await;
+    let mut failure: Option<AetherError> = None;
+    for address in addresses.iter().take(3) {
+        note_key(&format!("trying {address} with ECH (handshake only)"));
+        match handshake(host, *address, Fingerprint::ChromeLike, ech.as_deref()).await {
+            Ok(tls) => {
+                note_key(&format!("{address} ECH handshake ready"));
+                return Ok(ReadySession {
+                    tls,
+                    address: *address,
+                    fingerprint: Fingerprint::ChromeLike,
+                    route: "ech",
+                });
+            }
+            Err(error) => {
+                note_key(&format!("{address} ECH handshake failed: {error}"));
+                failure = Some(error);
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| AetherError::Api("ECH handshake failed on every edge".into())))
+}
+
+/// Open a TLS session with a split ClientHello (no ECH).
+pub async fn open_fragment_session(host: &str, addresses: &[SocketAddr]) -> Result<ReadySession> {
+    let mut failure: Option<AetherError> = None;
+    for address in addresses.iter().take(3) {
+        note_key(&format!("trying {address} with a split hello (handshake only)"));
+        match handshake(host, *address, Fingerprint::SplitLegacy, None).await {
+            Ok(tls) => {
+                note_key(&format!("{address} split-hello handshake ready"));
+                return Ok(ReadySession {
+                    tls,
+                    address: *address,
+                    fingerprint: Fingerprint::SplitLegacy,
+                    route: "fragment",
+                });
+            }
+            Err(error) => {
+                note_key(&format!("{address} split-hello handshake failed: {error}"));
+                failure = Some(error);
+            }
+        }
+    }
+    Err(failure
+        .unwrap_or_else(|| AetherError::Api("split-hello handshake failed on every edge".into())))
+}
+
+/// Open a plain TLS session to the API hostname on the current network (normal DNS).
+pub async fn open_external_session(host: &str) -> Result<ReadySession> {
+    note_key(&format!("resolving {host} on the current network"));
+    let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, 443))
+        .await
+        .map_err(|e| AetherError::Api(format!("dns lookup for {host}: {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(AetherError::Api(format!("dns lookup for {host} returned no addresses")));
+    }
+    // Prefer IPv4 first; many Iranian SIMs still break AAAA paths for the API.
+    addrs.sort_by_key(|addr| match addr.ip() {
+        IpAddr::V4(_) => 0u8,
+        IpAddr::V6(_) => 1u8,
+    });
+    let mut failure: Option<AetherError> = None;
+    for address in addrs.into_iter().take(3) {
+        note_key(&format!("trying {address} as {host} on the current network (handshake only)"));
+        match handshake(host, address, Fingerprint::Modern, None).await {
+            Ok(tls) => {
+                note_key(&format!("{address} current-network handshake ready"));
+                return Ok(ReadySession {
+                    tls,
+                    address,
+                    fingerprint: Fingerprint::Modern,
+                    route: "external",
+                });
+            }
+            Err(error) => {
+                note_key(&format!("{address} current-network handshake failed: {error}"));
+                failure = Some(error);
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| {
+        AetherError::Api("current-network handshake failed on every resolved address".into())
+    }))
+}
+
+/// Probe clean key edges (TCP accept). Shared by ECH and split-hello.
+pub async fn probe_key_edges() -> Vec<SocketAddr> {
+    reachable_key_edges().await
+}
+
+/// ECH-only key request (manual setting). Still probes clean edges first.
+pub async fn fetch_ech(request: &ApiRequest) -> Result<ApiResponse> {
     let addresses = reachable_key_edges().await;
     if addresses.is_empty() {
         return Err(AetherError::Api(
             "no camouflaged route to the api was available".into(),
         ));
     }
-
-    let first = addresses
-        .first()
-        .map(|address| address.to_string())
-        .unwrap_or_else(|| "-".into());
-    note_key(&format!(
-        "racing ECH and a split hello, first address {first}, {} addresses",
-        addresses.len()
-    ));
-
-    let ech = match crate::dns::fetch_ech_config().await {
-        Ok(list) if crate::dns::plausible_ech_list(&list) => Some(list),
-        Ok(_) | Err(_) => Some(crate::dns::ECH_CONFIG_FALLBACK.to_vec()),
-    };
-
-    let mut failure: Option<AetherError> = None;
-    // A TCP accept is not a usable key address on Irancell: ECH handshakes
-    // time out there, while a fragmented ClientHello completes. Race both on
-    // each live address and keep the first real answer.
-    for address in addresses.iter().take(3) {
-        match race_key_exchange(request, *address, ech.as_deref()).await {
-            Ok(response) if (200..300).contains(&response.status) => return Ok(response),
-            Ok(response) => {
-                failure = Some(AetherError::Api(format!(
-                    "{address} answered HTTP {}",
-                    response.status
-                )));
-            }
-            Err(error) => failure = Some(error),
-        }
-    }
-
-    Err(failure.unwrap_or_else(|| AetherError::Api("every camouflaged route failed".into())))
+    let session = open_ech_session(&request.host, &addresses).await?;
+    send_on_session(session, request).await
 }
 
-async fn race_key_exchange(
-    request: &ApiRequest,
-    address: SocketAddr,
-    ech: Option<&[u8]>,
-) -> Result<ApiResponse> {
-    note_key(&format!("trying {address} with ECH and a split hello"));
-    let ech_attempt = exchange(request, address, Fingerprint::ChromeLike, ech);
-    let split_attempt = exchange(request, address, Fingerprint::SplitLegacy, None);
-    tokio::pin!(ech_attempt);
-    tokio::pin!(split_attempt);
-    let mut ech_done = false;
-    let mut split_done = false;
-    let mut last_error: Option<AetherError> = None;
-    loop {
-        tokio::select! {
-            result = &mut ech_attempt, if !ech_done => {
-                ech_done = true;
-                match result {
-                    Ok(response) if (200..300).contains(&response.status) => {
-                        note_key(&format!(
-                            "{address} accepted the key request over ECH, HTTP {}",
-                            response.status
-                        ));
-                        return Ok(response);
-                    }
-                    Ok(response) => {
-                        note_key(&format!("{address} answered HTTP {} over ECH", response.status));
-                        last_error = Some(AetherError::Api(format!(
-                            "{address} answered HTTP {} over ECH",
-                            response.status
-                        )));
-                    }
-                    Err(error) => {
-                        note_key(&format!("{address} ECH failed: {error}"));
-                        last_error = Some(error);
-                    }
-                }
-            }
-            result = &mut split_attempt, if !split_done => {
-                split_done = true;
-                match result {
-                    Ok(response) if (200..300).contains(&response.status) => {
-                        note_key(&format!(
-                            "{address} accepted the key request over a split hello, HTTP {}",
-                            response.status
-                        ));
-                        return Ok(response);
-                    }
-                    Ok(response) => {
-                        note_key(&format!(
-                            "{address} answered HTTP {} over a split hello",
-                            response.status
-                        ));
-                        last_error = Some(AetherError::Api(format!(
-                            "{address} answered HTTP {} over a split hello",
-                            response.status
-                        )));
-                    }
-                    Err(error) => {
-                        note_key(&format!("{address} split hello failed: {error}"));
-                        last_error = Some(error);
-                    }
-                }
-            }
-        }
-        if ech_done && split_done {
-            break;
-        }
+/// Split-ClientHello-only key request (manual setting).
+pub async fn fetch_fragment(request: &ApiRequest) -> Result<ApiResponse> {
+    let addresses = reachable_key_edges().await;
+    if addresses.is_empty() {
+        return Err(AetherError::Api(
+            "no camouflaged route to the api was available".into(),
+        ));
     }
-    Err(last_error.unwrap_or_else(|| AetherError::Api(format!("key route to {address} failed"))))
+    let session = open_fragment_session(&request.host, &addresses).await?;
+    send_on_session(session, request).await
 }
 
-async fn fetch_split_hello(request: &ApiRequest, addresses: &[SocketAddr]) -> Result<ApiResponse> {
-    log::info!("[apifront] WARP API ClientHello will be split, without ECH");
-    let mut failure: Option<AetherError> = None;
-    for address in addresses {
-        note_key(&format!("trying {address} with a split hello"));
-        match exchange(request, *address, Fingerprint::SplitLegacy, None).await {
-            Ok(response) if (200..300).contains(&response.status) => {
-                note_key(&format!("{address} accepted the key request, HTTP {}", response.status));
-                return Ok(response);
-            }
-            Ok(response) => {
-                note_key(&format!("{address} answered HTTP {}", response.status));
-                log::debug!(
-                    "[apifront] {} answered {} via split hello",
-                    request.host,
-                    response.status
-                );
-                failure = Some(AetherError::Api(format!(
-                    "split hello got HTTP {}",
-                    response.status
-                )));
-            }
-            Err(error) => {
-                note_key(&format!("{address} failed: {error}"));
-                log::debug!("[apifront] split hello failed: {error}");
-                failure = Some(error);
-            }
-        }
-    }
-    Err(failure.unwrap_or_else(|| AetherError::Api("split hello route failed".into())))
+/// Back-compat name used by older call sites; ECH only.
+pub async fn fetch(request: &ApiRequest) -> Result<ApiResponse> {
+    fetch_ech(request).await
 }
 
 #[cfg(test)]

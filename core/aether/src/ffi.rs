@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 use std::ffi::{c_char, CStr, CString};
 use std::net::SocketAddr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,17 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static STOP_NOTIFY: OnceLock<Notify> = OnceLock::new();
+/// Number of `aether_prepare_json` calls in flight (key fetch / cert renewal).
+static PREPARE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Set by `aether_cancel_prepare` so an in-flight prepare gives up instead of running
+/// its key race / certificate loop to completion while the app disconnects.
+static PREPARE_CANCEL: AtomicBool = AtomicBool::new(false);
+static PREPARE_NOTIFY: OnceLock<Notify> = OnceLock::new();
+
+/// Upper bound for tearing down a native runtime after its main future ended.
+/// `Runtime::drop` waits forever for blocking tasks (for example a
+/// `getaddrinfo` behind `lookup_host` on a filtered network); this caps it.
+const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(1_500);
 
 #[no_mangle]
 pub extern "C" fn aether_set_event_callback(callback: Option<EventCallback>) {
@@ -133,6 +145,8 @@ struct NativeStartOptions {
     api_camo: String,
     #[serde(default)]
     renew_masque: bool,
+    #[serde(default)]
+    quic_tuned: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -172,6 +186,7 @@ impl Default for NativeStartOptions {
             scan_once: true,
             api_camo: String::new(),
             renew_masque: false,
+            quic_tuned: false,
         }
     }
 }
@@ -233,6 +248,7 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.scan_once = value.scan_once;
         options.api_camo = value.api_camo;
         options.renew_masque = value.renew_masque;
+        options.quic_tuned = value.quic_tuned;
         options.http_proxy = match value.http_proxy.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),
@@ -337,6 +353,28 @@ async fn wait_for_stop() {
     }
 }
 
+fn prepare_notify() -> &'static Notify {
+    PREPARE_NOTIFY.get_or_init(Notify::new)
+}
+
+async fn wait_for_prepare_cancel() {
+    loop {
+        let notified = prepare_notify().notified();
+        if PREPARE_CANCEL.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+struct PrepareGuard;
+
+impl Drop for PrepareGuard {
+    fn drop(&mut self) {
+        PREPARE_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct RunningGuard;
 
 impl Drop for RunningGuard {
@@ -403,7 +441,7 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
             }
         };
 
-        runtime.block_on(async {
+        let code = runtime.block_on(async {
             tokio::select! {
                 result = crate::start(options) => match result {
                     Ok(()) => 0,
@@ -414,7 +452,10 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
                 },
                 _ = wait_for_stop() => 0,
             }
-        })
+        });
+        // Bounded teardown: never let a stuck blocking task keep RUNNING set.
+        runtime.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+        code
     }));
 
     match result {
@@ -437,6 +478,9 @@ pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
                 return -1;
             }
         };
+        PREPARE_ACTIVE.fetch_add(1, Ordering::AcqRel);
+        let _active = PrepareGuard;
+        PREPARE_CANCEL.store(false, Ordering::Release);
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -448,7 +492,19 @@ pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
             }
         };
 
-        match runtime.block_on(crate::prepare(&options)) {
+        let outcome = runtime.block_on(async {
+            tokio::select! {
+                result = crate::prepare(&options) => Some(result),
+                _ = wait_for_prepare_cancel() => None,
+            }
+        });
+        runtime.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+        let Some(outcome) = outcome else {
+            record_log("Key: request cancelled because the connection was stopped");
+            set_last_error("cancelled: connection stopped");
+            return -4;
+        };
+        match outcome {
             Ok(TunnelAddresses {
                 ipv4,
                 ipv6,
@@ -615,6 +671,20 @@ pub extern "C" fn aether_stop() -> i32 {
 
     STOP_REQUESTED.store(true, Ordering::Release);
     stop_notify().notify_waiters();
+    1
+}
+
+/// Aborts an in-flight `aether_prepare_json` (key race, certificate renewal).
+/// `aether_stop` only reaches a RUNNING tunnel, and prepare runs before that,
+/// so a disconnect during key/cert work used to wait for it to finish.
+/// Returns 1 if a prepare was in flight, else 0.
+#[no_mangle]
+pub extern "C" fn aether_cancel_prepare() -> i32 {
+    if PREPARE_ACTIVE.load(Ordering::Acquire) == 0 {
+        return 0;
+    }
+    PREPARE_CANCEL.store(true, Ordering::Release);
+    prepare_notify().notify_waiters();
     1
 }
 

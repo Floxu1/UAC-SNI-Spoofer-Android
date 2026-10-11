@@ -10,7 +10,9 @@ data class PowEngineSettings(
     val firewallProfile: String = PowCoreConfig.FIREWALL_AUTO,
     val linkRecipe: String = PowCoreConfig.RECIPE_AUTO,
     val chainPsiphon: Boolean = true,
-    val keyFetch: String = PowCoreConfig.KEY_ECH,
+    val keyFetch: String = PowCoreConfig.KEY_AUTO,
+    val psiphonTunnelPool: Boolean = false,
+    val quicTuned: Boolean = false,
 ) {
     fun validated(): PowEngineSettings {
         val country = PowRegions.normalize(exitCountryCode)
@@ -30,7 +32,7 @@ data class PowEngineSettings(
             scanMode = PowCoreConfig.normalizeScanMode(scanMode),
             firewallProfile = if (firewall in PowCoreConfig.FIREWALLS) firewall else PowCoreConfig.FIREWALL_AUTO,
             linkRecipe = if (recipe in PowCoreConfig.RECIPES) recipe else PowCoreConfig.RECIPE_AUTO,
-            keyFetch = if (fetch in PowCoreConfig.KEY_FETCHES) fetch else PowCoreConfig.KEY_ECH,
+            keyFetch = if (fetch in PowCoreConfig.KEY_FETCHES) fetch else PowCoreConfig.KEY_AUTO,
         )
     }
 

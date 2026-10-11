@@ -44,6 +44,178 @@ internal object PowSocksConnectOnly {
     @Volatile
     private var upstreamPort: Int = PowCoreConfig.SOCKS_PORT
 
+    // "Two tunnels at once": SOCKS port of Psiphon tunnel 2, or 0 when it is not up.
+    @Volatile
+    private var secondaryPort: Int = 0
+
+    fun setSecondaryPort(port: Int) {
+        secondaryPort = if (port > 0) port else 0
+    }
+
+    private class Plan(val ports: IntArray, val tunnels: IntArray, val group: String)
+
+    /** Host of a SOCKS CONNECT request: the name, or the IPv4/IPv6 literal. */
+    private fun requestTarget(request: ByteArray): String? = when (request[3].toInt() and 0xff) {
+        0x03 -> requestDomain(request)?.first
+        0x01 -> if (request.size >= 8) {
+            (4 until 8).joinToString(".") { (request[it].toInt() and 0xff).toString() }
+        } else {
+            null
+        }
+        0x04 -> if (request.size >= 20) {
+            runCatching { InetAddress.getByAddress(request.copyOfRange(4, 20)).hostAddress }.getOrNull()
+        } else {
+            null
+        }
+        else -> null
+    }
+
+    /**
+     * Which local Psiphon SOCKS port(s) to use. With one tunnel (toggle off, or
+     * tunnel 2 never came up) this is just tunnel 1 and nothing else runs.
+     * With two, every service is pinned to one tunnel (PowStickyRoute) and the
+     * other is only a fallback when the pinned one does not answer locally.
+     */
+    private fun upstreamPlan(request: ByteArray): Plan? {
+        val second = secondaryPort
+        if (second <= 0 && !PowStickyRoute.active) return null
+        val target = requestTarget(request) ?: return null
+        val choice = PowStickyRoute.choose(target, second > 0)
+        if ((choice.fresh || choice.moved) && PowStickyRoute.shouldLog()) {
+            AppLogRepository.info(
+                LogSource.POW,
+                "Sticky: $target -> ${choice.group} on tunnel ${choice.tunnel + 1}" +
+                    if (choice.moved) " (tunnel 2 down, moved)" else "",
+            )
+        }
+        if (second <= 0) return null
+        return if (choice.tunnel == PowStickyRoute.TUNNEL_2) {
+            Plan(intArrayOf(second, upstreamPort), intArrayOf(PowStickyRoute.TUNNEL_2, PowStickyRoute.TUNNEL_1), choice.group)
+        } else {
+            Plan(intArrayOf(upstreamPort, second), intArrayOf(PowStickyRoute.TUNNEL_1, PowStickyRoute.TUNNEL_2), choice.group)
+        }
+    }
+
+    /** Connect + SOCKS greeting to the first local tunnel that answers, in plan order. */
+    private fun connectPlanned(plan: Plan, timeout: Int): Socket {
+        var last: Throwable? = null
+        for (index in plan.ports.indices) {
+            val attempt = Socket()
+            track(attempt)
+            try {
+                attempt.tcpNoDelay = true
+                attempt.keepAlive = true
+                attempt.connect(InetSocketAddress("127.0.0.1", plan.ports[index]), timeout)
+                attempt.soTimeout = timeout
+                val out = attempt.getOutputStream()
+                out.write(byteArrayOf(0x05, 0x01, 0x00))
+                out.flush()
+                val auth = readExact(attempt.getInputStream(), 2)
+                if (auth[0] != 0x05.toByte() || auth[1] != 0x00.toByte()) error("upstream socks auth")
+                if (index > 0) {
+                    PowStickyRoute.moveTo(plan.group, plan.tunnels[index])
+                    if (PowStickyRoute.shouldLog()) {
+                        AppLogRepository.warning(
+                            LogSource.POW,
+                            "Sticky: ${plan.group} moved to tunnel ${plan.tunnels[index] + 1} " +
+                                "(tunnel ${plan.tunnels[0] + 1} did not answer)",
+                        )
+                    }
+                }
+                return attempt
+            } catch (error: Throwable) {
+                last = error
+                untrack(attempt)
+                runCatching { attempt.close() }
+            }
+        }
+        throw last ?: IllegalStateException("no upstream")
+    }
+
+    // Iranian (.ir) names leave on the phone's own network instead of going
+    // through Psiphon. This process is excluded from the VPN
+    // (AppRoutingPreferences always disallows our own package), so the socket
+    // cannot loop back into the TUN. It never goes through WARP.
+    private const val DOMESTIC_CONNECT_TIMEOUT_MS = 4_000
+    private val DOMESTIC_SUCCESS = byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
+    @Volatile private var domesticDirect = true
+    private val domesticLogged = AtomicBoolean(false)
+
+    fun setDomesticDirect(enabled: Boolean) {
+        domesticDirect = enabled
+        domesticLogged.set(false)
+    }
+
+    /** True for a host name under the .ir TLD (SOCKS ATYP domain only). */
+    fun isDomesticHost(host: String): Boolean {
+        val name = host.trim().trimEnd('.').lowercase()
+        return name.length > 3 && name.endsWith(".ir")
+    }
+
+    private fun requestDomain(request: ByteArray): Pair<String, Int>? {
+        if (request.size < 7 || (request[3].toInt() and 0xff) != 0x03) return null
+        val len = request[4].toInt() and 0xff
+        if (request.size < 5 + len + 2) return null
+        val host = String(request, 5, len, Charsets.US_ASCII)
+        val port = ((request[5 + len].toInt() and 0xff) shl 8) or (request[6 + len].toInt() and 0xff)
+        return host to port
+    }
+
+    // Small resolver cache for the .ir direct route: Android's own InetAddress
+    // cache lives ~2s, so repeat page loads re-asked the carrier DNS each time.
+    private const val DOMESTIC_DNS_TTL_MS = 120_000L
+    private const val DOMESTIC_DNS_MAX = 256
+    private class Resolved(val address: InetAddress, val at: Long)
+    private val domesticDns = ConcurrentHashMap<String, Resolved>()
+
+    private fun resolveDomestic(host: String): InetAddress {
+        val key = host.trim().trimEnd('.').lowercase()
+        val now = SystemClock.elapsedRealtime()
+        domesticDns[key]?.let { cached ->
+            if (now - cached.at < DOMESTIC_DNS_TTL_MS) return cached.address
+        }
+        val address = InetAddress.getByName(key)
+        if (domesticDns.size >= DOMESTIC_DNS_MAX) domesticDns.clear()
+        domesticDns[key] = Resolved(address, now)
+        return address
+    }
+
+    /** Warm the .ir direct-route cache (phone network DNS; never through Psiphon or WARP). */
+    fun prefetchDomestic(host: String): Boolean =
+        isDomesticHost(host) && runCatching { resolveDomestic(host) }.isSuccess
+
+    private fun connectDomestic(request: ByteArray): Socket? {
+        if (!domesticDirect) return null
+        val (host, port) = requestDomain(request) ?: return null
+        if (!isDomesticHost(host) || port <= 0) return null
+        val direct = Socket()
+        return try {
+            direct.tcpNoDelay = true
+            direct.keepAlive = true
+            val address = try {
+                resolveDomestic(host)
+            } catch (error: Throwable) {
+                domesticDns.remove(host.trim().trimEnd('.').lowercase())
+                throw error
+            }
+            try {
+                direct.connect(InetSocketAddress(address, port), DOMESTIC_CONNECT_TIMEOUT_MS)
+            } catch (error: Throwable) {
+                // A stale cached address must not pin the failure: forget it so
+                // the next attempt resolves again.
+                domesticDns.remove(host.trim().trimEnd('.').lowercase())
+                throw error
+            }
+            if (domesticLogged.compareAndSet(false, true)) {
+                AppLogRepository.info(LogSource.POW, "Split: $host went direct over the phone network (.ir)")
+            }
+            direct
+        } catch (_: Throwable) {
+            runCatching { direct.close() }
+            null
+        }
+    }
+
     @Synchronized
     fun start(listenPort: Int, targetPort: Int): Boolean {
         stopLocked()
@@ -151,6 +323,9 @@ internal object PowSocksConnectOnly {
         synchronized(passiveLatencies) { passiveLatencies.clear() }
     }
 
+    /** Drops samples taken while the tunnel was busy, so they are never judged. */
+    fun discardPassiveSamples() = forgetPassiveSamples()
+
     fun setUpstreamPort(port: Int) {
         if (port > 0) upstreamPort = port
     }
@@ -167,6 +342,7 @@ internal object PowSocksConnectOnly {
             runCatching { thread.join(500L) }
         }
         liveSockets.clear()
+        domesticDns.clear()
         activeStreams.set(0)
         forgetPassiveSamples()
     }
@@ -187,9 +363,41 @@ internal object PowSocksConnectOnly {
             output.write(byteArrayOf(0x05, 0x00))
             output.flush()
             val request = readRequest(input)
+            requestDomain(request)?.let { PowDnsWarm.note(it.first) }
             if ((request[1].toInt() and 0xff) != CMD_CONNECT) {
                 output.write(COMMAND_NOT_SUPPORTED)
                 output.flush()
+                return
+            }
+            val domestic = connectDomestic(request)
+            if (domestic != null) {
+                upstream = domestic
+                track(domestic)
+                output.write(DOMESTIC_SUCCESS)
+                output.flush()
+                client.soTimeout = 0
+                spliceWithQos(
+                    client,
+                    domestic,
+                    input,
+                    output,
+                    domestic.getInputStream(),
+                    domestic.getOutputStream(),
+                    started,
+                    measure = false,
+                )
+                return
+            }
+            val plan = upstreamPlan(request)
+            if (plan != null) {
+                val picked = connectPlanned(plan, timeout)
+                upstream = picked
+                val pickedIn = picked.getInputStream()
+                val pickedOut = picked.getOutputStream()
+                pickedOut.write(request)
+                client.soTimeout = 0
+                picked.soTimeout = 0
+                spliceWithQos(client, picked, input, output, pickedIn, pickedOut, started)
                 return
             }
             val remote = Socket()
@@ -215,7 +423,10 @@ internal object PowSocksConnectOnly {
             spliceWithQos(client, remote, input, output, upIn, upOut, started)
         } catch (_: Throwable) {
             recordPassiveFailure()
-            activeStreams.decrementAndGet()
+        } finally {
+            // Every exit path (normal end, early return, failure) releases the
+            // stream exactly once; the count used to only grow.
+            activeStreams.updateAndGet { if (it > 0) it - 1 else 0 }
             untrack(upstream)
             untrack(client)
             runCatching { upstream?.close() }
@@ -259,6 +470,7 @@ internal object PowSocksConnectOnly {
         upIn: InputStream,
         upOut: OutputStream,
         startedMs: Long,
+        measure: Boolean = true,
     ) {
         val upload = Thread({
             runCatching {
@@ -279,13 +491,14 @@ internal object PowSocksConnectOnly {
             while (upIn.read(buf).also { n = it } >= 0) {
                 if (!firstByteRecorded) {
                     firstByteRecorded = true
-                    recordPassiveLatency(SystemClock.elapsedRealtime() - startedMs)
+                    if (measure) recordPassiveLatency(SystemClock.elapsedRealtime() - startedMs)
                 }
                 clientOut.write(buf, 0, n); clientOut.flush()
             }
         }
         runCatching { client.shutdownOutput() }
-        runCatching { upload.join(1_000L) }
+        // The caller closes both sockets next; give a half-closed upload time to finish.
+        runCatching { upload.join(5_000L) }
     }
 
     private fun readExact(input: InputStream, count: Int): ByteArray {

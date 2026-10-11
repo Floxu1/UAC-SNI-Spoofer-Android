@@ -100,6 +100,11 @@ class UacVpnService : VpnService() {
     @Volatile private var killSwitchFd: ParcelFileDescriptor? = null
     @Volatile private var autoReconnectAttempts = 0
     @Volatile private var autoReconnectJob: Job? = null
+    @Volatile private var disconnectJob: Job? = null
+    @Volatile private var disconnectInFlight = false
+    @Volatile private var reconnectAfterDisconnect = false
+    @Volatile private var closeTasksAfterDisconnect = false
+    private val finishedStopToken = AtomicLong(-1L)
     private val aiRouteController by lazy { com.uacspoofer.mobile.ai.AiRouteController(this) }
 
     private lateinit var nativeTunEngine: XrayNativeTunEngine
@@ -452,6 +457,14 @@ class UacVpnService : VpnService() {
         activeRouteProbeId?.let {
             routeProbeJob?.cancel()
         }
+        if (disconnectInFlight) {
+            // Connect pressed while a stop is still unwinding: run it as soon as the stop
+            // finishes (normally or via the hard timeout) instead of silently dropping it.
+            reconnectAfterDisconnect = true
+            runCatching { startForegroundNotification(connected = false) }
+            AppLogRepository.info(LogSource.SERVICE, "Connect queued until the current disconnect finishes")
+            return
+        }
         if (resourcesActive || connectJob?.isActive == true) return
         val settings = advancedSettingsStore.snapshot()
         activeConnectionMode = settings.connectionMode
@@ -528,11 +541,23 @@ class UacVpnService : VpnService() {
         NetworkGuardStore.markUserStopped()
         autoReconnectJob?.cancel()
         ConnectRescueStore.hide()
+        reconnectAfterDisconnect = false
+        if (closeAppTasks) closeTasksAfterDisconnect = true
+        if (disconnectInFlight && disconnectJob?.isActive == true) {
+            // Idempotent: a second tap (or notification + app) must not start a second teardown.
+            AppLogRepository.info(LogSource.SERVICE, "Disconnect already in progress")
+            if (activeEngine.isPow) runCatching { powCoordinator.signalStop() }
+            return
+        }
         activeRouteProbeId?.let {
             routeProbeJob?.cancel()
         }
         ConnectionStateStore.tryBeginDisconnect()
-        generation.incrementAndGet()
+        val stopToken = generation.incrementAndGet()
+        disconnectInFlight = true
+        // Tell the PoW engine right away so a blocking native step (key race, certificate
+        // renewal, address scan, MASQUE dial) aborts before we start joining jobs.
+        if (activeEngine.isPow) runCatching { powCoordinator.signalStop() }
         val pendingConnect = connectJob
         val pendingHealth = healthJob
         val pendingStats = statsJob
@@ -540,29 +565,94 @@ class UacVpnService : VpnService() {
         val pendingLearning = adaptiveLearningJob
         val pendingNetworkWatch = networkWatchJob
         val pendingRouteProbe = routeProbeJob
-        serviceScope.launch {
-            pendingRouteProbe?.cancelAndJoin()
-            pendingConnect?.cancelAndJoin()
-            pendingHealth?.cancelAndJoin()
-            pendingStats?.cancelAndJoin()
-            pendingLatency?.cancelAndJoin()
-            pendingLearning?.cancelAndJoin()
-            pendingNetworkWatch?.cancelAndJoin()
-            healthJob = null
-            statsJob = null
-            latencyJob = null
-            adaptiveLearningJob = null
-            networkWatchJob = null
-            lifecycleMutex.withLock {
-                cleanupRoute()
-                resourcesActive = false
+        val job = serviceScope.launch {
+            try {
+                pendingRouteProbe?.cancelAndJoin()
+                pendingConnect?.cancelAndJoin()
+                pendingHealth?.cancelAndJoin()
+                pendingStats?.cancelAndJoin()
+                pendingLatency?.cancelAndJoin()
+                pendingLearning?.cancelAndJoin()
+                pendingNetworkWatch?.cancelAndJoin()
+                healthJob = null
+                statsJob = null
+                latencyJob = null
+                adaptiveLearningJob = null
+                networkWatchJob = null
+                lifecycleMutex.withLock {
+                    if (generation.get() == stopToken) {
+                        cleanupRoute()
+                        resourcesActive = false
+                    }
+                }
+                AppLogRepository.info(LogSource.SERVICE, "Disconnected; connection resources released")
+            } catch (cancelled: CancellationException) {
+                AppLogRepository.info(LogSource.SERVICE, "Disconnect teardown interrupted")
+            } catch (error: Throwable) {
+                AppLogRepository.error(LogSource.SERVICE, "Disconnect teardown failed", error)
+            } finally {
+                withContext(NonCancellable) { finishDisconnect(stopToken, forced = false) }
             }
-            ConnectionStateStore.markDisconnected()
-            AppLogRepository.info(LogSource.SERVICE, "Disconnected; connection resources released")
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            if (closeAppTasks) finishAppTasks()
-            stopSelf()
         }
+        disconnectJob = job
+        serviceScope.launch {
+            delay(DISCONNECT_HARD_TIMEOUT_MS)
+            if (job.isCompleted || finishedStopToken.get() == stopToken) return@launch
+            AppLogRepository.warning(
+                LogSource.SERVICE,
+                "Disconnect did not finish in ${DISCONNECT_HARD_TIMEOUT_MS / 1000}s; forcing teardown",
+            )
+            forceTeardown(stopToken)
+        }
+    }
+
+    /**
+     * Hard-timeout path: releases the VPN interface and native engines without waiting on
+     * [lifecycleMutex] or the stuck jobs, then reports DISCONNECTED so the UI never hangs.
+     */
+    private fun forceTeardown(stopToken: Long) {
+        if (generation.get() != stopToken) return
+        if (activeEngine.isPow) runCatching { powCoordinator.forceRelease() }
+        connectJob?.cancel()
+        connectJob = null
+        healthJob?.cancel()
+        statsJob?.cancel()
+        latencyJob?.cancel()
+        networkWatchJob?.cancel()
+        adaptiveLearningJob?.cancel()
+        runCatching { LanShareProxy.stop() }
+        runCatching { TunPacketFilter.stop() }
+        closeKillSwitchTun()
+        NetworkGuardStore.setBlocking(false)
+        finishDisconnect(stopToken, forced = true)
+    }
+
+    /** Idempotent per stop request; whichever of the normal or forced path gets here first wins. */
+    private fun finishDisconnect(stopToken: Long, forced: Boolean) {
+        if (finishedStopToken.getAndSet(stopToken) == stopToken) return
+        disconnectInFlight = false
+        if (generation.get() != stopToken) {
+            // A newer connect/reconnect took over; it owns the state now.
+            return
+        }
+        resourcesActive = false
+        ConnectionStateStore.markDisconnected()
+        if (forced) {
+            AppLogRepository.warning(LogSource.SERVICE, "Disconnected (forced after timeout)")
+        }
+        if (reconnectAfterDisconnect) {
+            reconnectAfterDisconnect = false
+            closeTasksAfterDisconnect = false
+            AppLogRepository.info(LogSource.SERVICE, "Running the connect that was queued during disconnect")
+            requestConnect()
+            return
+        }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        if (closeTasksAfterDisconnect) {
+            closeTasksAfterDisconnect = false
+            runCatching { finishAppTasks() }
+        }
+        stopSelf()
     }
 
     private fun finishAppTasks() {
@@ -1855,6 +1945,7 @@ class UacVpnService : VpnService() {
     }
 
     companion object {
+        private const val DISCONNECT_HARD_TIMEOUT_MS = 5_000L
         const val ACTION_CONNECT = "com.uacspoofer.mobile.CONNECT"
         const val ACTION_DISCONNECT = "com.uacspoofer.mobile.DISCONNECT"
         const val ACTION_CLOSE = "com.uacspoofer.mobile.CLOSE"

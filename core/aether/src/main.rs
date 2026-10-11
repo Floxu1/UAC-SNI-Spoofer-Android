@@ -71,12 +71,15 @@ pub struct StartOptions {
     /// though the code to serve it was already here. Carried in the config now, and
     /// the environment variable is still honoured as a fallback for the CLI.
     pub http_proxy: Option<SocketAddr>,
-    /// How a missing WARP key is requested. `ech` hides the API name,
-    /// `fragment` splits the ClientHello with no ECH, `external` uses the
-    /// direct route so another VPN can carry it. Empty keeps both routes.
+    /// How a missing WARP key is requested. `auto` races ECH, split
+    /// ClientHello, and the current network (handshake-first). `ech` /
+    /// `fragment` / `external` force a single route.
     pub api_camo: String,
     /// When set, prepare replaces the MASQUE certificate even if one is already saved.
     pub renew_masque: bool,
+    /// Optional HTTP/3 tuning (BBRv2, pacing, short DATAGRAM queues).
+    /// Passed to the QUIC tunnel as `AETHER_QUIC_TUNED`.
+    pub quic_tuned: bool,
     /// Android owns the outer-protocol ladder. One failed hunt must return so
     /// Kotlin can try the next transport instead of sleeping inside a rescan loop
     /// until the app kills the process.
@@ -185,6 +188,7 @@ impl StartOptions {
             scan_once: false,
             api_camo: String::new(),
             renew_masque: false,
+            quic_tuned: false,
         }
     }
 
@@ -255,6 +259,7 @@ pub async fn run_cli() -> Result<()> {
     options.access_email = std::env::var("AETHER_ACCESS_EMAIL").ok();
     options.gateway = std::env::var("AETHER_GATEWAY").is_ok();
     options.api_camo = std::env::var("AETHER_API_CAMO").unwrap_or_default();
+    options.quic_tuned = std::env::var("AETHER_QUIC_TUNED").is_ok_and(|v| v.trim() == "1");
     options.endpoint_discovery =
         EndpointDiscovery::parse(&std::env::var("AETHER_DISCOVERY").unwrap_or_default());
     options.scan_once = std::env::var("AETHER_SCAN_ONCE").is_ok_and(|v| {
@@ -363,8 +368,15 @@ fn apply_runtime_options(options: &StartOptions) {
     } else {
         std::env::remove_var("AETHER_MASQUE_H2_FRAGMENT");
     }
+    if options.quic_tuned {
+        std::env::set_var("AETHER_QUIC_TUNED", "1");
+    } else {
+        std::env::remove_var("AETHER_QUIC_TUNED");
+    }
     match options.api_camo.trim() {
-        "ech" | "fragment" | "external" => std::env::set_var("AETHER_API_CAMO", options.api_camo.trim()),
+        "auto" | "ech" | "fragment" | "external" => {
+            std::env::set_var("AETHER_API_CAMO", options.api_camo.trim())
+        }
         _ => std::env::remove_var("AETHER_API_CAMO"),
     }
     crate::ffi::set_log_path(Some(core_log_path(&options.config_path)));

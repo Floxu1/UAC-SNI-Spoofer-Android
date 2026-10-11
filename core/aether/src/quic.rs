@@ -81,6 +81,55 @@ fn data_check_enabled_for(value: Option<&str>) -> bool {
     matches!(value, Some("1") | Some("true") | Some("yes") | Some("on"))
 }
 
+/// `AETHER_QUIC_TUNED=1`: BBRv2, paced sending and short DATAGRAM queues.
+/// Read once when a tunnel starts.
+fn quic_tuned_for(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1") | Some("true") | Some("on"))
+}
+
+fn quic_tuned_enabled() -> bool {
+    quic_tuned_for(std::env::var("AETHER_QUIC_TUNED").ok().as_deref())
+}
+
+/// Packets quiche releases ahead of their pacing time (`SendInfo::at`) are
+/// held here until due. Off: everything goes out at once, as before.
+struct Pacer {
+    enabled: bool,
+    held: Vec<u8>,
+    held_len: usize,
+    held_info: Option<quiche::SendInfo>,
+}
+
+/// Sending this close to the release time is fine; tokio timers are 1ms.
+const PACING_GRANULARITY: Duration = Duration::from_millis(1);
+
+impl Pacer {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            held: if enabled { vec![0u8; MAX_DATAGRAM_SIZE] } else { Vec::new() },
+            held_len: 0,
+            held_info: None,
+        }
+    }
+
+    /// When the held packet is due, if one is waiting.
+    fn due(&self) -> Option<Instant> {
+        self.held_info.as_ref().map(|info| info.at)
+    }
+
+    fn not_yet(&self, at: Instant) -> bool {
+        self.enabled && at > Instant::now() + PACING_GRANULARITY
+    }
+}
+
+async fn sleep_until_opt(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 fn data_check_enabled() -> bool {
     data_check_enabled_for(std::env::var("AETHER_MASQUE_DATA_CHECK").ok().as_deref())
 }
@@ -211,6 +260,8 @@ pub async fn run(
     let peer = cfg.peer;
     let quiet = cfg.quiet;
     let data_check = data_check_enabled();
+    let tuned = quic_tuned_enabled();
+    let mut pacer = Pacer::new(tuned);
     let probe_packet = masque::build_dns_probe_packet(cfg.local_ipv4);
     let mut ready_tx = ready_tx;
     let mut ready_fired = false;
@@ -237,6 +288,18 @@ pub async fn run(
         pin_endpoint: false,
         expected_pins: &[],
     })?;
+    if tuned {
+        tls::apply_quic_tuning(&mut config);
+        log_or_debug(
+            quiet,
+            format!(
+                "[quic] tuned: cc=bbr2 pacing=on dgram_queue={}",
+                tls::TUNED_DGRAM_QUEUE
+            ),
+        );
+    } else {
+        log_or_debug(quiet, "[quic] tuned: off".to_string());
+    }
 
     let mut current_ech = cfg.ech_config_list.clone();
 
@@ -262,7 +325,7 @@ pub async fn run(
     }
 
     let mut send_buf = vec![0u8; MAX_DATAGRAM_SIZE];
-    flush(&mut conn, &sockets, &mut send_buf).await?;
+    flush(&mut conn, &sockets, &mut send_buf, &mut pacer).await?;
 
     let mut out_buf = vec![0u8; 65535];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(20));
@@ -434,6 +497,9 @@ pub async fn run(
             _ = sleep_opt(timeout) => {
                 conn.on_timeout();
             }
+
+            // Tuned only: a paced packet is due; flush below sends it.
+            _ = sleep_until_opt(pacer.due()), if pacer.due().is_some() => {}
         }
 
         if conn.is_established() && h3_conn.is_none() {
@@ -513,7 +579,7 @@ pub async fn run(
             }
         }
 
-        flush(&mut conn, &sockets, &mut send_buf).await?;
+        flush(&mut conn, &sockets, &mut send_buf, &mut pacer).await?;
 
         if conn.is_closed() {
             if !established_ever && !ech_retried && current_ech.is_some() {
@@ -535,7 +601,9 @@ pub async fn run(
                     h3_conn = None;
                     req_stream = None;
                     capsules = CapsuleParser::new();
-                    flush(&mut conn, &sockets, &mut send_buf).await?;
+                    // A packet held for the old connection must not leak out.
+                    pacer.held_info = None;
+                    flush(&mut conn, &sockets, &mut send_buf, &mut pacer).await?;
                     continue;
                 }
             }
@@ -728,11 +796,28 @@ fn drain_datagrams(
 /// iteration — thousands of times a second on a fast tunnel — and allocating a
 /// fresh 1350-byte `Vec` each call put a hot allocation directly in the data
 /// path.
+async fn send_packet(
+    sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    data: &[u8],
+    send_info: &quiche::SendInfo,
+) -> Result<()> {
+    if let Some(sock) = sockets.get(&send_info.from) {
+        sock.send_to(data, send_info.to).await?;
+    } else if let Some((_, sock)) = sockets.iter().next() {
+        sock.send_to(data, send_info.to).await?;
+    }
+    Ok(())
+}
+
 async fn flush(
     conn: &mut quiche::Connection,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
     out: &mut [u8],
+    pacer: &mut Pacer,
 ) -> Result<()> {
+    if pacer.enabled {
+        return flush_paced(conn, sockets, out, pacer).await;
+    }
     loop {
         match conn.send(out) {
             Ok((write, send_info)) => {
@@ -747,6 +832,42 @@ async fn flush(
         }
     }
 
+    Ok(())
+}
+
+/// Tuned flush: honours `SendInfo::at`. A packet whose release time is still
+/// ahead is parked in the pacer and the main loop wakes when it is due, so
+/// receiving and timers keep running in the meantime. Nothing new is built
+/// while a packet is parked, which is what spreads a burst over time.
+async fn flush_paced(
+    conn: &mut quiche::Connection,
+    sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    out: &mut [u8],
+    pacer: &mut Pacer,
+) -> Result<()> {
+    if let Some(info) = pacer.held_info {
+        if pacer.not_yet(info.at) && !conn.is_closed() {
+            return Ok(());
+        }
+        pacer.held_info = None;
+        let len = pacer.held_len;
+        send_packet(sockets, &pacer.held[..len], &info).await?;
+    }
+    loop {
+        match conn.send(out) {
+            Ok((write, send_info)) => {
+                if pacer.not_yet(send_info.at) && !conn.is_closed() {
+                    pacer.held[..write].copy_from_slice(&out[..write]);
+                    pacer.held_len = write;
+                    pacer.held_info = Some(send_info);
+                    break;
+                }
+                send_packet(sockets, &out[..write], &send_info).await?;
+            }
+            Err(quiche::Error::Done) => break,
+            Err(e) => return Err(AetherError::Quic(e)),
+        }
+    }
     Ok(())
 }
 
@@ -1132,7 +1253,16 @@ async fn flush_connected(conn: &mut quiche::Connection, sock: &UdpSocket) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{data_check_enabled_for, describe_connection_error, tls_alert_name};
+    use super::{data_check_enabled_for, describe_connection_error, quic_tuned_for, tls_alert_name};
+
+    #[test]
+    fn quic_tuning_is_opt_in() {
+        assert!(!quic_tuned_for(None));
+        assert!(!quic_tuned_for(Some("")));
+        assert!(!quic_tuned_for(Some("0")));
+        assert!(quic_tuned_for(Some("1")));
+        assert!(quic_tuned_for(Some("true")));
+    }
 
     #[test]
     fn h3_data_validation_is_opt_in() {

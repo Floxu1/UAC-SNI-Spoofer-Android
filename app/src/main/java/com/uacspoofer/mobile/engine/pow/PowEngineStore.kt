@@ -91,6 +91,8 @@ class PowEngineStore private constructor(context: Context) {
             .putString(KEY_LINK_RECIPE, validated.linkRecipe)
             .putBoolean(KEY_CHAIN_PSIPHON, validated.chainPsiphon)
             .putString(KEY_FETCH, validated.keyFetch)
+            .putBoolean(KEY_PSIPHON_POOL, validated.psiphonTunnelPool)
+            .putBoolean(KEY_QUIC_TUNED, validated.quicTuned)
             .apply()
         mutableSettings.value = validated
         return validated
@@ -129,6 +131,20 @@ class PowEngineStore private constructor(context: Context) {
     fun saveStrategyWinnerWithRtt(index: Int, shape: String, rttMs: Long) {
         saveStrategyWinner(index, shape)
         if (rttMs > 0) PowNetworkScoreboard.saveStrategy(prefs, PowNetworkScoreboard.networkKey(appContext), index, shape, rttMs)
+    }
+
+    fun saveStrategyRtt(strategy: String, rttMs: Long) {
+        PowNetworkScoreboard.saveStrategyRtt(prefs, PowNetworkScoreboard.networkKey(appContext), strategy, rttMs)
+    }
+
+    fun strategyRtts(strategies: List<String>): Map<String, Long> =
+        PowNetworkScoreboard.loadStrategyRtts(prefs, PowNetworkScoreboard.networkKey(appContext), strategies)
+
+    fun rememberedRegion(): String? =
+        PowNetworkScoreboard.loadRegion(prefs, PowNetworkScoreboard.networkKey(appContext))
+
+    fun saveRegion(region: String) {
+        PowNetworkScoreboard.saveRegion(prefs, PowNetworkScoreboard.networkKey(appContext), region)
     }
 
     fun availableRegions(): List<String> =
@@ -177,7 +193,9 @@ class PowEngineStore private constructor(context: Context) {
         firewallProfile = prefs.getString(KEY_FIREWALL, PowCoreConfig.FIREWALL_AUTO).orEmpty(),
         linkRecipe = prefs.getString(KEY_LINK_RECIPE, PowCoreConfig.RECIPE_AUTO).orEmpty(),
         chainPsiphon = prefs.getBoolean(KEY_CHAIN_PSIPHON, true),
-        keyFetch = prefs.getString(KEY_FETCH, PowCoreConfig.KEY_ECH).orEmpty(),
+        keyFetch = prefs.getString(KEY_FETCH, PowCoreConfig.KEY_AUTO).orEmpty(),
+        psiphonTunnelPool = prefs.getBoolean(KEY_PSIPHON_POOL, false),
+        quicTuned = prefs.getBoolean(KEY_QUIC_TUNED, false),
     ).validated()
 
     private fun readLastConnect(): PowLastConnect {
@@ -210,6 +228,8 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_LINK_RECIPE = "link_recipe"
         private const val KEY_CHAIN_PSIPHON = "chain_psiphon"
         private const val KEY_FETCH = "key_fetch"
+        private const val KEY_PSIPHON_POOL = "psiphon_tunnel_pool"
+        private const val KEY_QUIC_TUNED = "quic_tuned"
         private const val KEY_LAST_PROTOCOL = "last_connect_protocol"
         private const val KEY_LAST_TRANSPORT = "last_connect_transport"
         private const val KEY_LAST_IP = "last_connect_ip"

@@ -8,6 +8,7 @@ use boring::pkey::PKey;
 use boring::ssl::{SslConnector, SslMethod, SslVersion};
 use boring::x509::X509;
 use bytes::Bytes;
+use futures::FutureExt;
 use http::Method;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -25,6 +26,21 @@ static H2_FALLBACK: AtomicBool = AtomicBool::new(false);
 static H2_PREFERRED: AtomicBool = AtomicBool::new(false);
 static H2_EXTENDED: AtomicBool = AtomicBool::new(false);
 
+// HTTP/2 flow-control windows for the single CONNECT-IP stream. The h2 crate
+// defaults to 65,535 bytes for both the stream and the connection, which caps
+// the whole tunnel's download at ~64 KB per round trip (~5 Mbps at 100 ms).
+const H2_STREAM_WINDOW: u32 = 8 * 1024 * 1024;
+const H2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
+const H2_MAX_SEND_BUFFER: usize = 1024 * 1024;
+
+fn h2_builder() -> h2::client::Builder {
+    let mut builder = h2::client::Builder::new();
+    builder
+        .initial_window_size(H2_STREAM_WINDOW)
+        .initial_connection_window_size(H2_CONNECTION_WINDOW)
+        .max_send_buffer_size(H2_MAX_SEND_BUFFER);
+    builder
+}
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -379,7 +395,8 @@ async fn verify_h2_shape(
 
     let attempt = async {
         let tls = connect_tls(cfg).await?;
-        let (h2, connection) = h2::client::handshake(tls)
+        let builder = h2_builder();
+        let (h2, connection) = builder.handshake(tls)
             .await
             .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
         let driver = tokio::spawn(async move {
@@ -474,7 +491,7 @@ pub async fn run(
     addr_tx: Option<mpsc::Sender<AssignedAddr>>,
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
-    let (mut outbound_rx, inbound_tx, mut ctrl_rx) = internals.into_parts();
+    let (outbound_rx, inbound_tx, mut ctrl_rx) = internals.into_parts();
     let quiet = cfg.quiet;
     let data_check = data_check_enabled();
     let probe_packet = masque::build_dns_probe_packet(cfg.local_ipv4);
@@ -492,7 +509,8 @@ pub async fn run(
         ),
     );
 
-    let (h2, mut connection) = h2::client::handshake(tls)
+    let builder = h2_builder();
+    let (h2, mut connection) = builder.handshake(tls)
         .await
         .map_err(|e| AetherError::Masque(format!("h2 handshake: {e}")))?;
 
@@ -568,6 +586,17 @@ pub async fn run(
     let mut pong_deadline: Option<Instant> = None;
     let keepalive_timeout = h2_keepalive_timeout();
 
+    // Sending lives in its own task. Waiting for HTTP/2 send window used to
+    // happen inside a select arm, which froze the receive side for as long as
+    // the upload was window-limited, so an upload stalled the download.
+    let (send_cmd_tx, send_cmd_rx) = mpsc::channel::<SendCmd>(SEND_CMD_QUEUE);
+    let (sender_done_tx, mut sender_done) = oneshot::channel::<Result<()>>();
+    let sender_handle = tokio::spawn(async move {
+        let result = sender_loop(send_stream, outbound_rx, send_cmd_rx).await;
+        let _ = sender_done_tx.send(result);
+    });
+    let _sender_guard = AbortOnDrop(sender_handle);
+
     loop {
         if data_check && !ready_fired {
             if let Some(dl) = validate_deadline {
@@ -575,7 +604,7 @@ pub async fn run(
                     log::warn!(
                         "[h2] data-plane validation timed out; edge accepts control but drops traffic"
                     );
-                    let _ = send_stream.send_data(Bytes::new(), true);
+                    close_sender(&send_cmd_tx, &mut sender_done).await;
                     return Err(AetherError::Masque(
                         "h2 data-plane validation timeout (handshake ok, no traffic)".into(),
                     ));
@@ -598,9 +627,9 @@ pub async fn run(
             }
         }
 
+        // Not `biased`: every arm gets a fair turn, so a steady stream of
+        // outbound packets (or ACKs) can no longer starve the receive arm.
         tokio::select! {
-            biased;
-
             _ = keepalive_interval.tick(), if ready_fired && !awaiting_pong => {
                 match ping_pong.send_ping(h2::Ping::opaque()) {
                     Ok(()) => {
@@ -631,7 +660,7 @@ pub async fn run(
 
             _ = probe_interval.tick(), if data_check && !ready_fired => {
                 let framed = masque::encode_datagram_capsule(&probe_packet);
-                if let Err(e) = send_capsule(&mut send_stream, Bytes::from(framed)).await {
+                if let Err(e) = send_cmd_tx.try_send(SendCmd::Capsule(Bytes::from(framed))) {
                     log::trace!("[h2] data-plane probe resend: {e}");
                 }
             }
@@ -639,7 +668,7 @@ pub async fn run(
             ctrl = ctrl_rx.recv() => {
                 match ctrl {
                     Some(Control::Close) | None => {
-                        let _ = send_stream.send_data(Bytes::new(), true);
+                        close_sender(&send_cmd_tx, &mut sender_done).await;
                         log_or_debug(quiet, "[h2] closing tunnel".to_string());
                         return Ok(());
                     }
@@ -647,63 +676,150 @@ pub async fn run(
                 }
             }
 
-            pkt = outbound_rx.recv() => {
-                match pkt {
-                    Some(ip_packet) => {
-                        let framed = masque::encode_datagram_capsule(&ip_packet);
-                        if let Err(e) = send_capsule(&mut send_stream, Bytes::from(framed)).await {
-                            log::debug!("[h2] send: {e}");
-                            return Err(e);
+            done = &mut sender_done => {
+                return match done {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => {
+                        log::debug!("[h2] send: {e}");
+                        Err(e)
+                    }
+                    Err(_) => Err(AetherError::Masque("h2 sender stopped".into())),
+                };
+            }
+
+            data = futures::future::poll_fn(|cx| recv_body.poll_data(cx)) => {
+                // Take whatever else is already buffered (up to PACKET_BATCH
+                // chunks) before going back to select.
+                let mut next = data;
+                let mut ended: Option<Result<()>> = None;
+                let mut taken = 0usize;
+                loop {
+                    match next {
+                        Some(Ok(chunk)) => {
+                            let _ = recv_body.flow_control().release_capacity(chunk.len());
+                            capsules.push(&chunk);
+                        }
+                        Some(Err(e)) => {
+                            log::warn!("[h2] recv body error: {e}");
+                            ended = Some(Err(AetherError::Masque(format!("h2 body: {e}"))));
+                            break;
+                        }
+                        None => {
+                            log_or_debug(quiet, "[h2] server closed stream".to_string());
+                            ended = Some(Ok(()));
+                            break;
                         }
                     }
+                    taken += 1;
+                    if taken >= PACKET_BATCH {
+                        break;
+                    }
+                    match futures::future::poll_fn(|cx| recv_body.poll_data(cx)).now_or_never() {
+                        Some(more) => next = more,
+                        None => break,
+                    }
+                }
+                let got_data = drain_capsules(&mut capsules, &inbound_tx, &addr_tx);
+                if got_data && !ready_fired {
+                    validate_successes += 1;
+                    log::debug!(
+                        "[h2] data-plane round-trip {}/{} confirmed",
+                        validate_successes, DATA_PROBE_REQUIRED_SUCCESSES
+                    );
+                    if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
+                        ready_fired = true;
+                        validate_deadline = None;
+                        crate::ffi::mark_ready();
+                        if let Some(tx) = ready_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        log_or_debug(quiet, "[h2] tunnel validated (end-to-end data confirmed); exposing socks5".to_string());
+                    } else {
+                        let framed = masque::encode_datagram_capsule(&probe_packet);
+                        if let Err(e) = send_cmd_tx.try_send(SendCmd::Capsule(Bytes::from(framed))) {
+                            log::trace!("[h2] follow-up data-plane probe: {e}");
+                        }
+                    }
+                }
+                if let Some(end) = ended {
+                    return end;
+                }
+            }
+        }
+    }
+}
+
+/// Packets/chunks handled per wake-up in each direction (same as quic.rs).
+const PACKET_BATCH: usize = 32;
+/// Upper bound for one coalesced DATA write. Capsules are a byte stream, so
+/// several datagram capsules can share one send; staying at one default frame
+/// keeps the capacity wait bounded even if the peer's window is small.
+const SEND_COALESCE_BYTES: usize = 16 * 1024;
+const SEND_CMD_QUEUE: usize = 64;
+
+enum SendCmd {
+    Capsule(Bytes),
+    Close,
+}
+
+/// Owns the HTTP/2 send half: device packets (batched) and control capsules.
+/// Ends the stream on Close or when the device side goes away.
+async fn sender_loop(
+    mut send_stream: h2::SendStream<Bytes>,
+    mut outbound_rx: mpsc::Receiver<Vec<u8>>,
+    mut cmd_rx: mpsc::Receiver<SendCmd>,
+) -> Result<()> {
+    let mut cmd_open = true;
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv(), if cmd_open => {
+                match cmd {
+                    Some(SendCmd::Capsule(data)) => {
+                        if let Err(e) = send_capsule(&mut send_stream, data).await {
+                            log::trace!("[h2] control capsule: {e}");
+                        }
+                    }
+                    Some(SendCmd::Close) => {
+                        let _ = send_stream.send_data(Bytes::new(), true);
+                        return Ok(());
+                    }
+                    None => cmd_open = false,
+                }
+            }
+
+            pkt = outbound_rx.recv() => {
+                let first = match pkt {
+                    Some(p) => p,
                     None => {
                         let _ = send_stream.send_data(Bytes::new(), true);
                         return Ok(());
                     }
+                };
+                let mut group: Vec<u8> = masque::encode_datagram_capsule(&first);
+                for _ in 1..PACKET_BATCH {
+                    let more = match outbound_rx.try_recv() {
+                        Ok(p) => p,
+                        Err(_) => break,
+                    };
+                    let framed = masque::encode_datagram_capsule(&more);
+                    if group.len() + framed.len() > SEND_COALESCE_BYTES {
+                        send_capsule(&mut send_stream, Bytes::from(std::mem::take(&mut group))).await?;
+                    }
+                    group.extend_from_slice(&framed);
                 }
-            }
-
-            data = futures::future::poll_fn(|cx| recv_body.poll_data(cx)) => {
-                match data {
-                    Some(Ok(chunk)) => {
-                        let _ = recv_body.flow_control().release_capacity(chunk.len());
-                        capsules.push(&chunk);
-                        let got_data = drain_capsules(&mut capsules, &inbound_tx, &addr_tx);
-                        if got_data && !ready_fired {
-                            validate_successes += 1;
-                            log::debug!(
-                                "[h2] data-plane round-trip {}/{} confirmed",
-                                validate_successes, DATA_PROBE_REQUIRED_SUCCESSES
-                            );
-                            if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
-                                ready_fired = true;
-                                validate_deadline = None;
-                                crate::ffi::mark_ready();
-                                if let Some(tx) = ready_tx.take() {
-                                    let _ = tx.send(());
-                                }
-                                log_or_debug(quiet, "[h2] tunnel validated (end-to-end data confirmed); exposing socks5".to_string());
-                            } else {
-                                let framed = masque::encode_datagram_capsule(&probe_packet);
-                                if let Err(e) =
-                                    send_capsule(&mut send_stream, Bytes::from(framed)).await
-                                {
-                                    log::trace!("[h2] follow-up data-plane probe: {e}");
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        log::warn!("[h2] recv body error: {e}");
-                        return Err(AetherError::Masque(format!("h2 body: {e}")));
-                    }
-                    None => {
-                        log_or_debug(quiet, "[h2] server closed stream".to_string());
-                        return Ok(());
-                    }
-                }
+                send_capsule(&mut send_stream, Bytes::from(group)).await?;
             }
         }
+    }
+}
+
+/// Ask the sender to end the stream and give it a moment to do so.
+async fn close_sender(
+    send_cmd_tx: &mpsc::Sender<SendCmd>,
+    sender_done: &mut oneshot::Receiver<Result<()>>,
+) {
+    if send_cmd_tx.try_send(SendCmd::Close).is_ok() {
+        let _ = tokio::time::timeout(Duration::from_millis(300), sender_done).await;
     }
 }
 

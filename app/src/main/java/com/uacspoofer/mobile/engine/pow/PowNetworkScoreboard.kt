@@ -15,6 +15,8 @@ internal object PowNetworkScoreboard {
     private const val KEY_PREFIX_STRATEGY = "pow_net_strat_"
     private const val KEY_PREFIX_STRAT_SHAPE = "pow_net_strat_shape_"
     private const val KEY_PREFIX_RTT = "pow_net_rtt_"
+    private const val KEY_PREFIX_REGION = "pow_net_region_"
+    private const val KEY_PREFIX_STRAT_RTT = "pow_net_srtt_"
 
     fun networkKey(context: Context): String {
         return runCatching {
@@ -87,6 +89,31 @@ internal object PowNetworkScoreboard {
         return prefs.getInt(KEY_PREFIX_STRATEGY + netKey, 0).coerceIn(0, (ladderSize - 1).coerceAtLeast(0))
     }
 
+    /** Path RTT measured with a given Psiphon strategy on this network. */
+    fun saveStrategyRtt(prefs: android.content.SharedPreferences, netKey: String, strategy: String, rttMs: Long) {
+        if (rttMs <= 0L || strategy.isBlank()) return
+        prefs.edit().putLong(KEY_PREFIX_STRAT_RTT + strategy + "_" + netKey, rttMs).apply()
+    }
+
+    fun loadStrategyRtts(
+        prefs: android.content.SharedPreferences,
+        netKey: String,
+        strategies: List<String>,
+    ): Map<String, Long> = strategies.mapNotNull { name ->
+        val rtt = runCatching { prefs.getLong(KEY_PREFIX_STRAT_RTT + name + "_" + netKey, 0L) }.getOrDefault(0L)
+        if (rtt > 0L) name to rtt else null
+    }.toMap()
+
+    /** Psiphon exit country that connected on this network (Automatic only). */
+    fun saveRegion(prefs: android.content.SharedPreferences, netKey: String, region: String) {
+        val clean = region.trim().uppercase()
+        if (clean.length != 2) return
+        prefs.edit().putString(KEY_PREFIX_REGION + netKey, clean).apply()
+    }
+
+    fun loadRegion(prefs: android.content.SharedPreferences, netKey: String): String? =
+        prefs.getString(KEY_PREFIX_REGION + netKey, null)?.takeIf { it.length == 2 }
+
     fun loadRttMs(prefs: android.content.SharedPreferences, netKey: String): Long? =
         runCatching { prefs.getLong(KEY_PREFIX_RTT + netKey, 0L) }.getOrNull()?.takeIf { it > 0L }
 
@@ -124,7 +151,9 @@ internal object PowNetworkScoreboard {
             key.startsWith(KEY_PREFIX_OUTER) ||
                 key.startsWith(KEY_PREFIX_STRATEGY) ||
                 key.startsWith(KEY_PREFIX_STRAT_SHAPE) ||
-                key.startsWith(KEY_PREFIX_RTT)
+                key.startsWith(KEY_PREFIX_RTT) ||
+                key.startsWith(KEY_PREFIX_REGION) ||
+                key.startsWith(KEY_PREFIX_STRAT_RTT)
         }
         if (keys.isEmpty()) return 0
         prefs.edit().also { editor -> keys.forEach(editor::remove) }.apply()

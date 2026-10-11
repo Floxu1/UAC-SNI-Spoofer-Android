@@ -62,6 +62,19 @@ class PowConnectionCoordinator(
     private val ladderActive = AtomicBoolean(false)
     private val callbacks = PsiphonCallbacks()
     @Volatile private var psiphon: PowPsiphonClient? = null
+    @Volatile private var lastPsiphonConfig = ""
+    private val sidecar by lazy {
+        PowPsiphonSidecar(service) { sent, received ->
+            if (sent > 0) {
+                txBytes.addAndGet(sent)
+                txPackets.incrementAndGet()
+            }
+            if (received > 0) {
+                rxBytes.addAndGet(received)
+                rxPackets.incrementAndGet()
+            }
+        }
+    }
 
     @Volatile private var tunFd: ParcelFileDescriptor? = null
     @Volatile private var ownsTun = false
@@ -76,6 +89,7 @@ class PowConnectionCoordinator(
     @Volatile private var activeTunnelProtocol = ""
     @Volatile private var regionPhase = false
     @Volatile private var regionPhaseTried = ""
+    @Volatile private var regionPhaseBias = false
     @Volatile private var ladderIndex = 0
     @Volatile private var ladderAttempts = 0
     @Volatile private var connectedSignal: CompletableDeferred<Unit>? = null
@@ -133,6 +147,11 @@ class PowConnectionCoordinator(
 
     fun socksPort(): Int = socksPort
 
+    private fun tunByteTotal(): Long = runCatching {
+        val stats = tunStats()
+        stats.txBytes + stats.rxBytes
+    }.getOrDefault(0L)
+
     fun tunStats(): TunStats {
         if (!proxyMode) {
             val tun = PowTun2Socks.stats()
@@ -175,12 +194,8 @@ class PowConnectionCoordinator(
         currentSettings = store.snapshot()
         proxyMode = settings.connectionMode == CONNECTION_MODE_PROXY
         socksPort = if (proxyMode) settings.socksPort else PowCoreConfig.SOCKS_PORT
-        regionPhase = PowRegions.egressRegion(currentSettings.exitCountryCode) != null
-        regionPhaseTried = currentSettings.exitCountryCode
-        ladderIndex = store.rememberedStrategyIndex(
-            PowPsiphonProtocols.signature(),
-            PowPsiphonProtocols.LADDER.size,
-        )
+        armRegionPhase()
+        ladderIndex = rememberedLadderStart()
         ladderAttempts = 0
         if (!AetherNative.available) {
             error(AetherNative.unavailableReason)
@@ -221,6 +236,12 @@ class PowConnectionCoordinator(
                         "No WARP transport came up; Psiphon will connect on its own",
                     )
                 }
+                // directPsiphon is only known now: pick the ladder, start
+                // strategy and region for this leg.
+                armRegionPhase()
+                ladderIndex = rememberedLadderStart()
+                ladderAttempts = 0
+                logPsiphonPlan()
                 ensureActive()
                 PowStatusStore.update(
                     PowPhase.INNER,
@@ -274,6 +295,7 @@ class PowConnectionCoordinator(
             }
             startSessionWatch()
             PowPageTurbo.kick(qualityScope, socksPort, keepWarm = true)
+            kickDnsWarm(force = true)
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) { stop() }
             throw cancelled
@@ -289,13 +311,72 @@ class PowConnectionCoordinator(
     }
 
     suspend fun stop() {
-        stopRequested.set(true)
+        signalStop()
         cancelNetworkRestore()
         cancelQualityWork()
         PowPageTurbo.cancel()
+        PowDnsWarm.cancel()
         connectedSignal?.cancel()
         unregisterNetworkCallback()
         lifecycle.withLock { stopLocked() }
+    }
+
+    /**
+     * Non-blocking stop signal. Safe from any thread and idempotent: marks the session as
+     * stopping and asks the native core to abort an in-flight prepare (key race / cert
+     * renewal) or outer tunnel right away, so loops and joins unwind instead of finishing
+     * their current step first.
+     */
+    fun signalStop() {
+        stopRequested.set(true)
+        ladderActive.set(false)
+        connectedSignal?.cancel()
+        retuneSignal?.cancel()
+        runCatching { AetherNative.abortPrepare() }
+        runCatching { AetherNative.stop() }
+    }
+
+    /**
+     * Last-resort teardown used when a normal stop did not finish within the service's hard
+     * timeout. Never suspends and never takes [lifecycle]; the slow parts run on a daemon
+     * thread with their own bounds. The regular [stop] may still complete later; every step
+     * here is idempotent with it.
+     */
+    fun forceRelease() {
+        signalStop()
+        val forcedSession = sessionGeneration.incrementAndGet()
+        cancelNetworkRestore()
+        cancelQualityWork()
+        PowPageTurbo.cancel()
+        PowDnsWarm.cancel()
+        unregisterNetworkCallback()
+        ladderJob?.cancel()
+        runCatching { sidecar.forceRelease() }
+        innerReady = false
+        val client = psiphon
+        val fd = if (ownsTun) tunFd else null
+        val reaper = Thread({
+            runCatching { PowTun2Socks.stop() }
+            runCatching { PowTun2Socks.awaitNativeExit(FORCE_NATIVE_EXIT_MS) }
+            runCatching { fd?.close() }
+            // Anything after the wait must not touch a session the user started meanwhile.
+            if (forcedSession != sessionGeneration.get()) return@Thread
+            runCatching { PowSocksConnectOnly.stop() }
+            runCatching { AetherNative.stop() }
+            if (client != null && forcedSession == sessionGeneration.get()) {
+                runCatching {
+                    kotlinx.coroutines.runBlocking {
+                        kotlinx.coroutines.withTimeoutOrNull(FORCE_NATIVE_EXIT_MS) { client.stop() }
+                    }
+                }
+            }
+        }, "uac-pow-force-release")
+        reaper.isDaemon = true
+        reaper.start()
+        if (PowStatusStore.status.value.phase != PowPhase.FAILED) {
+            PowStatusStore.reset()
+        }
+        AppLogRepository.warning(LogSource.POW, "UAC PoW force-released after stop timeout")
     }
 
     fun notifyPathLost(reason: String) {
@@ -387,10 +468,18 @@ class PowConnectionCoordinator(
     private fun scheduleRestoreAttempt(reason: String, immediate: Boolean) {
         restoreJob?.cancel()
         val delayMs = if (immediate) 0L else PowNetworkRestore.delayMs(restoreAttempts.getAndIncrement())
+        val session = sessionGeneration.get()
         restoreJob = qualityScope.launch {
             if (delayMs > 0L) delay(delayMs)
-            if (stopRequested.get() || !restoreWaiting.get()) return@launch
-            val recovered = runCatching { recoverBehindTun(reason, force = true) }.getOrDefault(false)
+            if (stopRequested.get() || !restoreWaiting.get() || session != sessionGeneration.get()) return@launch
+            val recovered = try {
+                recoverBehindTun(reason, force = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                false
+            }
+            if (stopRequested.get() || session != sessionGeneration.get()) return@launch
             if (recovered) {
                 finishNetworkRestore()
             } else {
@@ -424,6 +513,7 @@ class PowConnectionCoordinator(
     }
 
     private fun publishReconnecting(reason: String) {
+        if (stopRequested.get()) return
         ConnectionStateStore.markConnecting()
         PowStatusStore.update(
             PowPhase.STARTING,
@@ -434,6 +524,7 @@ class PowConnectionCoordinator(
     }
 
     private fun publishConnected() {
+        if (stopRequested.get()) return
         ConnectionStateStore.markConnecting()
         ConnectionStateStore.markConnected()
         val outer = PowStatusStore.status.value.outerLabel.ifBlank {
@@ -460,7 +551,7 @@ class PowConnectionCoordinator(
             withContext(Dispatchers.IO) { runCatching { innerClient().stop() } }
             if (stopRequested.get()) return false
             delay(400)
-            regionPhase = false; ladderIndex = 0; ladderAttempts = 0
+            armRegionPhase(retune = true); ladderIndex = rememberedLadderStart(); ladderAttempts = 0
             ladderActive.set(false); ladderJob?.cancel()
             val keepExit = PowRegions.egressRegion(currentSettings.exitCountryCode) != null
             val connected = CompletableDeferred<Unit>()
@@ -472,7 +563,10 @@ class PowConnectionCoordinator(
             if (stopRequested.get()) return false
             lastRetuneAt = SystemClock.elapsedRealtime()
             val sample = PowPathProbe.measureMsLite(socksPort)
-            if (sample > 0L) baselineRttMs = sample
+            if (sample > 0L) {
+                baselineRttMs = sample
+                recordStrategyRtt(sample)
+            }
             AppLogRepository.success(
                 LogSource.POW,
                 "Inner-only path rebuilt" + if (sample > 0L) " ${sample}ms" else "",
@@ -653,7 +747,14 @@ class PowConnectionCoordinator(
             } else {
                 PowGhostHandover.shadowChainJson(appContext, protocol, currentSettings, chainPort, mci)
             }
-            val prepared = runCatching { AetherNative.prepare(config) }
+            val prepared = try {
+                Result.success(AetherNative.prepareCancellable(config))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                Result.failure(error)
+            }
+            if (stopRequested.get()) return null
             if (prepared.isFailure) {
                 AppLogRepository.warning(
                     LogSource.POW,
@@ -665,6 +766,7 @@ class PowConnectionCoordinator(
             val generation = sessionGeneration.get()
             val thread = Thread({
                 try {
+                    if (stopRequested.get() || generation != sessionGeneration.get()) return@Thread
                     val result = AetherNative.startProxy(config)
                     if (result != 0 && !stopRequested.get() && generation == sessionGeneration.get()) {
                         AppLogRepository.warning(
@@ -742,15 +844,21 @@ class PowConnectionCoordinator(
 
     private suspend fun stopOuterLeg() {
         outerCommitted = false
+        AetherNative.abortPrepare()
         AetherNative.stop()
+        val thread = outerThread
         val deadline = SystemClock.elapsedRealtime() + OUTER_STOP_GRACE_MS
-        while (AetherNative.isRunning() && SystemClock.elapsedRealtime() < deadline) {
+        while (
+            (AetherNative.isRunning() || thread?.isAlive == true) &&
+            SystemClock.elapsedRealtime() < deadline
+        ) {
+            // The outer thread may not have entered the native core yet when the first
+            // stop was sent (aether_stop ignores a core that is not RUNNING), so repeat it.
+            AetherNative.stop()
             delay(200)
         }
-        outerThread?.let { thread ->
-            if (thread.isAlive) {
-                runCatching { thread.join(1_000L) }
-            }
+        if (thread?.isAlive == true) {
+            AppLogRepository.warning(LogSource.POW, "Outer leg thread still alive after stop grace; detaching it")
         }
         outerThread = null
     }
@@ -785,11 +893,13 @@ class PowConnectionCoordinator(
 
     private suspend fun startPsiphonTunnel(keepExit: Boolean = false, socks: Int = socksPort) {
         val generation = sessionGeneration.get()
-        val strategy = PowPsiphonProtocols.LADDER.getOrElse(ladderIndex) { PowPsiphonProtocols.LADDER.first() }
-        val preferred = if (regionPhase || keepExit) {
-            PowRegions.egressRegion(currentSettings.exitCountryCode)
-        } else {
-            null
+        val ladder = activeLadder()
+        val strategy = ladder.getOrElse(ladderIndex) { ladder.first() }
+        val bias = regionPhase && regionPhaseBias
+        val preferred = when {
+            bias -> PowRegions.egressRegion(regionPhaseTried)
+            regionPhase || keepExit -> PowRegions.egressRegion(currentSettings.exitCountryCode)
+            else -> null
         }
         val configJson = PowPsiphonProtocols.buildConfig(
             socksPort = socks,
@@ -798,10 +908,16 @@ class PowConnectionCoordinator(
             strategy = strategy,
             optimizedMode = currentSettings.optimizedMode,
             direct = directPsiphon,
+            regionBias = bias,
         )
         psiphonGeneration.set(generation)
+        lastPsiphonConfig = configJson
         innerStarted = true
         AppLogRepository.info(LogSource.POW, "Starting Psiphon inner hop in :uacpow")
+        AppLogRepository.info(
+            LogSource.POW,
+            "Psiphon tunnels: " + if (sidecarWanted()) "2 (each service pinned to one tunnel)" else "1",
+        )
         innerClient().start(configJson)
         val protocolList = runCatching {
             JSONObject(configJson).optJSONArray("LimitTunnelProtocols")?.toString()
@@ -809,7 +925,13 @@ class PowConnectionCoordinator(
         AppLogRepository.info(
             LogSource.POW,
             "Psiphon starting strategy ${strategy.name} (${strategy.label})" +
-                (if (preferred != null) " region=$preferred" else "") +
+                (
+                    when {
+                        preferred == null -> " region=any"
+                        bias -> " region=$preferred (nearby, ${PowPsiphonProtocols.NEARBY_PHASE_TIMEOUT_SECONDS}s then any)"
+                        else -> " region=$preferred"
+                    }
+                    ) +
                 (if (protocolList.isNotBlank()) " protocols=$protocolList" else ""),
         )
     }
@@ -822,15 +944,18 @@ class PowConnectionCoordinator(
     private suspend fun watchLadder() {
         while (!stopRequested.get() && !innerReady) {
             ladderActive.set(true)
-            val strategy = PowPsiphonProtocols.LADDER.getOrElse(ladderIndex) { return }
-            val seconds = if (regionPhase && PowRegions.egressRegion(currentSettings.exitCountryCode) != null) {
+            val strategy = activeLadder().getOrElse(ladderIndex) { return }
+            val nearby = regionPhase && regionPhaseBias
+            val seconds = if (nearby) {
+                PowPsiphonProtocols.NEARBY_PHASE_TIMEOUT_SECONDS
+            } else if (regionPhase && PowRegions.egressRegion(currentSettings.exitCountryCode) != null) {
                 PowPsiphonProtocols.REGION_PHASE_TIMEOUT_SECONDS
             } else if (directPsiphon && strategy.preferredProtocols.all { it.startsWith("FRONTED-") }) {
                 90
             } else {
                 strategy.timeoutSeconds
             }
-            delay((seconds.toLong() + 8L) * 1_000L)
+            delay((seconds.toLong() + if (nearby) 3L else 8L) * 1_000L)
             if (stopRequested.get() || innerReady || !ladderActive.get()) return
             escalateLadder()
         }
@@ -839,12 +964,15 @@ class PowConnectionCoordinator(
     private suspend fun escalateLadder() {
         if (stopRequested.get() || innerReady) return
         if (!ladderActive.compareAndSet(true, false)) return
-        val ladder = PowPsiphonProtocols.LADDER
+        val ladder = activeLadder()
         if (regionPhase) {
             regionPhase = false
+            val nearby = regionPhaseBias
+            regionPhaseBias = false
             AppLogRepository.info(
                 LogSource.POW,
-                "Preferred country ${PowRegions.name(regionPhaseTried)} did not connect — trying all countries",
+                (if (nearby) "Nearby country " else "Preferred country ") +
+                    "${PowRegions.name(regionPhaseTried)} did not connect — trying all countries",
             )
             restartPsiphonController()
             return
@@ -877,27 +1005,129 @@ class PowConnectionCoordinator(
         )
     }
 
-    private fun recordLadderWinner() {
+    /** Name warm-up for TUN mode only: proxy clients do their own lookups. */
+    private fun kickDnsWarm(force: Boolean) {
+        if (proxyMode || stopRequested.get()) return
+        PowDnsWarm.kick(
+            qualityScope,
+            appContext,
+            socksPort,
+            optimized = currentSettings.optimizedMode,
+            powerSave = isPowerSave(),
+            force = force,
+        )
+    }
+
+    private fun winnerIndex(): Int {
         val protocol = activeTunnelProtocol
-        val ladder = PowPsiphonProtocols.LADDER
+        val ladder = activeLadder()
         val matches = ladder.indices.filter { index ->
             ladder[index].preferredProtocols.contains(protocol)
         }
-        val winner = when {
+        return when {
             matches.size == 1 -> matches[0]
             matches.contains(ladderIndex) -> ladderIndex
             matches.isNotEmpty() -> matches[0]
             else -> ladderIndex
         }
+    }
+
+    private fun recordLadderWinner() {
+        val winner = winnerIndex()
+        val shape = PowPsiphonProtocols.signature(directPsiphon)
         val rtt = baselineRttMs
-        if (rtt > 0) store.saveStrategyWinnerWithRtt(winner, PowPsiphonProtocols.signature(), rtt)
-        else store.saveStrategyWinner(winner, PowPsiphonProtocols.signature())
+        if (rtt > 0) store.saveStrategyWinnerWithRtt(winner, shape, rtt)
+        else store.saveStrategyWinner(winner, shape)
+    }
+
+    private fun activeLadder(): List<PowPsiphonStrategy> = PowPsiphonProtocols.ladder(directPsiphon)
+
+    // RTTs are kept per leg: "c" behind WARP, "d" direct.
+    private fun rttKey(strategy: String): String = (if (directPsiphon) "d" else "c") + strategy
+
+    /** Remembered winner for this network, or the lower-RTT strategy when both were measured. */
+    private fun rememberedLadderStart(): Int {
+        val ladder = activeLadder()
+        val remembered = store.rememberedStrategyIndex(PowPsiphonProtocols.signature(directPsiphon), ladder.size)
+        val saved = store.strategyRtts(ladder.map { rttKey(it.name) })
+        val rtts = ladder.mapNotNull { strategy -> saved[rttKey(strategy.name)]?.let { strategy.name to it } }.toMap()
+        return PowPsiphonProtocols.startIndex(ladder, remembered, rtts)
+    }
+
+    private fun recordStrategyRtt(rttMs: Long) {
+        if (rttMs <= 0L || warpOnly || !innerReady) return
+        val strategy = activeLadder().getOrNull(winnerIndex()) ?: return
+        store.saveStrategyRtt(rttKey(strategy.name), rttMs)
+    }
+
+    /**
+     * Region for the next Psiphon start. A country the user picked keeps the
+     * old strict phase (25s, then any country). Automatic behind WARP gets a
+     * short head start in a nearby country: the one that worked on this
+     * network, else the nearest Psiphon advertises. A retune only reuses a
+     * remembered country. Direct Psiphon is left unbiased.
+     */
+    private fun armRegionPhase(retune: Boolean = false) {
+        val explicit = PowRegions.egressRegion(currentSettings.exitCountryCode)
+        if (explicit != null) {
+            regionPhase = !retune
+            regionPhaseBias = false
+            regionPhaseTried = currentSettings.exitCountryCode
+            return
+        }
+        val bias = if (directPsiphon) {
+            null
+        } else {
+            PowRegions.autoBiasRegion(
+                store.rememberedRegion(),
+                store.availableRegions(),
+                rememberedOnly = retune,
+            )
+        }
+        regionPhase = bias != null
+        regionPhaseBias = bias != null
+        regionPhaseTried = bias.orEmpty()
+    }
+
+    private fun logPsiphonPlan() {
+        val ladder = activeLadder()
+        val start = ladder.getOrNull(ladderIndex)?.name ?: "?"
+        AppLogRepository.info(
+            LogSource.POW,
+            "Psiphon strategy order (" + (if (directPsiphon) "direct" else "behind WARP") + "): " +
+                ladder.joinToString(" -> ") { "${it.name} ${it.label} ${it.timeoutSeconds}s" } +
+                "; starting at $start",
+        )
+        AppLogRepository.info(
+            LogSource.POW,
+            when {
+                directPsiphon && proxyMode -> "Split: Psiphon sends IR destinations direct (SplitTunnelRegions=IR)"
+                directPsiphon -> "Split: Psiphon sends IR destinations direct; .ir names go direct from the TUN relay"
+                proxyMode -> "Split: off in proxy mode behind WARP (Psiphon own-region split would exit via WARP)"
+                else -> "Split: .ir names go direct over the phone network; Psiphon region split stays off behind WARP"
+            },
+        )
+        AppLogRepository.info(
+            LogSource.POW,
+            when {
+                regionPhase && regionPhaseBias -> {
+                    val remembered = store.rememberedRegion()?.equals(regionPhaseTried, ignoreCase = true) == true
+                    "Psiphon region: Automatic -> nearby ${PowRegions.name(regionPhaseTried)} ($regionPhaseTried" +
+                        (if (remembered) ", remembered" else "") +
+                        ") for ${PowPsiphonProtocols.NEARBY_PHASE_TIMEOUT_SECONDS}s, then any country"
+                }
+                regionPhase -> "Psiphon region: user choice ${PowRegions.name(regionPhaseTried)}"
+                else -> "Psiphon region: any country"
+            },
+        )
     }
 
     private suspend fun stopLocked() {
         stopRequested.set(true)
         cancelQualityWork()
         PowPageTurbo.cancel()
+        PowDnsWarm.cancel()
+        runCatching { PowDnsWarm.persist(appContext) }
         unregisterNetworkCallback()
         ghostInFlight.set(false)
         ladderActive.set(false)
@@ -910,6 +1140,7 @@ class PowConnectionCoordinator(
         innerCallbacksArmed.set(true)
         PowSocksConnectOnly.setFailFast(false)
         withContext(Dispatchers.IO + NonCancellable) {
+            runCatching { sidecar.stop() }
             val client = psiphon
             if (innerStarted || client != null) {
                 runCatching { client?.stop() }
@@ -930,13 +1161,24 @@ class PowConnectionCoordinator(
         ownsTun = false
         routing = false
         regionPhase = PowRegions.egressRegion(store.snapshot().exitCountryCode) != null
+        regionPhaseBias = false
         regionPhaseTried = currentSettings.exitCountryCode
-        ladderIndex = store.rememberedStrategyIndex(PowPsiphonProtocols.signature(), PowPsiphonProtocols.LADDER.size)
+        ladderIndex = rememberedLadderStart()
         ladderAttempts = 0
         recentSamples = mutableListOf()
         if (PowStatusStore.status.value.phase != PowPhase.FAILED) {
             PowStatusStore.reset()
         }
+    }
+
+    private fun sidecarWanted(): Boolean =
+        currentSettings.psiphonTunnelPool && !proxyMode && !warpOnly && !stopRequested.get()
+
+    /** Tunnel 2 follows tunnel 1: started (or re-routed) each time tunnel 1 connects. */
+    private fun maybeStartSidecar() {
+        if (!sidecarWanted()) return
+        val config = lastPsiphonConfig.ifBlank { return }
+        sidecar.ensure(config, directPsiphon)
     }
 
     private fun innerClient(): PowPsiphonClient {
@@ -959,7 +1201,8 @@ class PowConnectionCoordinator(
                 regionPhase = false
                 AppLogRepository.info(
                     LogSource.POW,
-                    "Connected in preferred country ${PowRegions.name(regionPhaseTried)}",
+                    (if (regionPhaseBias) "Connected in nearby country " else "Connected in preferred country ") +
+                        PowRegions.name(regionPhaseTried),
                 )
             }
             innerReady = true
@@ -969,6 +1212,7 @@ class PowConnectionCoordinator(
                 LogSource.POW,
                 if (directPsiphon) "Psiphon connected" else "Psiphon connected through WARP",
             )
+            maybeStartSidecar()
         }
 
         override fun onExiting() {
@@ -1030,6 +1274,18 @@ class PowConnectionCoordinator(
             )
             AppLogRepository.info(LogSource.POW, "Exit country ${PowRegions.name(region)} ($region)")
             recordLadderWinner()
+            val code = region.trim().uppercase()
+            if (!directPsiphon &&
+                PowRegions.egressRegion(currentSettings.exitCountryCode) == null &&
+                code in PowRegions.NEARBY &&
+                store.rememberedRegion() != code
+            ) {
+                store.saveRegion(code)
+                AppLogRepository.info(
+                    LogSource.POW,
+                    "Remembered exit ${PowRegions.name(code)} ($code) for this network; next Automatic connect tries it first",
+                )
+            }
         }
 
         override fun onAvailableEgressRegions(regions: List<String>) {
@@ -1052,7 +1308,7 @@ class PowConnectionCoordinator(
     init {
         regionPhase = PowRegions.egressRegion(store.snapshot().exitCountryCode) != null
         regionPhaseTried = store.snapshot().exitCountryCode
-        ladderIndex = store.rememberedStrategyIndex(PowPsiphonProtocols.signature(), PowPsiphonProtocols.LADDER.size)
+        ladderIndex = rememberedLadderStart()
     }
 
     private fun underlyingLinkMtu(): Int = runCatching {
@@ -1168,6 +1424,10 @@ class PowConnectionCoordinator(
         delay(PowQualityPolicy.SETTLE_MS)
         if (stopRequested.get() || !innerReady) return
         var badStreak = 0
+        var busyLogged = false
+        var busySkips = 0
+        var lastBytes = tunByteTotal()
+        var lastBytesAt = SystemClock.elapsedRealtime()
         while (!stopRequested.get()) {
             val screenOn = isScreenOn()
             val idle = PowSocksConnectOnly.msSinceLastActivity() > PowQualityPolicy.IDLE_PROBE_AFTER_MS
@@ -1175,15 +1435,52 @@ class PowConnectionCoordinator(
                 if (screenOn) PowQualityPolicy.PASSIVE_INTERVAL_MS
                 else PowQualityPolicy.PASSIVE_INTERVAL_IDLE_MS,
             )
+            val intervalBytes = tunByteTotal()
+            val intervalAt = SystemClock.elapsedRealtime()
+            val intervalRate = PowQualityPolicy.bytesPerSecond(intervalBytes - lastBytes, intervalAt - lastBytesAt)
+            lastBytes = intervalBytes
+            lastBytesAt = intervalAt
             if (stopRequested.get() || retuning.get() || !innerReady) continue
             // Screen off: liveness only. No probes, the radio stays asleep.
             if (!screenOn) continue
+
+            // Busy gate: the interval average plus a short look at right now.
+            delay(PowQualityPolicy.BUSY_SPOT_WINDOW_MS)
+            val spotBytes = tunByteTotal()
+            val spotAt = SystemClock.elapsedRealtime()
+            val spotRate = PowQualityPolicy.bytesPerSecond(spotBytes - lastBytes, spotAt - lastBytesAt)
+            lastBytes = spotBytes
+            lastBytesAt = spotAt
+            if (stopRequested.get() || retuning.get() || !innerReady) continue
+            val rate = maxOf(intervalRate, spotRate)
+            val streams = PowSocksConnectOnly.activeStreamCount()
+            if (PowQualityPolicy.isBusy(rate, streams)) {
+                badStreak = 0
+                busySkips += 1
+                PowSocksConnectOnly.discardPassiveSamples()
+                val message = "Quality check skipped: busy (${rate / 1024L} KB/s, $streams streams)"
+                if (!busyLogged) {
+                    busyLogged = true
+                    AppLogRepository.info(LogSource.POW, message)
+                } else {
+                    AppLogRepository.debug(LogSource.POW, message)
+                }
+                continue
+            }
+            if (busyLogged) {
+                AppLogRepository.info(
+                    LogSource.POW,
+                    "Quality check resumed after $busySkips busy skip(s) (${rate / 1024L} KB/s, $streams streams)",
+                )
+                busyLogged = false
+                busySkips = 0
+            }
 
             val samples = PowSocksConnectOnly.recentLatencies()
             val sample = if (samples.isEmpty() || idle) {
                 measureQualityProbeLite()
             } else {
-                PowQualityPolicy.median(samples)
+                PowQualityPolicy.p25(samples)
             }
             val jitterHigh = PowQualityPolicy.isJitterHigh(samples + sample)
             PowAdaptiveObfuscation.onProbe(sample > 0L, jitterHigh)
@@ -1218,7 +1515,9 @@ class PowConnectionCoordinator(
             if (lastRetuneAt > 0L && elapsed < PowQualityPolicy.RETUNE_COOLDOWN_MS) continue
             if (qualityRetunes.get() >= PowQualityPolicy.PASSIVE_MAX_RETUNES) continue
             badStreak = 0
-            requestQualityRetune("passive rtt ${sample}ms vs ${baselineRttMs}ms")
+            requestQualityRetune(
+                "passive rtt p25 ${sample}ms vs ${baselineRttMs}ms, ${PowQualityPolicy.PASSIVE_BAD_STREAK} strikes",
+            )
         }
     }
 
@@ -1327,6 +1626,7 @@ class PowConnectionCoordinator(
         baselineRttMs = PowQualityPolicy.median(opening)
         if (baselineRttMs > 0L) {
             AppLogRepository.info(LogSource.POW, "UAC PoW path baseline ${baselineRttMs}ms")
+            recordStrategyRtt(baselineRttMs)
         }
         recentSamples = opening.takeLast(3).toMutableList()
         lastStableAt = SystemClock.elapsedRealtime()
@@ -1363,6 +1663,7 @@ class PowConnectionCoordinator(
                 // Re-prime page turbo on recovery
                 if (recentSamples.count { it <= 0L } >= 2) {
                     PowPageTurbo.kick(qualityScope, socksPort)
+                    kickDnsWarm(force = false)
                 }
                 continue
             }
@@ -1411,6 +1712,8 @@ class PowConnectionCoordinator(
         // Fallback path: inner shadow handover (outer stays, inner flips port)
         return try {
             retuneInnerOnly("ghost:$reason")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Throwable) { false }
         finally { setRetuning(false) }
     }
@@ -1421,7 +1724,9 @@ class PowConnectionCoordinator(
         val optimized = currentSettings.optimizedMode
         setRetuning(true)
         PowSocksConnectOnly.setFailFast(true)
-        if (!optimized && quality) PowSocksConnectOnly.drainRelaysGracefully(600)
+        // A quality retune always lets open relays finish gracefully; only
+        // recovery (hard failure) drops them at once.
+        if (quality) PowSocksConnectOnly.drainRelaysGracefully(600)
         else PowSocksConnectOnly.dropRelays()
         AppLogRepository.info(
             LogSource.POW,
@@ -1468,8 +1773,8 @@ class PowConnectionCoordinator(
                 return false
             }
             if (stopRequested.get()) return false
-            regionPhase = false
-            ladderIndex = 0
+            armRegionPhase(retune = true)
+            ladderIndex = rememberedLadderStart()
             ladderAttempts = 0
             ladderActive.set(false)
             ladderJob?.cancel()
@@ -1491,10 +1796,12 @@ class PowConnectionCoordinator(
             val sample = PowPathProbe.measureMsLite(socksPort)
             if (sample > 0L) {
                 baselineRttMs = sample
+                recordStrategyRtt(sample)
                 recentSamples = mutableListOf(sample)
                 lastStableAt = SystemClock.elapsedRealtime()
             }
             PowPageTurbo.kick(qualityScope, socksPort, keepWarm = true)
+            kickDnsWarm(force = false)
             AppLogRepository.success(
                 LogSource.POW,
                 "UAC PoW path refreshed via $outer" + if (sample > 0L) " (${sample}ms)" else "",
@@ -1538,7 +1845,8 @@ class PowConnectionCoordinator(
 
     companion object {
         private const val OUTER_START_GRACE_MS = 4_000L
-        private const val OUTER_STOP_GRACE_MS = 8_000L
+        private const val OUTER_STOP_GRACE_MS = 4_000L
+        private const val FORCE_NATIVE_EXIT_MS = 2_000L
         private const val INNER_CONNECT_TIMEOUT_MS = 8 * 60_000L
     }
 }

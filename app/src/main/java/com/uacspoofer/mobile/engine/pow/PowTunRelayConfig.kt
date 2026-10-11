@@ -10,6 +10,11 @@ internal object PowTunRelayConfig {
     const val CONNECT_TIMEOUT_MS = 2_000
     const val TCP_BUFFER_SIZE = 262_144
     const val UDP_TIMEOUT_MS = 20_000
+    // hev mapdns: LRU of name -> fake IP. The answer TTL is fixed at 1s inside
+    // hev and is answered locally, so re-asks cost nothing; what matters is
+    // that a long session never evicts a name a live connection still uses.
+    // 100.64.0.0/10 has room for 4M entries; 32768 costs ~256KB of slots.
+    const val MAPDNS_CACHE_SIZE = 32_768
 
     fun mtuForChain(preferred: Int, networkMtu: Int = 0): Int {
         var mtu = preferred.coerceIn(MIN_MTU, MAX_MTU)
@@ -42,7 +47,7 @@ internal object PowTunRelayConfig {
               port: 53
               network: '$FAKE_NET'
               netmask: '$FAKE_MASK'
-              cache-size: 10000
+              cache-size: $MAPDNS_CACHE_SIZE
             misc:
               log-level: warn
               connect-timeout: $CONNECT_TIMEOUT_MS
