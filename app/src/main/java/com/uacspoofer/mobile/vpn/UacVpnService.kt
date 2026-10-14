@@ -45,6 +45,12 @@ import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciConfig
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciXrayCore
+import com.uacspoofer.mobile.auto.AutoBootstrapStore
+import com.uacspoofer.mobile.auto.AutoConfigBootstrapper
+import com.uacspoofer.mobile.auto.AutoRankedEntry
+import com.uacspoofer.mobile.auto.AutoStage
+import com.uacspoofer.mobile.auto.AutoStageState
+import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.profiles.RouteTransferMeasurementMode
@@ -79,6 +85,9 @@ class UacVpnService : VpnService() {
     private val lifecycleMutex = Mutex()
     private val generation = AtomicLong(0L)
     private val runtimeHealthSuccesses = AtomicLong(0L)
+    private val autoBootstrapper by lazy { AutoConfigBootstrapper(applicationContext) }
+    /** The Patterniha link Auto is connected with, so a health failure can be charged to it. */
+    @Volatile private var activeAutoUri: String? = null
     @Volatile private var connectJob: Job? = null
     @Volatile private var healthJob: Job? = null
     @Volatile private var statsJob: Job? = null
@@ -159,6 +168,12 @@ class UacVpnService : VpnService() {
             runCatching { updateNotification(connected) }
         }
         networkGuardStore = NetworkGuardStore.get(this)
+        androidx.core.content.ContextCompat.registerReceiver(
+            this,
+            screenOnReceiver,
+            android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_ON),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         TunPacketFilter.applyFlags(networkGuardStore.snapshot())
         serviceScope.launch {
             networkGuardStore.settings.collect { flags ->
@@ -225,6 +240,7 @@ class UacVpnService : VpnService() {
         autoReconnectJob?.cancel()
         val interruptedRouteProbeId = activeRouteProbeId
         routeProbeJob?.cancel()
+        runCatching { unregisterReceiver(screenOnReceiver) }
         serviceScope.cancel()
         if (ConnectionStateStore.state.value != ConnectionState.ERROR) {
             ConnectionStateStore.markDisconnected()
@@ -499,7 +515,7 @@ class UacVpnService : VpnService() {
                         activeEngine.isPow -> connectPowEngine(token, settings)
                         else -> {
                             val profile = profileStore.selectedProfile()
-                            connectRoutes(token, settings, profile)
+                            connectXray(token, settings, profile)
                         }
                     }
                 }
@@ -706,7 +722,7 @@ class UacVpnService : VpnService() {
                     val settings = advancedSettingsStore.snapshot()
                     val latestSelection = profileStore.selectedProfile()
                     AppLogRepository.info(LogSource.SERVICE, "Reconnecting with ${latestSelection.name}")
-                    connectRoutes(token, settings, latestSelection)
+                    connectXray(token, settings, latestSelection)
                 }
             } catch (_: CancellationException) {
                 
@@ -735,7 +751,15 @@ class UacVpnService : VpnService() {
         } else {
             raw
         }
-        val country = torSettings.validated().exitCountryCode.ifBlank { "auto" }
+        val country = torSettings.validated().exitCountryCode.ifBlank { if (torSettings.fastExit) "fast" else "auto" }
+        if (state == ConnectionState.CONNECTED && torCoordinator.isDaemonRunning()) {
+            // Control-port SETCONF ExitNodes + NEWNYM: no Tor restart, no TUN rebuild.
+            serviceScope.launch {
+                runCatching { torCoordinator.applyExitCountry(torSettings) }
+                    .onFailure { AppLogRepository.error(LogSource.TOR, "Live ExitNodes={$country} failed", it) }
+            }
+            return
+        }
         AppLogRepository.info(LogSource.TOR, "Reconnecting Tor engine for ExitNodes={$country}")
         ConnectRescueStore.hide()
         activeEngine = EngineMode.TOR_WEBTUNNEL
@@ -830,11 +854,130 @@ class UacVpnService : VpnService() {
         job.invokeOnCompletion { if (latencyJob === job) latencyJob = null }
     }
 
+    /** Engine 1 entry: Auto resolves to a tested Patterniha config, anything else connects as before. */
+    private suspend fun connectXray(
+        token: Long,
+        settings: AdvancedSettingsData,
+        profile: ProxyProfile,
+        recovering: Boolean = false,
+    ) {
+        if (!profile.isAuto) {
+            AutoBootstrapStore.reset()
+            activeAutoUri = null
+            com.uacspoofer.mobile.auto.XrayLiveFlow.beginManual(profile.name)
+            com.uacspoofer.mobile.auto.XrayLiveFlow.start(com.uacspoofer.mobile.auto.XrayFlowStageId.CONNECT, profile.name)
+            connectRoutes(token, settings, profile)
+            return
+        }
+        connectAuto(token, settings, recovering)
+    }
+
+    private var autoSpeedJob: kotlinx.coroutines.Job? = null
+
+    /** Background, after connect only: real-speed sample of the top cached configs for next time. */
+    private fun scheduleAutoSpeedRanking(
+        token: Long,
+        snapshot: UnderlyingNetworkSnapshot,
+        settings: AdvancedSettingsData,
+        systemDns: List<java.net.InetAddress>,
+    ) {
+        autoSpeedJob?.cancel()
+        val power = getSystemService(PowerManager::class.java)
+        fun wanted() = token == generation.get() && power?.isInteractive != false
+        autoSpeedJob = serviceScope.launch {
+            delay(AUTO_SPEED_DELAY_MS)
+            if (!wanted()) return@launch
+            com.uacspoofer.mobile.auto.XrayLiveFlow.start(com.uacspoofer.mobile.auto.XrayFlowStageId.SPEED_RANK, "دانلود ۲۵۶KB از کانفیگ‌های برتر")
+            val self = coroutineContext[Job]
+            val watcher = launch {
+                while (wanted()) delay(1_000)
+                self?.cancel()
+            }
+            try {
+                runCatching { autoBootstrapper.measureSpeeds(snapshot, settings, systemDns, ::wanted) }
+            } finally {
+                watcher.cancel()
+                com.uacspoofer.mobile.auto.XrayLiveFlow.done(com.uacspoofer.mobile.auto.XrayFlowStageId.SPEED_RANK)
+            }
+        }
+    }
+
+    private suspend fun connectAuto(token: Long, settings: AdvancedSettingsData, recovering: Boolean) {
+        AutoBootstrapStore.begin()
+        com.uacspoofer.mobile.auto.XrayLiveFlow.reset()
+        if (recovering) com.uacspoofer.mobile.auto.XrayLiveFlow.branch("پایش سلامت", "کانفیگ فعلی جواب نداد", "۳ کانفیگ بعدی")
+        val snapshot = fingerprintResolver.captureAdaptiveContext()
+        val systemDns = runCatching {
+            val cm = getSystemService(android.net.ConnectivityManager::class.java)
+            snapshot.network?.let { cm?.getLinkProperties(it)?.dnsServers }.orEmpty()
+                .filterIsInstance<java.net.Inet4Address>()
+        }.getOrDefault(emptyList())
+        val failedUri = activeAutoUri.takeIf { recovering }
+        activeAutoUri = null
+        if (failedUri != null) {
+            autoBootstrapper.recordFailure(snapshot, failedUri)
+            AppLogRepository.warning(LogSource.ADAPTIVE, "AUTO config failed health check; trying the next cached configs")
+        }
+
+        suspend fun tryEntries(uris: List<String>): Boolean {
+            for (uri in uris) {
+                coroutineContext.ensureActive()
+                if (token != generation.get()) throw CancellationException("stale connect generation")
+                val candidate = autoBootstrapper.profileFor(uri, snapshot, systemDns) ?: continue
+                AutoBootstrapStore.stage(AutoStage.CONNECT, AutoStageState.RUNNING, candidate.name.removePrefix("Auto · "))
+                com.uacspoofer.mobile.auto.XrayLiveFlow.start(com.uacspoofer.mobile.auto.XrayFlowStageId.CONNECT, candidate.name.removePrefix("Auto · "))
+                AppLogRepository.info(LogSource.ADAPTIVE, "AUTO connecting with ${candidate.name}")
+                if (connectRoutes(token, settings, candidate, failClosed = false, allowRescue = false)) {
+                    activeAutoUri = uri
+                    autoBootstrapper.recordSuccess(snapshot, uri)
+                    AutoBootstrapStore.stage(AutoStage.CONNECT, AutoStageState.DONE)
+                    scheduleAutoSpeedRanking(token, snapshot, settings, systemDns)
+                    return true
+                }
+                autoBootstrapper.recordFailure(snapshot, uri)
+                com.uacspoofer.mobile.auto.XrayLiveFlow.branch("اتصال", candidate.name.removePrefix("Auto · "), "کانفیگ بعدی")
+            }
+            return false
+        }
+
+        val cached = autoBootstrapper.healthy(snapshot).map(AutoRankedEntry::uri).filter { it != failedUri }
+        if (cached.isNotEmpty()) {
+            AppLogRepository.info(LogSource.ADAPTIVE, "AUTO using ${cached.size} cached configs for this network")
+            listOf(AutoStage.OPERATOR, AutoStage.LIST, AutoStage.CLEAN_IP, AutoStage.TEST).forEach {
+                AutoBootstrapStore.stage(it, AutoStageState.SKIPPED)
+            }
+            com.uacspoofer.mobile.auto.XrayLiveFlow.AUTO_STAGES.forEach {
+                com.uacspoofer.mobile.auto.XrayLiveFlow.skip(it, "از رتبه‌بندی ذخیره‌شده‌ی این شبکه (${cached.size})")
+            }
+            if (tryEntries(cached.take(AUTO_FAILOVER_TRIES))) return
+            AppLogRepository.warning(LogSource.ADAPTIVE, "AUTO cached configs failed; re-bootstrapping")
+            AutoBootstrapStore.begin()
+            com.uacspoofer.mobile.auto.XrayLiveFlow.branch("کانفیگ‌های ذخیره‌شده", "هیچ‌کدام وصل نشد", "جستجوی تازه")
+        }
+
+        cleanupRoute(holdVpn = true)
+        val ranked = autoBootstrapper.bootstrap(snapshot, settings, systemDns)
+            .map(AutoRankedEntry::uri)
+            .filter { it != failedUri }
+        if (ranked.isNotEmpty() && tryEntries(ranked.take(AUTO_FAILOVER_TRIES))) return
+        if (AutoBootstrapStore.snapshot.value.error.isBlank()) {
+            AutoBootstrapStore.fail("اتصال به کانفیگ‌های تست‌شده ناموفق بود؛ دوباره تلاش کنید یا کانفیگ خودتان را وارد کنید")
+        }
+        AppLogRepository.error(LogSource.SERVICE, "AUTO found no working config for this network")
+        failClosedLocked(token)
+    }
+
+    /**
+     * Returns true once connected. With [failClosed] false a failed attempt leaves the state for the
+     * caller (Auto tries its next config); [allowRescue] gates the clean-IP rescue search.
+     */
     private suspend fun connectRoutes(
         token: Long,
         settings: AdvancedSettingsData,
         profile: ProxyProfile,
-    ) {
+        failClosed: Boolean = true,
+        allowRescue: Boolean = true,
+    ): Boolean {
         activeConnectionMode = settings.connectionMode
         var lastFailure: Throwable? = null
         var bestReport: AdaptiveProbeReport? = null
@@ -958,6 +1101,7 @@ class UacVpnService : VpnService() {
                         return true
                     }
                     persistWorkingPool(pool, candidate)
+                    if (activeEngine.isXray) publishXrayConnected(profile, candidate, candidateSettings)
                     startAiRouteMaintenance(candidateSettings)
                     if (rescueGeneration != 0L) {
                         ConnectRescueStore.update(rescueGeneration) { current ->
@@ -1065,13 +1209,42 @@ class UacVpnService : VpnService() {
             LogSource.ADAPTIVE,
             "Planner signature=$signature candidates=${plan.candidates.joinToString(",") { it.id }}",
         )
-        if (tryCandidateBatch(plan.candidates, plan.pool)) return
+        if (tryCandidateBatch(plan.candidates, plan.pool)) return true
+
+        val pinnedIdentity = if (profile.usesAdvancedSettingsIdentity()) {
+            null
+        } else {
+            DirectCompatProfileParser.parse(profile)?.identity
+        }
+        if (pinnedIdentity?.pinnedToOwnAddress == true) {
+            AppLogRepository.warning(
+                LogSource.ADAPTIVE,
+                "ECH/REALITY profile failed on its own address; clean-IP rescue skipped (it would break the handshake)",
+            )
+            Log.e(TAG, "pinned-address profile failed", lastFailure)
+            AppLogRepository.error(
+                LogSource.SERVICE,
+                "All adaptive candidates failed; best=${bestReport?.detail() ?: "none"}",
+                lastFailure,
+            )
+            if (failClosed) failClosedLocked(token)
+            return false
+        }
+        if (!allowRescue) {
+            AppLogRepository.warning(LogSource.ADAPTIVE, "Candidates for ${profile.name} failed; rescue skipped")
+            if (failClosed) failClosedLocked(token)
+            return false
+        }
 
         AppLogRepository.info(
             LogSource.ADAPTIVE,
             "Connect edge pool exhausted; searching for clean Cloudflare IPs",
         )
         val rescueGeneration = ConnectRescueStore.begin()
+        if (activeEngine.isXray) {
+            com.uacspoofer.mobile.auto.XrayLiveFlow.branch("همه مسیرها", "هیچ کاندیدی وصل نشد", "نجات با IP تمیز")
+            com.uacspoofer.mobile.auto.XrayLiveFlow.start(com.uacspoofer.mobile.auto.XrayFlowStageId.RESCUE, "جستجوی IP تمیز Cloudflare")
+        }
         val rescuedEdges = latencyTester.discoverConnectEdgePool(
             settings = settings,
             profile = profile,
@@ -1105,7 +1278,7 @@ class UacVpnService : VpnService() {
                     rescueGeneration,
                     progressOffset = plan.candidates.size,
                 )
-            ) return
+            ) return true
         } else {
             AppLogRepository.warning(
                 LogSource.ADAPTIVE,
@@ -1122,7 +1295,8 @@ class UacVpnService : VpnService() {
             "All adaptive candidates failed; best=${bestReport?.detail() ?: "none"}",
             lastFailure,
         )
-        failClosedLocked(token)
+        if (failClosed) failClosedLocked(token)
+        return false
     }
 
     private suspend fun connectTorEngine(token: Long, settings: AdvancedSettingsData) {
@@ -1524,6 +1698,95 @@ class UacVpnService : VpnService() {
             STATS_INTERVAL_MS
         }
 
+    @Volatile private var lastPrewarmAt = 0L
+
+    private fun publishXrayConnected(profile: ProxyProfile, candidate: AdaptiveCandidate, s: AdvancedSettingsData) {
+        val flow = com.uacspoofer.mobile.auto.XrayLiveFlow
+        val identity = candidate.runtimeOptions.identityOverride
+        val type = when {
+            identity?.usesEch == true -> "ECH"
+            identity?.finalmask?.isNotBlank() == true -> "fm+cs"
+            candidate.edge.address.contains(':') -> "IPv6"
+            else -> identity?.network ?: "built-in"
+        }
+        if (flow.isRunning(com.uacspoofer.mobile.auto.XrayFlowStageId.RESCUE)) flow.done(com.uacspoofer.mobile.auto.XrayFlowStageId.RESCUE, candidate.edge.address)
+        flow.done(
+            com.uacspoofer.mobile.auto.XrayFlowStageId.CONNECT,
+            profile.name.removePrefix("Auto · "),
+            listOf(
+                "type" to type,
+                "server" to "${candidate.edge.address}:${candidate.edge.port}",
+                "route" to candidate.id,
+            ) + xrayConfigSpecs(profile, candidate, s),
+        )
+        flow.done(
+            com.uacspoofer.mobile.auto.XrayFlowStageId.DNS_ROUTING,
+            AdaptiveDnsResolvers.idFor(s.dnsResolverUrl),
+            listOf(
+                "DoH" to AdaptiveDnsResolvers.idFor(s.dnsResolverUrl),
+                "Iran direct" to s.iranDirect.toString(),
+                "IPv6" to if (s.ipv4Only) "block" else "allow",
+                "mode" to s.connectionMode,
+            ),
+        )
+        flow.start(com.uacspoofer.mobile.auto.XrayFlowStageId.HEALTH, "هر ۳۰ ثانیه در بیکاری")
+        flow.finish(profile.name.removePrefix("Auto · "))
+    }
+
+    private fun xrayConfigSpecs(profile: ProxyProfile, candidate: AdaptiveCandidate, s: AdvancedSettingsData): List<Pair<String, String>> {
+        val id = candidate.runtimeOptions.identityOverride ?: runCatching { profile.runtimeIdentity(s) }.getOrNull() ?: return emptyList()
+        val opts = candidate.runtimeOptions
+        val fragment = when {
+            id.finalmask.isNotBlank() -> "fm: " + id.finalmask.take(180)
+            opts.finalmaskEnabled && id.usesTls -> "fragment ${s.finalmaskPacket} · len ${s.finalmaskLength} · delay ${s.finalmaskDelayMs}"
+            else -> ""
+        }
+        val path = when (id.network) {
+            "grpc" -> id.serviceName
+            else -> id.path
+        }
+        return listOf(
+            "protocol" to id.protocol.name.lowercase(),
+            "network" to id.network + if (id.network == "xhttp" && id.xhttpMode.isNotBlank()) " (${id.xhttpMode})" else "",
+            "security" to id.security.ifBlank { "none" },
+            "ECH" to if (id.usesEch) "yes" else "no",
+            "fingerprint" to id.fingerprint,
+            "SNI" to id.sni,
+            "ALPN" to id.alpn,
+            "host" to id.host.ifBlank { id.authority },
+            "path" to path,
+            "fragment" to fragment,
+            "cipher suites" to id.cipherSuites,
+            "Mux" to if (opts.muxEnabledOverride ?: s.muxEnabled) "on · ${s.muxConcurrency}" else "off",
+            "port" to candidate.edge.port.toString(),
+            "flow" to id.flow,
+            "REALITY sid" to (if (id.usesReality) id.realityShortId else ""),
+            "header" to id.headerType,
+        ).filter { it.second.isNotBlank() }
+    }
+
+    /** Screen on after a pause: one light request through Xray so DNS, route and NAT are warm before the user taps. */
+    private val screenOnReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            maybePrewarm("screen-on")
+        }
+    }
+
+    private fun maybePrewarm(reason: String) {
+        if (!resourcesActive || ConnectionStateStore.state.value != ConnectionState.CONNECTED) return
+        if (activeEngine.isTor || activeEngine.isPow) return
+        if (!advancedSettingsStore.snapshot().prewarm) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastPrewarmAt < PREWARM_MIN_GAP_MS) return
+        lastPrewarmAt = now
+        serviceScope.launch {
+            val (host, port) = LivePing.socksEndpoint(this@UacVpnService)
+            val ms = runCatching { LivePing.measureChip(host, port, PREWARM_TIMEOUT_MS) }.getOrNull()
+            AppLogRepository.debug(LogSource.SERVICE, "Pre-warm $reason ${ms ?: -1} ms")
+            com.uacspoofer.mobile.auto.XrayLiveFlow.fact(com.uacspoofer.mobile.auto.XrayFlowStageId.HEALTH, "Pre-warm", if (ms != null) "$ms ms" else "—")
+        }
+    }
+
     private fun isScreenInteractive(): Boolean = runCatching {
         getSystemService(PowerManager::class.java)?.isInteractive ?: true
     }.getOrDefault(true)
@@ -1544,7 +1807,14 @@ class UacVpnService : VpnService() {
                         scheduleRuntimeRecovery(token, "Tor engine process exited", penalizeCandidate = false)
                         return@launch
                     }
-                    nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
+                    // Light watchdog: one SOCKS stream per minute, screen on only.
+                    if (!torCoordinator.watchdogTick(isScreenInteractive())) {
+                        if (token != generation.get() || !resourcesActive) return@launch
+                        AppLogRepository.warning(LogSource.TOR, "Tor watchdog: no stream gets through; recovering")
+                        scheduleRuntimeRecovery(token, "Tor watchdog failed", penalizeCandidate = false)
+                        return@launch
+                    }
+                    nextDelayMs = TOR_WATCHDOG_INTERVAL_MS
                     continue
                 }
                 if (activeEngine.isPow) {
@@ -1653,6 +1923,10 @@ class UacVpnService : VpnService() {
         val failedFingerprint = activeFingerprint
         val failedSignature = activeSignature
         val profile = profileStore.activeProfile() ?: profileStore.selectedProfile()
+        if (activeEngine.isXray) {
+            com.uacspoofer.mobile.auto.XrayLiveFlow.fail(com.uacspoofer.mobile.auto.XrayFlowStageId.HEALTH, reason)
+            com.uacspoofer.mobile.auto.XrayLiveFlow.branch("پایش سلامت", reason, "اتصال دوباره / کانفیگ بعدی")
+        }
         if (activeEngine.isXray && penalizeCandidate && failedCandidate != null && failedFingerprint != null && failedSignature != null) {
             adaptiveProfileStore.recordFailure(failedFingerprint, profile, failedSignature, failedCandidate.id)
             AppLogRepository.warning(
@@ -1679,7 +1953,7 @@ class UacVpnService : VpnService() {
                     when {
                         activeEngine.isTor -> connectTorEngine(recoveryToken, settings)
                         activeEngine.isPow -> connectPowEngine(recoveryToken, settings)
-                        else -> connectRoutes(recoveryToken, settings, profile)
+                        else -> connectXray(recoveryToken, settings, profile, recovering = true)
                     }
                 }
             } catch (_: CancellationException) {
@@ -1747,6 +2021,7 @@ class UacVpnService : VpnService() {
         resourcesActive = false
         if (token != generation.get()) return
         ConnectionStateStore.markError()
+        if (activeEngine.isXray) com.uacspoofer.mobile.auto.XrayLiveFlow.failRunning("اتصال ناموفق بود")
         val held = shouldHoldKillSwitch() && killSwitchFd != null
         if (held) {
             NetworkGuardStore.setBlocking(true)
@@ -1959,6 +2234,10 @@ class UacVpnService : VpnService() {
         const val EXTRA_ROUTE_PROBE_ID = "route_probe_id"
 
         private const val TAG = "UAC-SNI"
+        /** Auto failover: cached configs tried before re-bootstrapping. */
+        private const val AUTO_FAILOVER_TRIES = 3
+        /** Lets the first page loads finish before the background speed sample starts. */
+        private const val AUTO_SPEED_DELAY_MS = 20_000L
         private const val NOTIFICATION_CHANNEL = "uac_mci_vpn"
         private const val NOTIFICATION_ID = 1001
         private const val NOTIFICATION_DISCONNECT_REQUEST = 1002
@@ -1967,7 +2246,10 @@ class UacVpnService : VpnService() {
         private const val STATS_INTERVAL_SCREEN_OFF_MS = 15_000L
         private const val ADAPTIVE_STABILITY_WINDOW_MS = 60_000L
         private const val ADAPTIVE_PROBE_WARMUP_MS = 800L
+        private const val TOR_WATCHDOG_INTERVAL_MS = 60_000L
         private const val POST_CONNECT_HEALTH_DELAY_MS = 8_000L
+        private const val PREWARM_MIN_GAP_MS = 60_000L
+        private const val PREWARM_TIMEOUT_MS = 4_000
         private const val NETWORK_WATCH_INTERVAL_MS = 3_000L
         private const val NETWORK_CHANGE_CONFIRMATIONS = 2
         private const val AI_ROUTE_SETTLE_MS = 2_500L

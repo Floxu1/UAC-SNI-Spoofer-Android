@@ -1131,6 +1131,24 @@ private fun ImportSourceSheet(
                     )
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    "Patterniha · GitHub" to com.uacspoofer.mobile.auto.PatternihaList.RAW_URL,
+                    "Patterniha · jsDelivr" to com.uacspoofer.mobile.auto.PatternihaList.JSDELIVR_URL,
+                ).forEach { (label, url) ->
+                    val selected = controller.subscriptionUrl.trim() == url
+                    Text(
+                        label,
+                        color = if (selected) Color(0xFF35D6FF) else Color(0xFFB8C4D0),
+                        fontSize = 11.sp,
+                        modifier = Modifier
+                            .background(Color(0x99101C29), RoundedCornerShape(10.dp))
+                            .border(1.dp, if (selected) Color(0xFF35D6FF) else Color(0x3335D6FF), RoundedCornerShape(10.dp))
+                            .clickable { controller.updateSubscriptionUrl(url) }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+            }
             OutlinedTextField(
                 value = controller.pastedConfigs,
                 onValueChange = controller::updatePastedConfigs,

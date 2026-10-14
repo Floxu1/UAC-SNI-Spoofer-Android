@@ -27,9 +27,10 @@ data class AdvancedSettingsData(
  val fallbackAddress:String="104.26.14.200",val fallbackPort:Int=443,val fallbackMaxSplit:Int=2,
  val telegramRouteEnabled:Boolean=false,val telegramAddress:String="104.18.9.83",val telegramFallbackAddress:String="104.18.8.83",val telegramPort:Int=443,val telegramMaxSplit:Int=100,val telegramFingerprint:String="unsafe",val telegramCipherSuites:String=PATTNG_PYTHON_CIPHER_SUITES,val telegramSessionResumption:Boolean=false,
  val outboundProtocol:String="vless",val transportNetwork:String="ws",val transportSecurity:String="tls",val trojanPassword:String="4e4f1f70-5e56-4a76-bb9d-db087f4690c4",val tlsSni:String="jp3.yohototo.top",val tlsAlpn:String="http/1.1",val tlsFingerprint:String="unsafe",val wsHost:String="jp3.yohototo.top",val wsPath:String="/tyxyws",
- val finalmaskPacket:String="tlshello",val finalmaskLength:Int=5,val finalmaskDelayMs:Int=0,val muxEnabled:Boolean=false,val muxConcurrency:Int=8,
+ val finalmaskPacket:String="tlshello",val finalmaskLength:Int=5,val finalmaskDelayMs:Int=0,val muxEnabled:Boolean=false,val muxConcurrency:Int=8,val iranDirect:Boolean=true,
  val domainStrategy:String="UseIPv4",val routingDomainStrategy:String="AsIs",val ipv4Only:Boolean=true,val keepAliveIdleSeconds:Int=11,val keepAliveIntervalSeconds:Int=15,val blockUdp443:Boolean=false,
- val socksAddress:String="127.0.0.1",val socksPort:Int=10808,val socksUdp:Boolean=true,val tunMtu:Int=1280,val tunAddress:String="198.18.0.1",val nativeDns:String="1.1.1.1",val dnsResolverUrl:String="https://cloudflare-dns.com/dns-query",val tunRoute:String="0.0.0.0/0"
+ val socksAddress:String="127.0.0.1",val socksPort:Int=10808,val socksUdp:Boolean=true,val tunMtu:Int=1280,val tunAddress:String="198.18.0.1",val nativeDns:String="1.1.1.1",val dnsResolverUrl:String="https://cloudflare-dns.com/dns-query",val tunRoute:String="0.0.0.0/0",
+ val dnsServeStale:Boolean=true,val tcpFastOpen:Boolean=true,val bigBuffers:Boolean=true,val prewarm:Boolean=true
 ) {
  fun validated()=copy(connectionMode=choice(connectionMode,CONNECTION_MODE_TUNNEL,setOf(CONNECTION_MODE_TUNNEL,CONNECTION_MODE_PROXY)),primaryAddress=t(primaryAddress,"104.26.13.100"),primaryPort=p(primaryPort),primaryMaxSplit=sp(primaryMaxSplit),irancellAddress=t(irancellAddress,"104.26.14.40"),irancellPort=p(irancellPort),irancellMaxSplit=sp(irancellMaxSplit),fallbackAddress=t(fallbackAddress,"104.26.14.200"),fallbackPort=p(fallbackPort),fallbackMaxSplit=sp(fallbackMaxSplit),telegramAddress=t(telegramAddress,"104.18.9.83"),telegramFallbackAddress=t(telegramFallbackAddress,"104.18.8.83"),telegramPort=p(telegramPort),telegramMaxSplit=sp(telegramMaxSplit),telegramFingerprint=t(telegramFingerprint,"unsafe"),telegramCipherSuites=t(telegramCipherSuites,PATTNG_PYTHON_CIPHER_SUITES).replace(',',':'),outboundProtocol=choice(outboundProtocol,"vless",setOf("trojan","vless")),transportNetwork=choice(transportNetwork,"ws",setOf("ws")),transportSecurity=choice(transportSecurity,"tls",setOf("tls")),trojanPassword=t(trojanPassword,"4e4f1f70-5e56-4a76-bb9d-db087f4690c4"),tlsSni=t(tlsSni,"jp3.yohototo.top"),tlsAlpn=t(tlsAlpn,"http/1.1"),tlsFingerprint=t(tlsFingerprint,"unsafe"),wsHost=t(wsHost,"jp3.yohototo.top"),wsPath=t(wsPath,"/tyxyws").let{if(it.startsWith('/'))it else "/$it"},finalmaskPacket=t(finalmaskPacket,"tlshello"),finalmaskLength=finalmaskLength.coerceIn(1,65535),finalmaskDelayMs=finalmaskDelayMs.coerceIn(0,60000),muxConcurrency=muxConcurrency.coerceIn(1,1024),keepAliveIdleSeconds=keepAliveIdleSeconds.coerceIn(1,7200),keepAliveIntervalSeconds=keepAliveIntervalSeconds.coerceIn(1,600),socksAddress=t(socksAddress,"127.0.0.1"),socksPort=p(socksPort),tunMtu=tunMtu.coerceIn(576,9000),tunAddress=t(tunAddress,"198.18.0.1"),nativeDns=t(nativeDns,"1.1.1.1"),dnsResolverUrl=doh(dnsResolverUrl),tunRoute=route(tunRoute))
  fun edges()=listOf(MciEdge(primaryAddress,primaryPort,"primary",primaryMaxSplit),MciEdge(irancellAddress,irancellPort,"irancell",irancellMaxSplit),MciEdge(fallbackAddress,fallbackPort,"fallback",fallbackMaxSplit))
@@ -138,11 +139,12 @@ class AdvancedSettingsStore(context: Context) {
             .putString("trojanPassword", v.trojanPassword).putString("tlsSni", v.tlsSni).putString("tlsAlpn", v.tlsAlpn).putString("tlsFingerprint", v.tlsFingerprint)
             .putString("wsHost", v.wsHost).putString("wsPath", v.wsPath).putString("finalmaskPacket", v.finalmaskPacket)
             .putInt("finalmaskLength", v.finalmaskLength).putInt("finalmaskDelayMs", v.finalmaskDelayMs)
-            .putBoolean("muxEnabled", v.muxEnabled).putInt("muxConcurrency", v.muxConcurrency)
+            .putBoolean("muxEnabled", v.muxEnabled).putBoolean("iranDirect", v.iranDirect).putInt("muxConcurrency", v.muxConcurrency)
             .putString("domainStrategy", v.domainStrategy).putString("routingDomainStrategy", v.routingDomainStrategy).putBoolean("ipv4Only", v.ipv4Only)
             .putInt("keepAliveIdleSeconds", v.keepAliveIdleSeconds).putInt("keepAliveIntervalSeconds", v.keepAliveIntervalSeconds).putBoolean("blockUdp443", v.blockUdp443)
             .putString("socksAddress", v.socksAddress).putInt("socksPort", v.socksPort).putBoolean("socksUdp", v.socksUdp)
             .putInt("tunMtu", v.tunMtu).putString("tunAddress", v.tunAddress).putString("nativeDns", v.nativeDns).putString("dnsResolverUrl",v.dnsResolverUrl).putString("tunRoute", v.tunRoute)
+            .putBoolean("dnsServeStale", v.dnsServeStale).putBoolean("tcpFastOpen", v.tcpFastOpen).putBoolean("bigBuffers", v.bigBuffers).putBoolean("prewarm", v.prewarm)
             .apply()
         mutable.value = v
         return v
@@ -175,9 +177,10 @@ class AdvancedSettingsStore(context: Context) {
             outboundProtocol=s("outboundProtocol",d.outboundProtocol), transportNetwork=s("transportNetwork",d.transportNetwork), transportSecurity=s("transportSecurity",d.transportSecurity),
             trojanPassword=s("trojanPassword",d.trojanPassword), tlsSni=s("tlsSni",d.tlsSni), tlsAlpn=s("tlsAlpn",d.tlsAlpn), tlsFingerprint=s("tlsFingerprint",d.tlsFingerprint),
             wsHost=s("wsHost",d.wsHost), wsPath=s("wsPath",d.wsPath), finalmaskPacket=s("finalmaskPacket",d.finalmaskPacket), finalmaskLength=i("finalmaskLength",d.finalmaskLength), finalmaskDelayMs=i("finalmaskDelayMs",d.finalmaskDelayMs),
-            muxEnabled=b("muxEnabled",d.muxEnabled), muxConcurrency=i("muxConcurrency",d.muxConcurrency), domainStrategy=s("domainStrategy",d.domainStrategy), routingDomainStrategy=s("routingDomainStrategy",d.routingDomainStrategy), ipv4Only=b("ipv4Only",d.ipv4Only),
+            muxEnabled=b("muxEnabled",d.muxEnabled), iranDirect=b("iranDirect",d.iranDirect), muxConcurrency=i("muxConcurrency",d.muxConcurrency), domainStrategy=s("domainStrategy",d.domainStrategy), routingDomainStrategy=s("routingDomainStrategy",d.routingDomainStrategy), ipv4Only=b("ipv4Only",d.ipv4Only),
             keepAliveIdleSeconds=i("keepAliveIdleSeconds",d.keepAliveIdleSeconds), keepAliveIntervalSeconds=i("keepAliveIntervalSeconds",d.keepAliveIntervalSeconds), blockUdp443=b("blockUdp443",d.blockUdp443),
-            socksAddress=s("socksAddress",d.socksAddress), socksPort=i("socksPort",d.socksPort), socksUdp=b("socksUdp",d.socksUdp), tunMtu=i("tunMtu",d.tunMtu), tunAddress=s("tunAddress",d.tunAddress), nativeDns=s("nativeDns",d.nativeDns), dnsResolverUrl=s("dnsResolverUrl",d.dnsResolverUrl), tunRoute=s("tunRoute",d.tunRoute)
+            socksAddress=s("socksAddress",d.socksAddress), socksPort=i("socksPort",d.socksPort), socksUdp=b("socksUdp",d.socksUdp), tunMtu=i("tunMtu",d.tunMtu), tunAddress=s("tunAddress",d.tunAddress), nativeDns=s("nativeDns",d.nativeDns), dnsResolverUrl=s("dnsResolverUrl",d.dnsResolverUrl), tunRoute=s("tunRoute",d.tunRoute),
+            dnsServeStale=b("dnsServeStale",d.dnsServeStale), tcpFastOpen=b("tcpFastOpen",d.tcpFastOpen), bigBuffers=b("bigBuffers",d.bigBuffers), prewarm=b("prewarm",d.prewarm)
         ).validated()
     }
 

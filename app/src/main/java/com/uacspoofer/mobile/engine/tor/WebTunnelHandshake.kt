@@ -40,8 +40,12 @@ internal object WebTunnelHandshake {
             parts[1] == "101"
     }
 
-    suspend fun rankLive(bridges: List<WebTunnelBridge>): List<WebTunnelBridge> {
-        if (bridges.size < MIN_CANDIDATES_TO_SCAN) return bridges
+    suspend fun rankLive(bridges: List<WebTunnelBridge>): List<WebTunnelBridge> =
+        scanLive(bridges).keys.toList().ifEmpty { bridges }
+
+    /** Live bridges (HTTP 101) with handshake latency in ms, fastest first. Empty = none / skipped. */
+    suspend fun scanLive(bridges: List<WebTunnelBridge>): Map<WebTunnelBridge, Int> {
+        if (bridges.size < MIN_CANDIDATES_TO_SCAN) return emptyMap()
         val slice = bridges.take(MAX_PROBE)
         val live = withContext(Dispatchers.IO) {
             val collected = java.util.Collections.synchronizedList(mutableListOf<Pair<WebTunnelBridge, Int>>())
@@ -63,9 +67,9 @@ internal object WebTunnelHandshake {
                     }.awaitAll()
                 }
             }
-            collected.sortedBy { it.second }.map { it.first }
+            collected.sortedBy { it.second }
         }
-        return live.ifEmpty { bridges }
+        return LinkedHashMap<WebTunnelBridge, Int>().apply { live.forEach { (b, ms) -> put(b, ms) } }
     }
 
     internal fun probeOnce(bridge: WebTunnelBridge, timeoutMs: Int): Boolean {

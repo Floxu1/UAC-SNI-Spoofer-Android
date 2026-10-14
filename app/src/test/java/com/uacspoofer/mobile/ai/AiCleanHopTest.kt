@@ -10,7 +10,7 @@ import org.junit.Test
 
 class AiCleanHopTest {
     private val plan = AiRoutePlan(
-        profile = ProxyProfile.UAC_SNI_BUILT_IN,
+        profile = ProxyProfile.ADVANCED_SETTINGS_TEMPLATE,
         edge = MciConfig.PRIMARY_EDGE,
     )
 

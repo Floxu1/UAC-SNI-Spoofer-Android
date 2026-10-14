@@ -487,7 +487,23 @@ internal class SniMakerController(context: Context) : Closeable {
         return (bounded / TIMEOUT_STEP_MS) * TIMEOUT_STEP_MS
     }
 
-    private suspend fun readSubscription(rawUrl: String): String = withContext(Dispatchers.IO) {
+    /** Patterniha URLs fall back to the jsDelivr mirror and the GitHub API when one host is blocked. */
+    private suspend fun readSubscription(rawUrl: String): String {
+        val urls = com.uacspoofer.mobile.auto.PatternihaList.mirrorsFor(rawUrl)
+        var lastError: Throwable? = null
+        for (candidate in urls) {
+            try {
+                return readSubscriptionFrom(candidate)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        throw lastError ?: IllegalStateException("Subscription download failed")
+    }
+
+    private suspend fun readSubscriptionFrom(rawUrl: String): String = withContext(Dispatchers.IO) {
         val url = URL(rawUrl)
         require(url.protocol == "https" || url.protocol == "http") { "URL must use HTTP or HTTPS" }
         val connection = url.openConnection() as HttpURLConnection
@@ -495,7 +511,10 @@ internal class SniMakerController(context: Context) : Closeable {
             connection.connectTimeout = SUBSCRIPTION_CONNECT_TIMEOUT_MS
             connection.readTimeout = SUBSCRIPTION_READ_TIMEOUT_MS
             connection.instanceFollowRedirects = true
-            connection.setRequestProperty("Accept", "text/plain,*/*")
+            connection.setRequestProperty(
+                "Accept",
+                if (rawUrl == com.uacspoofer.mobile.auto.PatternihaList.API_URL) "application/vnd.github.raw" else "text/plain,*/*",
+            )
             connection.setRequestProperty("User-Agent", "UAC-SNI-Spoofer-Android/SNI-Maker")
             val code = connection.responseCode
             check(code in 200..299) { "Subscription HTTP $code" }

@@ -21,6 +21,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.first
 import com.uacspoofer.mobile.BuildConfig
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
@@ -142,7 +143,8 @@ class MainActivity : ComponentActivity() {
         while (isActive) {
             if (ConnectionStateStore.state.value != ConnectionState.CONNECTED) {
                 awaitingFirst = true
-                delay(400)
+                // Suspend until connected instead of waking every 400 ms while idle.
+                ConnectionStateStore.state.first { it == ConnectionState.CONNECTED }
                 continue
             }
             if (awaitingFirst) {

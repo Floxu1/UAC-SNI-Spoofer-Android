@@ -80,6 +80,12 @@ pub struct StartOptions {
     /// Optional HTTP/3 tuning (BBRv2, pacing, short DATAGRAM queues).
     /// Passed to the QUIC tunnel as `AETHER_QUIC_TUNED`.
     pub quic_tuned: bool,
+    /// HTTP/2: 16 MB / 8 MB flow-control windows (off = 4 MB / 1 MB).
+    pub h2_large_windows: bool,
+    /// HTTP/2: TCP_NODELAY and 1 MB SO_SNDBUF/SO_RCVBUF on the outer socket.
+    pub h2_socket_tuning: bool,
+    /// HTTP/2: race the top saved clean addresses and keep the quickest.
+    pub h2_speed_pick: bool,
     /// Android owns the outer-protocol ladder. One failed hunt must return so
     /// Kotlin can try the next transport instead of sleeping inside a rescan loop
     /// until the app kills the process.
@@ -189,6 +195,9 @@ impl StartOptions {
             api_camo: String::new(),
             renew_masque: false,
             quic_tuned: false,
+            h2_large_windows: true,
+            h2_socket_tuning: true,
+            h2_speed_pick: true,
         }
     }
 
@@ -372,6 +381,13 @@ fn apply_runtime_options(options: &StartOptions) {
         std::env::set_var("AETHER_QUIC_TUNED", "1");
     } else {
         std::env::remove_var("AETHER_QUIC_TUNED");
+    }
+    for (key, on) in [
+        ("AETHER_MASQUE_H2_LARGE_WINDOWS", options.h2_large_windows),
+        ("AETHER_MASQUE_H2_SOCKET_TUNING", options.h2_socket_tuning),
+        ("AETHER_MASQUE_H2_SPEED_PICK", options.h2_speed_pick),
+    ] {
+        std::env::set_var(key, if on { "1" } else { "0" });
     }
     match options.api_camo.trim() {
         "auto" | "ech" | "fragment" | "external" => {
@@ -1502,9 +1518,77 @@ enum PassOutcome {
     Exhausted,
 }
 
+fn saved_h2_config(identity: &account::Identity, peer: SocketAddr) -> masque_h2::H2TunnelConfig {
+    masque_h2::H2TunnelConfig {
+        peer,
+        sni: consts::L4_CONNECT_SNI.to_string(),
+        authority: quic::default_authority().to_string(),
+        path: quic::default_path().to_string(),
+        cert_pem: identity.cert_pem.clone(),
+        key_pem: identity.key_pem.clone(),
+        local_ipv4: parse_local_v4(&identity.ipv4),
+        quiet: true,
+        pin_endpoint: false,
+        expected_pins: Vec::new(),
+    }
+}
+
+/// How many saved clean addresses race in the speed pick (kept small for battery).
+const SPEED_PICK_TOP: usize = 3;
+
+/// Verifies the top saved addresses at once and returns them quickest-first.
+/// The figure is TLS + HTTP/2 + CONNECT-IP + one data-plane round trip, i.e.
+/// path latency, not bulk throughput. Rewrites the clean list in that order.
+async fn speed_pick_saved_h2(
+    identity: &account::Identity,
+    peers: &[SocketAddr],
+    config_path: &str,
+) -> Vec<SocketAddr> {
+    let top: Vec<SocketAddr> = peers.iter().take(SPEED_PICK_TOP).copied().collect();
+    crate::ffi::record_log(format!(
+        "Speed pick: racing {} saved clean address(es)",
+        top.len()
+    ));
+    let runs = top.iter().map(|saved| {
+        let peer = masque_h2::h2_peer(*saved);
+        let cfg = saved_h2_config(identity, peer);
+        let saved = *saved;
+        async move {
+            let result = masque_h2::verify_h2(&cfg, std::time::Duration::from_secs(6)).await;
+            (saved, peer, result)
+        }
+    });
+    let results = futures::future::join_all(runs).await;
+    let mut ok: Vec<(SocketAddr, std::time::Duration)> = Vec::new();
+    for (saved, peer, result) in results {
+        match result {
+            Ok(took) => {
+                crate::ffi::record_log(format!(
+                    "Speed pick: {peer} answered in {} ms",
+                    took.as_millis()
+                ));
+                ok.push((saved, took));
+            }
+            Err(error) => {
+                prober::note_probe_failure(&error.to_string());
+                crate::ffi::record_log(format!("Saved clean address rejected {peer}: {error}"));
+            }
+        }
+    }
+    ok.sort_by_key(|(_, took)| *took);
+    let winners: Vec<SocketAddr> = ok.into_iter().map(|(saved, _)| saved).collect();
+    if !winners.is_empty() {
+        let mut order = winners.clone();
+        order.extend(peers.iter().copied().filter(|p| !winners.contains(p)));
+        write_clean_h2(config_path, &order);
+    }
+    winners
+}
+
 async fn dial_saved_h2(
     identity: &account::Identity,
     peers: &[SocketAddr],
+    config_path: &str,
 ) -> Option<SocketAddr> {
     if peers.is_empty() {
         return None;
@@ -1513,21 +1597,21 @@ async fn dial_saved_h2(
         "Clean HTTP/2 list: {} saved address(es)",
         peers.len()
     ));
-    for peer in peers {
+    let mut skip: Vec<SocketAddr> = Vec::new();
+    if masque_h2::speed_pick() && peers.len() >= 2 {
+        let winners = speed_pick_saved_h2(identity, peers, config_path).await;
+        if let Some(best) = winners.first() {
+            let peer = masque_h2::h2_peer(*best);
+            masque_h2::use_extended_connect(false);
+            crate::ffi::record_log(format!("Saved clean address accepted {peer}"));
+            return Some(peer);
+        }
+        skip.extend(peers.iter().take(SPEED_PICK_TOP).copied());
+    }
+    for peer in peers.iter().filter(|p| !skip.contains(p)) {
         let peer = masque_h2::h2_peer(*peer);
         crate::ffi::record_log(format!("Trying saved clean address {peer}"));
-        let cfg = masque_h2::H2TunnelConfig {
-            peer,
-            sni: consts::L4_CONNECT_SNI.to_string(),
-            authority: quic::default_authority().to_string(),
-            path: quic::default_path().to_string(),
-            cert_pem: identity.cert_pem.clone(),
-            key_pem: identity.key_pem.clone(),
-            local_ipv4: parse_local_v4(&identity.ipv4),
-            quiet: true,
-            pin_endpoint: false,
-            expected_pins: Vec::new(),
-        };
+        let cfg = saved_h2_config(identity, peer);
         match masque_h2::verify_h2(&cfg, std::time::Duration::from_secs(8)).await {
             Ok(_) => {
                 masque_h2::use_extended_connect(false);
@@ -1958,7 +2042,9 @@ async fn run_masque(
                 crate::ffi::record_log(
                     "Clean HTTP/2 list is empty. Starting the HTTP/2 scan.",
                 );
-            } else if let Some(peer) = dial_saved_h2(&identity, &saved).await {
+            } else if let Some(peer) =
+                dial_saved_h2(&identity, &saved, &options.config_path).await
+            {
                 quick_peer = Some(peer);
             } else if prober::identity_rejections() > 0 {
                 let saved_peers: Vec<(SocketAddr, &'static str)> = saved

@@ -82,6 +82,8 @@ class NetworkFingerprintResolver(context: Context) {
         .getSystemService(TelephonyManager::class.java)
     @Volatile private var preferredNetworkHandle = -1L
     @Volatile private var identityCache: IdentityCache? = null
+    // Failed lookups (e.g. blocked identity sites) back off instead of retrying every network-watch tick.
+    @Volatile private var identityFailure: Pair<Long, Long>? = null
     @Volatile private var fingerprintKeyCache: FingerprintKeyCache? = null
 
     fun capture(): NetworkFingerprint = captureSelected(selectUnderlyingNetwork())
@@ -249,6 +251,9 @@ class NetworkFingerprintResolver(context: Context) {
             identityCache?.takeIf {
                 it.networkHandle == networkHandle && System.currentTimeMillis() - it.updatedAtMs < IDENTITY_CACHE_TTL_MS
             }?.let { return@withTimeoutOrNull it.identity }
+            identityFailure?.takeIf {
+                it.first == networkHandle && System.currentTimeMillis() - it.second < IDENTITY_CACHE_TTL_MS
+            }?.let { return@withTimeoutOrNull null }
             val network = connectivity.allNetworks.firstOrNull { it.networkHandle == networkHandle }
                 ?: return@withTimeoutOrNull null
             for (endpoint in IDENTITY_ENDPOINTS) {
@@ -260,6 +265,10 @@ class NetworkFingerprintResolver(context: Context) {
                     return@withTimeoutOrNull identity
                 }
             }
+            identityFailure = networkHandle to System.currentTimeMillis()
+            null
+        } ?: run {
+            if (identityFailure?.first != networkHandle) identityFailure = networkHandle to System.currentTimeMillis()
             null
         }
 
@@ -921,6 +930,18 @@ class AdaptiveCandidatePlanner(
                 ),
             )
         }
+        // ECH/REALITY links must dial their own address: clean-IP or edge swaps break them.
+        // Auto already raced clean IPs in its batch test, so its pick dials exactly what won.
+        val autoPick = profile.id.startsWith(ProxyProfile.AUTO_RUN_PREFIX)
+        if (directCandidate != null && (directCompat.identity.pinnedToOwnAddress || autoPick)) {
+            return AdaptiveConnectPlan(
+                candidates = listOf(directCandidate),
+                pool = ConnectPoolSelection(
+                    edges = listOf(directCandidate.edge),
+                    source = ConnectPoolSelection.SOURCE_DEFAULT,
+                ),
+            )
+        }
         val raw = when (network.carrierClass) {
             "mci" -> buildList {
                 directCandidate?.let(::add)
@@ -1073,7 +1094,7 @@ class AdaptiveCandidatePlanner(
             else -> MciXrayRuntimeOptions.DEFAULT
         }
 
-        if (!cloudflareEligible && directProfile != null) {
+        if ((!cloudflareEligible || directProfile?.identity?.pinnedToOwnAddress == true) && directProfile != null) {
             val directEdge = MciEdge(directProfile.address, directProfile.port, "direct", 1)
             val directCandidates = buildList {
                 for (resolver in AdaptiveDnsResolvers.all) {
@@ -1206,11 +1227,12 @@ class AdaptiveCandidatePlanner(
             label = label,
             edge = MciEdge(address, port, role, maxSplit),
             settings = base.copy(
-                dnsResolverUrl = resolverUrl.ifBlank { base.dnsResolverUrl },
+                // A DNS server / MTU the user picked by hand beats the learned value.
+                dnsResolverUrl = if (base.dnsResolverUrl != AdvancedSettingsData.DEFAULT.dnsResolverUrl) base.dnsResolverUrl else resolverUrl.ifBlank { base.dnsResolverUrl },
                 finalmaskPacket = finalmaskPacket,
                 finalmaskLength = finalmaskLength,
                 finalmaskDelayMs = finalmaskDelayMs,
-                tunMtu = tunMtu,
+                tunMtu = if (base.tunMtu != AdvancedSettingsData.DEFAULT.tunMtu) base.tunMtu else tunMtu,
             ).validated(),
             runtimeOptions = runtimeOptions,
             learned = true,

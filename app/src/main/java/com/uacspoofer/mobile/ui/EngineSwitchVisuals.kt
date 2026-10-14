@@ -1,5 +1,20 @@
 package com.uacspoofer.mobile.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutLinearInEasing
@@ -24,9 +39,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Cloud
-import androidx.compose.material.icons.rounded.Hexagon
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
@@ -90,11 +102,21 @@ internal fun EngineMode.switchContentDescription(): String = when (this) {
 }
 
 private fun EngineMode.identityIcon(): ImageVector = when (this) {
-    EngineMode.XRAY_CF -> Icons.Rounded.Cloud
+    EngineMode.XRAY_CF -> XrayBoltIcon
     EngineMode.TOR_WEBTUNNEL -> TorOnionIcon
-    EngineMode.UAC_POW -> Icons.Rounded.Hexagon
+    EngineMode.UAC_POW -> PowHexIcon
 }
 
+private fun EngineMode.shortName(): String = when (this) {
+    EngineMode.XRAY_CF -> "Xray"
+    EngineMode.TOR_WEBTUNNEL -> "Tor"
+    EngineMode.UAC_POW -> "PoW"
+}
+
+/**
+ * Glassy vertical segmented control. A spring-driven indicator slides behind the active
+ * engine, which grows to show icon + name; the others show only their icon.
+ */
 @Composable
 internal fun EngineSwitchRail(
     selected: EngineMode,
@@ -104,181 +126,179 @@ internal fun EngineSwitchRail(
     onSelect: (EngineMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val iconSize: Dp = if (compact) 34.dp else 38.dp
+    val active = pending ?: selected
+    val width: Dp = if (compact) 42.dp else 46.dp
+    val small: Dp = if (compact) 34.dp else 38.dp
+    val big: Dp = if (compact) 50.dp else 56.dp
+    val gap = 4.dp
+    val pad = 4.dp
+    val activeIndex = EngineMode.entries.indexOf(active)
+    val spring = spring<Dp>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
+    val indicatorY by animateDpAsState((small + gap) * activeIndex, spring, label = "engine-indicator-y")
+    val accent by animateColorAsState(active.identityAccent(), tween(320), label = "engine-indicator-color")
     val railShape = RoundedCornerShape(percent = 50)
-    Column(
+    Box(
         modifier = modifier
-            .shadow(
-                elevation = 18.dp,
-                shape = railShape,
-                ambientColor = Color.Black.copy(alpha = 0.55f),
-                spotColor = Color.Black.copy(alpha = 0.32f),
-            )
+            .shadow(16.dp, railShape, ambientColor = accent.copy(alpha = 0.35f), spotColor = Color.Black.copy(alpha = 0.4f))
             .clip(railShape)
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xF2141E2C),
-                        Color(0xF00C141E),
-                    ),
-                ),
-            )
+            .background(Brush.verticalGradient(listOf(Color(0xE6182433), Color(0xEB0B121B))))
             .border(
-                width = 1.dp,
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        Color.White.copy(alpha = 0.22f),
-                        Color.White.copy(alpha = 0.06f),
-                    ),
-                ),
-                shape = railShape,
+                1.dp,
+                Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.24f), accent.copy(alpha = 0.18f), Color.White.copy(alpha = 0.05f))),
+                railShape,
             )
-            .padding(horizontal = 5.dp, vertical = if (compact) 6.dp else 8.dp),
-        verticalArrangement = Arrangement.spacedBy(if (compact) 5.dp else 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .padding(pad),
     ) {
-        EngineMode.entries.forEach { mode ->
-            EngineSwitchIcon(
-                mode = mode,
-                selected = (pending ?: selected) == mode,
-                spinning = pending == mode,
-                enabled = enabled,
-                size = iconSize,
-                onClick = { onSelect(mode) },
-            )
+        // sliding indicator
+        Box(
+            modifier = Modifier
+                .offset(y = indicatorY)
+                .size(width - pad * 2, big)
+                .drawBehind {
+                    drawRoundRect(
+                        brush = Brush.radialGradient(
+                            listOf(accent.copy(alpha = 0.42f), accent.copy(alpha = 0.10f), Color.Transparent),
+                            center = Offset(size.width / 2f, size.height * 0.38f),
+                            radius = size.maxDimension * 0.75f,
+                        ),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width / 2f),
+                    )
+                }
+                .clip(RoundedCornerShape(percent = 50))
+                .background(Brush.verticalGradient(listOf(accent.copy(alpha = 0.30f), accent.copy(alpha = 0.12f))))
+                .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(percent = 50)),
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(gap), horizontalAlignment = Alignment.CenterHorizontally) {
+            EngineMode.entries.forEach { mode ->
+                EngineSwitchItem(
+                    mode = mode,
+                    selected = active == mode,
+                    spinning = pending == mode,
+                    enabled = enabled,
+                    width = width - pad * 2,
+                    height = if (active == mode) big else small,
+                    onClick = { onSelect(mode) },
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun EngineSwitchIcon(
+private fun EngineSwitchItem(
     mode: EngineMode,
     selected: Boolean,
     spinning: Boolean,
     enabled: Boolean,
-    size: Dp,
+    width: Dp,
+    height: Dp,
     onClick: () -> Unit,
 ) {
     val identity = mode.identityAccent()
-    val tint by animateColorAsState(
-        targetValue = if (selected) Color.White else identity.copy(alpha = 0.52f),
-        animationSpec = tween(240, easing = FastOutSlowInEasing),
-        label = "engine-icon-tint",
-    )
-    val wellAlpha by animateFloatAsState(
-        targetValue = if (selected) 1f else 0f,
-        animationSpec = tween(240, easing = FastOutSlowInEasing),
-        label = "engine-icon-well",
-    )
+    val h by animateDpAsState(height, spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow), label = "engine-item-h")
+    val tint by animateColorAsState(if (selected) Color.White else identity.copy(alpha = 0.55f), tween(260), label = "engine-item-tint")
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (selected) 1f else 0.94f,
-        animationSpec = tween(240, easing = FastOutSlowInEasing),
-        label = "engine-icon-scale",
+        if (pressed) 0.86f else 1f,
+        spring(dampingRatio = 0.5f, stiffness = Spring.StiffnessMedium),
+        label = "engine-item-press",
     )
-    val spin = rememberInfiniteTransition(label = "engine-icon-spin")
-    val spinDeg by spin.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1_100, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "engine-icon-spin-deg",
-    )
+    val spin = rememberInfiniteTransition(label = "engine-item-spin")
+    val spinDeg by spin.animateFloat(0f, 360f, infiniteRepeatable(tween(1_100, easing = LinearEasing), RepeatMode.Restart), label = "engine-item-spin-deg")
     val description = mode.switchContentDescription()
-    Box(
+    Column(
         modifier = Modifier
-            .size(size)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                rotationZ = if (spinning) spinDeg else 0f
-            }
-            .drawBehind {
-                if (wellAlpha <= 0.01f) return@drawBehind
-                val radius = this.size.minDimension / 2f
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colorStops = arrayOf(
-                            0f to identity.copy(alpha = 0.55f * wellAlpha),
-                            0.42f to identity.copy(alpha = 0.22f * wellAlpha),
-                            0.78f to identity.copy(alpha = 0.06f * wellAlpha),
-                            1f to Color.Transparent,
-                        ),
-                        center = Offset(this.size.width / 2f, this.size.height / 2f),
-                        radius = radius,
-                    ),
-                    radius = radius,
-                )
-            }
-            .clip(CircleShape)
-            .background(
-                color = if (selected) identity.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.04f),
-                shape = CircleShape,
-            )
-            .then(
-                if (selected) {
-                    Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape)
-                } else {
-                    Modifier
-                },
-            )
+            .size(width, h)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(percent = 50))
             .trackHomeSlot(mode.toHomeRemoteSlot())
-            .clickable(
-                enabled = enabled,
-                role = Role.Button,
-                onClick = onClick,
-            )
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Tab, onClick = onClick)
             .keyboardFocusRing()
             .semantics(mergeDescendants = true) {
                 contentDescription = description
                 this.selected = selected
             },
-        contentAlignment = Alignment.Center,
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(
-            imageVector = mode.identityIcon(),
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(size * 0.56f),
-        )
+        Crossfade(targetState = selected, animationSpec = tween(260), label = "engine-item-icon") { sel ->
+            Icon(
+                imageVector = mode.identityIcon(),
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier
+                    .size(if (sel) 22.dp else 20.dp)
+                    .graphicsLayer { rotationZ = if (spinning) spinDeg else 0f },
+            )
+        }
+        AnimatedVisibility(
+            visible = selected,
+            enter = fadeIn(tween(220, delayMillis = 60)) + expandVertically(),
+            exit = fadeOut(tween(120)) + shrinkVertically(),
+        ) {
+            Text(
+                text = mode.shortName(),
+                color = Color.White,
+                fontSize = 9.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
     }
 }
 
-private val TorOnionIcon: ImageVector by lazy {
-    ImageVector.Builder(
-        name = "Engine.TorOnion",
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f,
-    ).apply {
-        path(
-            fill = SolidColor(Color.White),
-            pathFillType = PathFillType.EvenOdd,
-        ) {
-            moveTo(12f, 1.55f)
-            curveTo(12.78f, 1.55f, 13.18f, 2.12f, 13.14f, 2.88f)
-            lineTo(12.78f, 5.08f)
-            curveTo(17.05f, 5.48f, 20.35f, 8.92f, 20.35f, 13.28f)
-            curveTo(20.35f, 17.88f, 16.62f, 21.55f, 12f, 21.55f)
-            curveTo(7.38f, 21.55f, 3.65f, 17.88f, 3.65f, 13.28f)
-            curveTo(3.65f, 8.92f, 6.95f, 5.48f, 11.22f, 5.08f)
-            lineTo(10.86f, 2.88f)
-            curveTo(10.82f, 2.12f, 11.22f, 1.55f, 12f, 1.55f)
-            close()
-            moveTo(12f, 7.42f)
-            curveTo(15.48f, 7.42f, 18.18f, 10.08f, 18.18f, 13.35f)
-            curveTo(18.18f, 16.78f, 15.38f, 19.22f, 12f, 19.22f)
-            curveTo(8.62f, 19.22f, 5.82f, 16.78f, 5.82f, 13.35f)
-            curveTo(5.82f, 10.08f, 8.52f, 7.42f, 12f, 7.42f)
-            close()
-            moveTo(12f, 10.28f)
-            curveTo(14.12f, 10.28f, 15.72f, 11.78f, 15.72f, 13.52f)
-            curveTo(15.72f, 15.42f, 14.02f, 16.88f, 12f, 16.88f)
-            curveTo(9.98f, 16.88f, 8.28f, 15.42f, 8.28f, 13.52f)
-            curveTo(8.28f, 11.78f, 9.88f, 10.28f, 12f, 10.28f)
-            close()
+private fun strokeIcon(name: String, block: androidx.compose.ui.graphics.vector.PathBuilder.() -> Unit, vararg more: androidx.compose.ui.graphics.vector.PathBuilder.() -> Unit): ImageVector =
+    ImageVector.Builder(name = name, defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f).apply {
+        (listOf(block) + more).forEach { b ->
+            path(
+                fill = null,
+                stroke = SolidColor(Color.White),
+                strokeLineWidth = 1.9f,
+                strokeLineCap = StrokeCap.Round,
+                strokeLineJoin = StrokeJoin.Round,
+                pathBuilder = b,
+            )
         }
     }.build()
+
+private val XrayBoltIcon: ImageVector by lazy {
+    strokeIcon("Engine.XrayBolt", {
+        moveTo(13.2f, 2.5f); lineTo(5f, 13.4f); lineTo(11.2f, 13.4f); lineTo(10.6f, 21.5f); lineTo(19f, 10.4f); lineTo(12.8f, 10.4f); close()
+    }, {
+        moveTo(3f, 6.5f); lineTo(5.2f, 7.4f)
+    }, {
+        moveTo(21f, 17.5f); lineTo(18.8f, 16.6f)
+    })
+}
+
+private val TorOnionIcon: ImageVector by lazy {
+    strokeIcon("Engine.TorOnion", {
+        moveTo(12f, 6.2f)
+        curveTo(17f, 7.6f, 19.6f, 11f, 19.6f, 14.5f)
+        curveTo(19.6f, 18.6f, 16.2f, 21.5f, 12f, 21.5f)
+        curveTo(7.8f, 21.5f, 4.4f, 18.6f, 4.4f, 14.5f)
+        curveTo(4.4f, 11f, 7f, 7.6f, 12f, 6.2f)
+        close()
+    }, {
+        moveTo(12f, 9.4f)
+        curveTo(14.6f, 10.7f, 15.9f, 12.6f, 15.9f, 14.7f)
+        curveTo(15.9f, 16.9f, 14.2f, 18.4f, 12f, 18.4f)
+        curveTo(9.8f, 18.4f, 8.1f, 16.9f, 8.1f, 14.7f)
+        curveTo(8.1f, 12.6f, 9.4f, 10.7f, 12f, 9.4f)
+        close()
+    }, {
+        moveTo(12f, 12.6f); lineTo(12f, 15.4f)
+    }, {
+        moveTo(12f, 6.2f); curveTo(12f, 4.5f, 12.9f, 3.1f, 14.8f, 2.5f)
+    })
+}
+
+private val PowHexIcon: ImageVector by lazy {
+    strokeIcon("Engine.PowHex", {
+        moveTo(12f, 2.5f); lineTo(20.2f, 7.2f); lineTo(20.2f, 16.8f); lineTo(12f, 21.5f); lineTo(3.8f, 16.8f); lineTo(3.8f, 7.2f); close()
+    }, {
+        moveTo(8.6f, 12.2f); lineTo(11f, 14.6f); lineTo(15.6f, 9.8f)
+    })
 }

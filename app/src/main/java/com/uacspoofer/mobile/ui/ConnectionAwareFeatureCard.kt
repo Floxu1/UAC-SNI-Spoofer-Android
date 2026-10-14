@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.pow.PowLiveExit
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogLevel
@@ -84,15 +85,18 @@ internal fun ConnectionAwareFeatureCard(
     val entries by AppLogRepository.entries.collectAsStateWithLifecycle()
     val exitInfoRepository = remember(context) { ExitIpInfoRepository.get(context) }
     val rawExitInfoState by exitInfoRepository.state.collectAsStateWithLifecycle()
+    val powWarpOnly by PowLiveExit.warpOnlyState.collectAsStateWithLifecycle()
     val lookupId = ExitIpInfoRepository.lookupId(
         profile.id,
         torEngine = engineMode.isTor,
         exitCountryCode = when {
             engineMode.isTor -> torSettings.exitCountryCode
+            engineMode.isPow && powWarpOnly -> ""
             engineMode.isPow -> powSettings.exitCountryCode
             else -> ""
         },
         powEngine = engineMode.isPow,
+        powWarpOnly = engineMode.isPow && powWarpOnly,
     )
     val exitInfoState = if (rawExitInfoState.profileId == lookupId) {
         rawExitInfoState

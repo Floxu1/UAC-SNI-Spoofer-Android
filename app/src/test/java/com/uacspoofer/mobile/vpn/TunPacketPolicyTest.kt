@@ -89,10 +89,10 @@ class TunPacketPolicyTest {
     }
 
     @Test
-    fun quicBlockerDropsUdp443AndForwardsOtherUdp() {
+    fun quicBlockerRejectsUdp443AndForwardsOtherUdp() {
         val quic = ipv4Udp(srcPort = 50000, dstPort = 443, payload = ByteArray(20) { 0x0A })
         assertEquals(
-            TunPacketAction.DROP,
+            TunPacketAction.REJECT,
             TunPacketPolicy.inspect(
                 quic,
                 quic.size,
@@ -124,7 +124,7 @@ class TunPacketPolicyTest {
         )
         val ipv6Quic = ipv6Udp(srcPort = 50000, dstPort = 443, payload = ByteArray(20) { 0x0A })
         assertEquals(
-            TunPacketAction.DROP,
+            TunPacketAction.REJECT,
             TunPacketPolicy.inspect(
                 ipv6Quic,
                 ipv6Quic.size,
@@ -133,6 +133,17 @@ class TunPacketPolicyTest {
                 isQuicBlockerEnabled = true,
             ),
         )
+        val reply = ByteArray(2048)
+        val v4 = TunPacketPolicy.buildPortUnreachable(quic, quic.size, reply)
+        assertEquals(20 + 8 + 20 + 8, v4)
+        assertEquals(1, reply[9].toInt())
+        assertEquals(3, reply[20].toInt())
+        assertEquals(3, reply[21].toInt())
+        val v6 = TunPacketPolicy.buildPortUnreachable(ipv6Quic, ipv6Quic.size, reply)
+        assertEquals(48 + ipv6Quic.size, v6)
+        assertEquals(58, reply[6].toInt())
+        assertEquals(1, reply[40].toInt())
+        assertEquals(4, reply[41].toInt())
         val truncated = ByteArray(22) { 0 }
         truncated[0] = 0x45
         truncated[9] = 17

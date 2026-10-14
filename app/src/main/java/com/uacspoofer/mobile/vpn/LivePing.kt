@@ -4,6 +4,7 @@ import android.content.Context
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.pow.PowCoreConfig
+import com.uacspoofer.mobile.engine.pow.PowLiveExit
 import com.uacspoofer.mobile.engine.pow.PowUiProbeGate
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
@@ -60,7 +61,7 @@ internal object LivePing {
         val advanced = AdvancedSettingsStore(context).snapshot()
         val proxy = advanced.connectionMode == CONNECTION_MODE_PROXY
         return when {
-            engine.isPow -> "127.0.0.1" to if (proxy) advanced.socksPort else PowCoreConfig.SOCKS_PORT
+            engine.isPow -> "127.0.0.1" to if (proxy) advanced.socksPort else PowLiveExit.tunSocksPort()
             engine.isTor -> "127.0.0.1" to TorEngineStore.get(context).snapshot().socksPort
             else -> advanced.socksAddress.ifBlank { "127.0.0.1" } to advanced.socksPort
         }

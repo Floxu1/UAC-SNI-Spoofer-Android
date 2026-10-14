@@ -144,7 +144,7 @@ internal fun SettingsScreen(
             verticalSpacing = 16.dp,
             header = {
                 ToolPageHeader(
-                    title = homeText("Settings", "تنظیمات"),
+                    title = homeText("General settings", "تنظیمات کلی"),
                     subtitle = homeText("App and connection preferences", "تنظیمات برنامه و اتصال"),
                     icon = Icons.Outlined.Settings,
                     accent = accent,
@@ -184,10 +184,10 @@ internal fun SettingsScreen(
                     if (engineMode.isTor) {
                         SettingsNavRow(
                             icon = Icons.Outlined.Shield,
-                            title = homeText("Tor", "Tor"),
+                            title = homeText("Tor settings", "تنظیمات Tor"),
                             summary = homeText(
-                                "WebTunnel bridges and TLS hop",
-                                "بریج‌های WebTunnel و پرش TLS",
+                                "Bridges, exit, fragment, watchdog",
+                                "پل‌ها، خروجی، تکه‌کردن، نگهبان",
                             ),
                             isPersian = isPersian,
                             showDivider = true,
@@ -197,7 +197,7 @@ internal fun SettingsScreen(
                     if (engineMode.isXray) {
                         SettingsNavRow(
                             icon = Icons.Outlined.Tune,
-                            title = homeText("Advanced Settings", "تنظیمات پیشرفته"),
+                            title = homeText("Xray settings", "تنظیمات Xray"),
                             summary = homeText(
                                 "Connection mode, DNS, TUN and transport",
                                 "حالت اتصال، DNS، TUN و انتقال",
@@ -841,7 +841,7 @@ private fun SettingsNavRow(
                     summary,
                     color = UacColors.TextSecondary,
                     fontSize = 12.sp,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -925,7 +925,7 @@ private fun QuickSettingsTileRow(
                     homeText("From the notification shade", "از پنل بالای گوشی"),
                     color = UacColors.TextSecondary,
                     fontSize = 12.sp,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

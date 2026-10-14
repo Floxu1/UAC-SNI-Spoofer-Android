@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.engine.pow
 
 import android.content.Context
+import com.uacspoofer.mobile.logging.AppLogRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,9 +55,19 @@ class PowEngineStore private constructor(context: Context) {
                 "wireguard" -> PowCoreConfig.RECIPE_WARP_ANY
                 "gool" -> PowCoreConfig.RECIPE_WOW_ANY
                 "masque" -> PowCoreConfig.RECIPE_MASQUE_H3
-                else -> PowCoreConfig.RECIPE_AUTO
+                else -> PowCoreConfig.RECIPE_MASQUE_H2
             }
             prefs.edit().putString(KEY_LINK_RECIPE, recipe).apply()
+        }
+        if (!prefs.getBoolean(KEY_MASQUE_H2_DEFAULT_MIGRATION, false)) {
+            // One-time: everyone still on Automatic moves to MASQUE HTTP/2.
+            // A recipe the user picked by hand is left alone.
+            val current = prefs.getString(KEY_LINK_RECIPE, PowCoreConfig.RECIPE_AUTO)
+            val edit = prefs.edit().putBoolean(KEY_MASQUE_H2_DEFAULT_MIGRATION, true)
+            if (current.isNullOrBlank() || current == PowCoreConfig.RECIPE_AUTO) {
+                edit.putString(KEY_LINK_RECIPE, PowCoreConfig.RECIPE_MASQUE_H2)
+            }
+            edit.apply()
         }
         if (!prefs.getBoolean(KEY_CONNECT_FIRST_MIGRATION, false)) {
             // Previous connects recorded last-good WARP/WoW after MASQUE and
@@ -73,6 +84,10 @@ class PowEngineStore private constructor(context: Context) {
 
     private val mutableSettings = MutableStateFlow(read())
     val settings: StateFlow<PowEngineSettings> = mutableSettings.asStateFlow()
+
+    init {
+        AppLogRepository.powLogcatMirror = mutableSettings.value.logcatMirror
+    }
     private val mutableLastConnect = MutableStateFlow(readLastConnect())
     internal val lastConnect: StateFlow<PowLastConnect> = mutableLastConnect.asStateFlow()
 
@@ -90,10 +105,20 @@ class PowEngineStore private constructor(context: Context) {
             .putString(KEY_FIREWALL, validated.firewallProfile)
             .putString(KEY_LINK_RECIPE, validated.linkRecipe)
             .putBoolean(KEY_CHAIN_PSIPHON, validated.chainPsiphon)
+            .putString(KEY_EXIT_MODE, validated.exitMode)
             .putString(KEY_FETCH, validated.keyFetch)
             .putBoolean(KEY_PSIPHON_POOL, validated.psiphonTunnelPool)
             .putBoolean(KEY_QUIC_TUNED, validated.quicTuned)
+            .putBoolean(KEY_GHOST_HANDOVER, validated.ghostHandover)
+            .putString(KEY_H2_FRAGMENT_MODE, validated.h2FragmentMode)
+            .putBoolean(KEY_LOGCAT_MIRROR, validated.logcatMirror)
+            .putBoolean(KEY_H2_LARGE_WINDOWS, validated.h2LargeWindows)
+            .putBoolean(KEY_H2_SOCKET_TUNING, validated.h2SocketTuning)
+            .putBoolean(KEY_H2_SPEED_PICK, validated.h2SpeedPick)
+            .putString(KEY_H2_OBFUSCATION, validated.h2Obfuscation)
+            .putInt(KEY_TUN_MTU, validated.tunMtu)
             .apply()
+        AppLogRepository.powLogcatMirror = validated.logcatMirror
         mutableSettings.value = validated
         return validated
     }
@@ -191,11 +216,22 @@ class PowEngineStore private constructor(context: Context) {
         scanMode = prefs.getString(KEY_SCAN_MODE, PowCoreConfig.SCAN_BALANCED).orEmpty(),
         optimizedMode = prefs.getBoolean(KEY_OPTIMIZED_MODE, true),
         firewallProfile = prefs.getString(KEY_FIREWALL, PowCoreConfig.FIREWALL_AUTO).orEmpty(),
-        linkRecipe = prefs.getString(KEY_LINK_RECIPE, PowCoreConfig.RECIPE_AUTO).orEmpty(),
+        linkRecipe = prefs.getString(KEY_LINK_RECIPE, PowCoreConfig.RECIPE_MASQUE_H2).orEmpty(),
         chainPsiphon = prefs.getBoolean(KEY_CHAIN_PSIPHON, true),
+        // Migration: no exit_mode yet -> derive from the old chain/WARP boolean.
+        exitMode = prefs.getString(KEY_EXIT_MODE, null)
+            ?: if (prefs.getBoolean(KEY_CHAIN_PSIPHON, true)) PowEngineSettings.EXIT_CHAIN else PowEngineSettings.EXIT_WARP,
         keyFetch = prefs.getString(KEY_FETCH, PowCoreConfig.KEY_AUTO).orEmpty(),
         psiphonTunnelPool = prefs.getBoolean(KEY_PSIPHON_POOL, false),
         quicTuned = prefs.getBoolean(KEY_QUIC_TUNED, false),
+        ghostHandover = prefs.getBoolean(KEY_GHOST_HANDOVER, true),
+        logcatMirror = prefs.getBoolean(KEY_LOGCAT_MIRROR, true),
+        h2LargeWindows = prefs.getBoolean(KEY_H2_LARGE_WINDOWS, true),
+        h2SocketTuning = prefs.getBoolean(KEY_H2_SOCKET_TUNING, true),
+        h2SpeedPick = prefs.getBoolean(KEY_H2_SPEED_PICK, true),
+        h2Obfuscation = prefs.getString(KEY_H2_OBFUSCATION, PowEngineSettings.H2_OBFS_UNCHANGED).orEmpty(),
+        tunMtu = prefs.getInt(KEY_TUN_MTU, PowEngineSettings.TUN_MTU_DEFAULT),
+        h2FragmentMode = prefs.getString(KEY_H2_FRAGMENT_MODE, PowEngineSettings.H2_FRAG_AUTO).orEmpty(),
     ).validated()
 
     private fun readLastConnect(): PowLastConnect {
@@ -227,9 +263,18 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_FIREWALL = "firewall_profile"
         private const val KEY_LINK_RECIPE = "link_recipe"
         private const val KEY_CHAIN_PSIPHON = "chain_psiphon"
+        private const val KEY_EXIT_MODE = "exit_mode"
         private const val KEY_FETCH = "key_fetch"
         private const val KEY_PSIPHON_POOL = "psiphon_tunnel_pool"
         private const val KEY_QUIC_TUNED = "quic_tuned"
+        private const val KEY_GHOST_HANDOVER = "adv_ghost_handover"
+        private const val KEY_LOGCAT_MIRROR = "adv_logcat_mirror"
+        private const val KEY_H2_LARGE_WINDOWS = "adv_h2_large_windows"
+        private const val KEY_H2_SOCKET_TUNING = "adv_h2_socket_tuning"
+        private const val KEY_H2_SPEED_PICK = "adv_h2_speed_pick"
+        private const val KEY_H2_OBFUSCATION = "adv_h2_obfuscation"
+        private const val KEY_TUN_MTU = "adv_tun_mtu"
+        private const val KEY_H2_FRAGMENT_MODE = "adv_h2_fragment_mode"
         private const val KEY_LAST_PROTOCOL = "last_connect_protocol"
         private const val KEY_LAST_TRANSPORT = "last_connect_transport"
         private const val KEY_LAST_IP = "last_connect_ip"
@@ -237,6 +282,7 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_LAST_PEER = "last_connect_peer"
         private const val KEY_H2_QUALITY_MIGRATION = "h2_fragment_off_for_quality"
         private const val KEY_CONNECT_FIRST_MIGRATION = "connect_first_outer_v1"
+        private const val KEY_MASQUE_H2_DEFAULT_MIGRATION = "masque_h2_default_v1"
         private const val KEY_OUTER_PROTOCOL = "outer_protocol"
         private const val KEY_STRATEGY_INDEX = "psiphon_winning_strategy_chained"
         private const val KEY_STRATEGY_SHAPE = "psiphon_winning_strategy_chained_shape"

@@ -147,6 +147,13 @@ struct NativeStartOptions {
     renew_masque: bool,
     #[serde(default)]
     quic_tuned: bool,
+    /// HTTP/2 speed options. Missing keys keep the defaults (all on).
+    #[serde(default = "default_true")]
+    h2_large_windows: bool,
+    #[serde(default = "default_true")]
+    h2_socket_tuning: bool,
+    #[serde(default = "default_true")]
+    h2_speed_pick: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -187,6 +194,9 @@ impl Default for NativeStartOptions {
             api_camo: String::new(),
             renew_masque: false,
             quic_tuned: false,
+            h2_large_windows: true,
+            h2_socket_tuning: true,
+            h2_speed_pick: true,
         }
     }
 }
@@ -249,6 +259,9 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.api_camo = value.api_camo;
         options.renew_masque = value.renew_masque;
         options.quic_tuned = value.quic_tuned;
+        options.h2_large_windows = value.h2_large_windows;
+        options.h2_socket_tuning = value.h2_socket_tuning;
+        options.h2_speed_pick = value.h2_speed_pick;
         options.http_proxy = match value.http_proxy.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),

@@ -122,7 +122,7 @@ internal object TunPacketFilter {
      */
     private fun forwardDeviceToEngine(tunFd: FileDescriptor, engineFd: FileDescriptor, bufferSize: Int) {
         val packet = ByteArray(bufferSize)
-        val reply = ByteArray(bufferSize)
+        val reply = ByteArray(bufferSize + 64)
         val qnameScratch = CharArray(256)
         while (running) {
             val n = readPacket(tunFd, packet) ?: break
@@ -145,6 +145,11 @@ internal object TunPacketFilter {
                 ) {
                     TunPacketAction.SINKHOLE -> {
                         val out = TunPacketPolicy.buildDnsSinkholeReply(packet, n, reply)
+                        if (out > 0) writePacket(tunFd, reply, out)
+                        continue
+                    }
+                    TunPacketAction.REJECT -> {
+                        val out = TunPacketPolicy.buildPortUnreachable(packet, n, reply)
                         if (out > 0) writePacket(tunFd, reply, out)
                         continue
                     }

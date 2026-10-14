@@ -16,6 +16,8 @@ data class MciXrayRuntimeOptions(
     val preserveTransportFields: Boolean = false,
     val quietLogging: Boolean = false,
     val muxEnabledOverride: Boolean? = null,
+    /** Xray `debug` log level. Off by default: debug logging costs CPU and battery. */
+    val verboseLogging: Boolean = false,
 ) {
     companion object {
         val DEFAULT = MciXrayRuntimeOptions()
@@ -30,6 +32,10 @@ data class MciXrayBatchRoute(
 )
 
 internal object MciXrayConfigBuilder {
+    /** Process-wide switch for Xray debug logs (logcat mirroring / troubleshooting). */
+    @Volatile
+    var debugLogging: Boolean = false
+
     fun build(
         edge: MciEdge,
         settings: AdvancedSettingsData,
@@ -68,6 +74,9 @@ internal object MciXrayConfigBuilder {
             aiOutbound?.let(::add)
             add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp","rules":[{"action":"hijack"}]}}""")
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
+            // Xray runs outside the VPN (the app is a disallowed application), so direct sockets
+            // never loop back into the tunnel.
+            if (s.iranDirect) add("""{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"AsIs"},"streamSettings":{"sockopt":{${TcpFastOpenSupport.field(s.tcpFastOpen)}"tcpNoDelay":true}}}""")
         }.joinToString(",\n")
 
         val acceptedInbounds = "[\"socks-in\"]"
@@ -75,6 +84,10 @@ internal object MciXrayConfigBuilder {
         val routingRules = buildList {
             add("""{"type":"field","inboundTag":$dnsInbounds,"network":"tcp,udp","port":"53","outboundTag":"dns-out"}""")
             add("""{"type":"field","inboundTag":["dns-query"],"outboundTag":"proxy"}""")
+            if (s.iranDirect) {
+                add("""{"type":"field","inboundTag":$dnsInbounds,"ip":[${IranDirectRules.ipsJson()}],"outboundTag":"direct"}""")
+                add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[${IranDirectRules.domainsJson()}],"outboundTag":"direct"}""")
+            }
             if (s.ipv4Only) {
                 add("""{"type":"field","inboundTag":$acceptedInbounds,"network":"tcp","ip":["::/0"],"outboundTag":"block"}""")
             }
@@ -86,11 +99,13 @@ internal object MciXrayConfigBuilder {
         }.joinToString(",\n")
 
         val rootExtras = if (nativeTun) {
-            """"stats":{},"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5,"bufferSize":64}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true,"statsOutboundUplink":true,"statsOutboundDownlink":true}},"""
+            """"stats":{},"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5,"bufferSize":${bufferKb(s)}}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true,"statsOutboundUplink":true,"statsOutboundDownlink":true}},"""
         } else {
-            ""
+            """"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5,"bufferSize":${bufferKb(s)}}}},"""
         }
-        val sniffing = """"sniffing":{"enabled":true,"destOverride":["http","tls","fakedns"],"metadataOnly":false}"""
+        // ECH hides the real SNI; sniffed names are used for routing only, never to re-dial.
+        val routeOnly = if (identity.usesEch) ",\"routeOnly\":true" else ""
+        val sniffing = """"sniffing":{"enabled":true,"destOverride":["http","tls","fakedns"],"metadataOnly":false$routeOnly}"""
         val inbounds = buildList {
             add("""{"tag":"socks-in","listen":"${q(s.socksAddress)}","port":${s.socksPort},"protocol":"socks","settings":{"auth":"noauth","udp":${s.socksUdp},"ip":"${q(s.socksAddress)}","userLevel":8},$sniffing}""")
             if (nativeTun) {
@@ -111,10 +126,18 @@ internal object MciXrayConfigBuilder {
         val resolverServers = resolverOrder.joinToString(",") { resolver ->
             """{"address":"${q(resolver.url)}","queryStrategy":"UseIPv4","timeoutMs":3000,"skipFallback":false}"""
         }
-        val dns = """"dns":{"hosts":{$resolverHosts},"servers":[$resolverServers],"queryStrategy":"UseIPv4","disableCache":false,"serveStale":true,"serveExpiredTTL":3600,"enableParallelQuery":false,"tag":"dns-query"},"""
+        // Iranian names resolve with the phone's own resolver (Xray is outside the VPN) so they get
+        // Iranian CDN answers for the direct route; everything else uses DoH through the tunnel.
+        val iranDns = if (s.iranDirect) {
+            """{"address":"localhost","domains":[${IranDirectRules.domainsJson()}],"skipFallback":true},"""
+        } else {
+            ""
+        }
+        val dns = """"dns":{"hosts":{$resolverHosts},"servers":[$iranDns$resolverServers],"queryStrategy":"UseIPv4","disableCache":false,"serveStale":${s.dnsServeStale},"serveExpiredTTL":${if (s.dnsServeStale) DNS_STALE_CAP_SECONDS else 0},"enableParallelQuery":false,"tag":"dns-query"},"""
 
-        val logLevel = if (runtimeOptions.quietLogging) "warning" else "debug"
-        val dnsLog = !runtimeOptions.quietLogging
+        val verbose = !runtimeOptions.quietLogging && (runtimeOptions.verboseLogging || debugLogging)
+        val logLevel = if (verbose) "debug" else "warning"
+        val dnsLog = verbose
         return """
             {
               "log":{"loglevel":"$logLevel","dnsLog":$dnsLog,"maskAddress":"quarter"},
@@ -130,6 +153,7 @@ internal object MciXrayConfigBuilder {
     fun buildBatch(
         routes: List<MciXrayBatchRoute>,
         profile: ProxyProfile,
+        logLevel: String = "warning",
     ): String {
         require(routes.isNotEmpty()) { "Batch route list is empty" }
         require(routes.size <= 32) { "Batch route count exceeds 32" }
@@ -179,7 +203,7 @@ internal object MciXrayConfigBuilder {
         val routingStrategy = normalized.first().settings.routingDomainStrategy
         return """
             {
-              "log":{"loglevel":"warning","dnsLog":false,"maskAddress":"quarter"},
+              "log":{"loglevel":"${q(logLevel)}","dnsLog":false,"maskAddress":"quarter"},
               "inbounds":[$inbounds],
               "outbounds":[$outbounds],
               "routing":{"domainStrategy":"${q(routingStrategy)}","rules":[$rules]}
@@ -222,9 +246,17 @@ internal object MciXrayConfigBuilder {
             nativeTun,
             runtimeOptions,
         )
-        val enableMux = muxEnabled && !ProfileNetworks.isXhttp(identity.network)
+        // Mux is incompatible with xhttp, and ECH configs are run without it (as on desktop).
+        val enableMux = muxEnabled && !ProfileNetworks.isXhttp(identity.network) && !identity.usesEch &&
+            identity.flow.isBlank()
         return """{"tag":"${q(tag)}","protocol":"${identity.protocol.wireName}","settings":$protocolSettings,"streamSettings":$stream,"mux":{"enabled":$enableMux,"concurrency":${settings.muxConcurrency}}}"""
     }
+
+    /** Per-connection Xray buffer (KB). Bigger keeps video downloads streaming; capped for RAM. */
+    private fun bufferKb(s: AdvancedSettingsData): Int = if (s.bigBuffers) 256 else 64
+
+    /** Expired DNS answers are served instantly and refreshed in the background, at most this old. */
+    private const val DNS_STALE_CAP_SECONDS = 3600
 
     private fun streamSettings(
         identity: RuntimeProxyIdentity,
@@ -244,19 +276,31 @@ internal object MciXrayConfigBuilder {
         val iranHelloSplit = iranHelloSplit(identity)
         val fingerprint = identity.fingerprint.takeIf(String::isNotBlank)
             ?.let { ",\"fingerprint\":\"${q(it)}\"" }.orEmpty()
-        val cipherSuites = if (iranHelloSplit) {
-            ",\"cipherSuites\":\"${q(MciConfig.TLS_CIPHER_SUITES)}\""
-        } else {
-            ""
+        val cipherSuites = when {
+            identity.cipherSuites.isNotBlank() -> ",\"cipherSuites\":\"${q(identity.cipherSuites)}\""
+            iranHelloSplit -> ",\"cipherSuites\":\"${q(MciConfig.TLS_CIPHER_SUITES)}\""
+            else -> ""
         }
+        val ech = identity.ech.takeIf(String::isNotBlank)
+            ?.let { ",\"echConfigList\":\"${q(it)}\"" }.orEmpty()
         val serverName = identity.sni.takeIf(String::isNotBlank)
             ?.let { "\"serverName\":\"${q(it)}\"," }.orEmpty()
         // A plain config has no TLS layer, so emitting tlsSettings would make Xray negotiate a
         // handshake the server never offers.
-        val tls = if (identity.usesTls) {
-            """"tlsSettings":{$serverName"allowInsecure":${identity.allowInsecure}$alpnField$fingerprint$cipherSuites}"""
-        } else {
-            ""
+        val tls = when {
+            identity.usesTls ->
+                """"tlsSettings":{$serverName"allowInsecure":${identity.allowInsecure}$alpnField$fingerprint$cipherSuites$ech}"""
+            identity.usesReality -> {
+                val fields = buildList {
+                    add("\"serverName\":\"${q(identity.sni)}\"")
+                    add("\"fingerprint\":\"${q(identity.fingerprint.ifBlank { "chrome" })}\"")
+                    add("\"publicKey\":\"${q(identity.realityPublicKey)}\"")
+                    add("\"shortId\":\"${q(identity.realityShortId)}\"")
+                    identity.realitySpiderX.takeIf(String::isNotBlank)?.let { add("\"spiderX\":\"${q(it)}\"") }
+                }.joinToString(",")
+                "\"realitySettings\":{$fields}"
+            }
+            else -> ""
         }
         val transport = when (identity.network) {
             "ws" -> if (runtimeOptions.preserveTransportFields) {
@@ -311,12 +355,15 @@ internal object MciXrayConfigBuilder {
         // Fragmentation splits the TLS ClientHello. A plain config has none, so the fragmenter
         // would find nothing to cut and only add a code path that was never exercised.
         val finalmask = when {
+            // A link that ships its own finalmask (`fm`) knows its path best.
+            identity.finalmask.isNotBlank() -> "\"finalmask\":${identity.finalmask}"
             iranHelloSplit && runtimeOptions.finalmaskEnabled -> MciConfig.IRAN_HELLO_FINALMASK
             runtimeOptions.finalmaskEnabled && identity.usesTls ->
                 """"finalmask":{"tcp":[{"type":"fragment","settings":{"packets":"${q(settings.finalmaskPacket)}","length":"${settings.finalmaskLength}","delay":"${settings.finalmaskDelayMs}"$compatibilityArrays,"maxSplit":"$maxSplit"}}]}"""
             else -> ""
         }
-        val sockopt = """"sockopt":{"domainStrategy":"${q(settings.domainStrategy)}","tcpKeepAliveInterval":${settings.keepAliveIntervalSeconds},"tcpKeepAliveIdle":${settings.keepAliveIdleSeconds}}"""
+        // TCP Fast Open only without a fragmenter: data in the SYN would bypass the ClientHello cut.
+        val sockopt = """"sockopt":{"domainStrategy":"${q(settings.domainStrategy)}","tcpKeepAliveInterval":${settings.keepAliveIntervalSeconds},"tcpKeepAliveIdle":${settings.keepAliveIdleSeconds},${if (finalmask.isBlank()) TcpFastOpenSupport.field(settings.tcpFastOpen) else ""}"tcpNoDelay":true}"""
         return listOf(
             "\"network\":\"${q(identity.network)}\"",
             "\"security\":\"${q(identity.security)}\"",
@@ -335,8 +382,12 @@ internal object MciXrayConfigBuilder {
 
     private fun validateIdentity(identity: RuntimeProxyIdentity, runtimeOptions: MciXrayRuntimeOptions) {
         require(identity.credential.isNotBlank()) { "Selected profile credential is missing" }
-        require(identity.security == "tls" || identity.security == "none") {
-            "Selected profile must use TLS or no security"
+        require(identity.security == "tls" || identity.security == "none" || identity.security == "reality") {
+            "Selected profile must use TLS, REALITY or no security"
+        }
+        if (identity.usesReality) {
+            require(identity.realityPublicKey.isNotBlank()) { "REALITY public key is missing" }
+            require(identity.sni.isNotBlank()) { "REALITY serverName is missing" }
         }
         // SNI only exists in a TLS handshake; demanding it would reject every plain config.
         if (!runtimeOptions.preserveTransportFields && identity.usesTls) {

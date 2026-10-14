@@ -83,17 +83,51 @@ object PowCoreConfig {
             if (settings.linkRecipe == RECIPE_MASQUE_H2_SAVED) "clean" else discovery,
         )
         put("masque_transport", if (protocol == "masque") plan.masqueTransport else "h3")
-        put("obfuscation_profile", settings.obfuscationProfile)
+        put("obfuscation_profile", obfuscationFor(settings, protocol, plan))
         put("retry_obfuscation_profiles", true)
         put("tls_curve_preset", "chrome")
         put("wireguard_data_check", true)
         put("log_level", "info")
         put("perf_profile", "high")
-        put("h2_fragmentation", plan.fragment && protocol == "masque")
+        put("h2_fragmentation", h2FragmentEffective(context, settings, protocol, plan))
         put("quic_tuned", settings.quicTuned)
+        put("h2_large_windows", settings.h2LargeWindows)
+        put("h2_socket_tuning", settings.h2SocketTuning)
+        put("h2_speed_pick", settings.h2SpeedPick)
         put("api_camo", settings.keyFetch)
         put("gateway", false)
     }.toString()
+
+    /** H2 fragment: On/Off are the user's; Auto = recipe default OR the adaptive DPI flag. MASQUE h2 only. */
+    fun h2FragmentEffective(context: Context, settings: PowEngineSettings, protocol: String, plan: PowOuterPlan): Boolean {
+        val h2 = protocol == "masque" && plan.masqueTransport == "h2"
+        val adaptive = PowAdaptiveObfuscation.adaptiveOn(context)
+        val effective = h2 && when (settings.h2FragmentMode) {
+            PowEngineSettings.H2_FRAG_ON -> true
+            PowEngineSettings.H2_FRAG_OFF -> false
+            else -> plan.fragment || adaptive
+        }
+        if (protocol == "masque") PowLiveExit.updatePath { it.copy(h2Fragment = effective) }
+        if (protocol == "masque") {
+            com.uacspoofer.mobile.logging.AppLogRepository.info(
+                com.uacspoofer.mobile.logging.LogSource.POW,
+                "H2 fragment: mode=${settings.h2FragmentMode} effective=$effective" +
+                    " (recipe=${plan.fragment} adaptive=$adaptive transport=${plan.masqueTransport})",
+            )
+        }
+        return effective
+    }
+
+    /** MASQUE over HTTP/2 already hides inside TLS; the user may lighten the extra obfuscation. */
+    fun obfuscationFor(settings: PowEngineSettings, protocol: String, plan: PowOuterPlan): String {
+        val h2 = protocol == "masque" && plan.masqueTransport == "h2"
+        val override = settings.h2Obfuscation.trim().lowercase()
+        return if (h2 && override in PowEngineSettings.H2_OBFS_CHOICES && override != PowEngineSettings.H2_OBFS_UNCHANGED) {
+            override
+        } else {
+            settings.obfuscationProfile
+        }
+    }
 
     fun outerLabel(protocol: String): String = when (protocol) {
         "masque" -> "MASQUE"

@@ -34,11 +34,23 @@ data class ProxyProfile(
     val packetEncoding: String = "",
     /** TCP header obfuscation, `http` or blank. Only meaningful when [network] is `tcp`. */
     val headerType: String = "",
+    /** TLS ECH config list: base64 key or `domain+udp://resolver` query form. */
+    val ech: String = "",
+    /** Per-link TLS cipher suite list (`cs`), colon separated. */
+    val cipherSuites: String = "",
+    /** Per-link Xray finalmask JSON object (`fm`), compacted. */
+    val finalmask: String = "",
+    val realityPublicKey: String = "",
+    val realityShortId: String = "",
+    val realitySpiderX: String = "",
     val country: CountryMetadata = CountryMetadata.UNKNOWN,
     val rawUri: String = "",
     val isBuiltIn: Boolean = false,
 ) {
     fun usesAdvancedSettingsIdentity(): Boolean = isBuiltIn && id == BUILT_IN_ID
+
+    /** The Auto (Patterniha) entry: not a real link, resolved to a tested config at connect. */
+    val isAuto: Boolean get() = id == AUTO_ID
 
     fun runtimeIdentity(settings: AdvancedSettingsData): RuntimeProxyIdentity =
         if (usesAdvancedSettingsIdentity()) {
@@ -88,16 +100,31 @@ data class ProxyProfile(
                 xhttpExtra = xhttpExtra,
                 packetEncoding = packetEncoding,
                 headerType = headerType,
+                ech = ech,
+                cipherSuites = cipherSuites,
+                finalmask = finalmask,
+                realityPublicKey = realityPublicKey,
+                realityShortId = realityShortId,
+                realitySpiderX = realitySpiderX,
             )
         }
 
     companion object {
+        /**
+         * Former built-in 1. No longer selectable (build 443); the id only backs
+         * [ADVANCED_SETTINGS_TEMPLATE], the identity the Advanced Xray settings and tests build on.
+         */
         const val BUILT_IN_ID = "builtin:mci"
-        const val BUILT_IN_2_ID = "builtin:mci2"
+        const val AUTO_ID = "auto:patterniha"
+        /** Ids of the concrete configs Auto connects with (never stored in the profile list). */
+        const val AUTO_RUN_PREFIX = "auto-run:"
+        /** Removed in build 442 (dead server); kept only to migrate saved selections. */
+        const val LEGACY_BUILT_IN_2_ID = "builtin:mci2"
 
-        val UAC_SNI_BUILT_IN = ProxyProfile(
+        /** Not user-selectable; see [BUILT_IN_ID]. */
+        val ADVANCED_SETTINGS_TEMPLATE = ProxyProfile(
             id = BUILT_IN_ID,
-            name = "UAC SNI built-in",
+            name = "Advanced settings identity",
             protocol = ProxyProtocol.VLESS,
             credential = "4e4f1f70-5e56-4a76-bb9d-db087f4690c4",
             serverHost = "jp3.yohototo.top",
@@ -113,28 +140,33 @@ data class ProxyProfile(
             isBuiltIn = true,
         )
 
-        val UAC_SNI_BUILT_IN_2 = ProxyProfile(
-            id = BUILT_IN_2_ID,
-            name = "UAC SNI built-in 2",
-            protocol = ProxyProtocol.TROJAN,
-            credential = "humanity",
-            serverHost = "127.0.0.1",
-            serverPort = 40443,
+        val AUTO = ProxyProfile(
+            id = AUTO_ID,
+            name = "Auto · خودکار",
+            protocol = ProxyProtocol.VLESS,
+            credential = "",
+            serverHost = "auto",
+            serverPort = 443,
             network = "ws",
             security = "tls",
-            sni = "api-ir.behroozuac.dpdns.org",
-            host = "api-ir.behroozuac.dpdns.org",
-            path = "/assignment",
-            alpn = "http/1.1",
+            sni = "",
+            host = "",
+            path = "/",
+            alpn = "",
             fingerprint = "chrome",
-            country = CountryMetadata.resolve("NL", "Netherlands"),
-            rawUri = "trojan://humanity@127.0.0.1:40443?type=ws&security=tls&sni=api-ir.behroozuac.dpdns.org&host=api-ir.behroozuac.dpdns.org&path=%2Fassignment&alpn=http%2F1.1&fp=chrome#humanity-user",
             isBuiltIn = true,
         )
 
-        val BUILT_IN_PROFILES = listOf(UAC_SNI_BUILT_IN, UAC_SNI_BUILT_IN_2)
+        val BUILT_IN_PROFILES = listOf(AUTO)
 
-        fun isProtectedBuiltIn(id: String): Boolean = id == BUILT_IN_ID || id == BUILT_IN_2_ID
+        fun isProtectedBuiltIn(id: String): Boolean = id == AUTO_ID
+
+        /** Both removed built-ins (and anything Auto picked) map onto Auto. */
+        fun migrateSelectedId(id: String): String = when {
+            id == BUILT_IN_ID || id == LEGACY_BUILT_IN_2_ID -> AUTO_ID
+            id.startsWith(AUTO_RUN_PREFIX) -> AUTO_ID
+            else -> id
+        }
     }
 }
 
@@ -158,8 +190,19 @@ data class RuntimeProxyIdentity(
     val xhttpExtra: String = "",
     val packetEncoding: String = "",
     val headerType: String = "",
+    val ech: String = "",
+    val cipherSuites: String = "",
+    val finalmask: String = "",
+    val realityPublicKey: String = "",
+    val realityShortId: String = "",
+    val realitySpiderX: String = "",
 ) {
     val usesTls: Boolean get() = security == "tls"
+    val usesReality: Boolean get() = security == "reality"
+    val usesEch: Boolean get() = usesTls && ech.isNotBlank()
+
+    /** ECH and REALITY must dial the link's own address; clean-IP swaps break them. */
+    val pinnedToOwnAddress: Boolean get() = usesEch || usesReality
 }
 
 data class ProfileLibrary(
@@ -168,5 +211,6 @@ data class ProfileLibrary(
 ) {
     val allProfiles: List<ProxyProfile> get() = ProxyProfile.BUILT_IN_PROFILES + customProfiles
     val selectedProfile: ProxyProfile
-        get() = allProfiles.firstOrNull { it.id == selectedId } ?: ProxyProfile.UAC_SNI_BUILT_IN
+        get() = allProfiles.firstOrNull { it.id == ProxyProfile.migrateSelectedId(selectedId) }
+            ?: ProxyProfile.AUTO
 }

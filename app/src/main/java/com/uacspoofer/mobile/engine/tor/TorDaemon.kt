@@ -32,6 +32,14 @@ class TorDaemon(context: Context) {
     @Volatile private var lastControlSocket: File? = null
     private val running = AtomicBoolean(false)
     private val noticePumpRunning = AtomicBoolean(false)
+    @Volatile private var noticeLines: ConcurrentLinkedQueue<String>? = null
+    @Volatile private var lastSettings: TorEngineSettings = TorEngineSettings.DEFAULT
+    @Volatile private var verifyNext = true
+    @Volatile var lastStartWasCold: Boolean = true
+        private set
+
+    /** True when the previous start failed: run --verify-config before the next one. */
+    fun requestVerify() { verifyNext = true }
 
     fun isRunning(): Boolean {
         if (!running.get()) return false
@@ -47,7 +55,51 @@ class TorDaemon(context: Context) {
             lastControlSocket,
             validated.exitCountryCode,
             validated.exitStrict,
+            validated.fastExit,
         )
+    }
+
+    fun signal(name: String): Boolean =
+        isRunning() && TorControlClient.signal(lastControlPort, lastControlSocket, name)
+
+    fun setConf(assignment: String): Boolean =
+        isRunning() && TorControlClient.setConf(lastControlPort, lastControlSocket, assignment)
+
+    fun controlBigInfo(keyword: String): String? =
+        if (isRunning()) TorControlClient.bigInfo(lastControlPort, lastControlSocket, keyword) else null
+
+    fun controlInfo(keyword: String): String? =
+        if (isRunning()) TorControlClient.info(lastControlPort, lastControlSocket, keyword) else null
+
+    /** Fingerprints Tor is really using: up entry guards first, then first hops of built circuits. */
+    fun usedBridgeFingerprints(): List<String> {
+        val guards = controlInfo("entry-guards")?.let(TorControlClient::parseUpGuardFingerprints).orEmpty()
+        val hops = controlInfo("circuit-status")?.let(TorControlClient::parseFirstHops).orEmpty()
+        return (hops + guards).distinct()
+    }
+
+    /**
+     * Swap bridges in the running Tor via SETCONF and wait for bootstrap again.
+     * Returns false when the control port refused (caller restarts instead).
+     */
+    suspend fun swapBridges(
+        bridges: List<WebTunnelBridge>,
+        timeoutMs: Long = BRIDGE_BOOTSTRAP_TIMEOUT_MS,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val lines = noticeLines
+        if (!isRunning() || lines == null) return@withContext false
+        val torrcLines = bridges.map { it.torrcLine().removePrefix("Bridge ").trim() }
+        if (!TorControlClient.setBridges(lastControlPort, lastControlSocket, torrcLines)) return@withContext false
+        AppLogRepository.info(LogSource.TOR, "Swapped ${bridges.size} WebTunnel bridge(s) via control port (no restart)")
+        lines.clear()
+        try {
+            awaitBootstrap(lastSettings, timeoutMs, lines, process, daemonAlive = { isRunning() })
+            noticePumpRunning.set(false)
+        } catch (error: Throwable) {
+            if (error is TorPtProxyRefusedException || error is TorPtCrashLoopException) stop()
+            throw error
+        }
+        true
     }
 
     fun locateTorBinary(): File? = installedOrNative("tor", "libtor.so")
@@ -58,8 +110,27 @@ class TorDaemon(context: Context) {
         settings: TorEngineSettings,
         bridges: List<WebTunnelBridge>,
         timeoutMs: Long = if (bridges.isEmpty()) DIRECT_BOOTSTRAP_TIMEOUT_MS else BRIDGE_BOOTSTRAP_TIMEOUT_MS,
+        fragmentProxyPort: Int = 0,
+        keepOnFailure: Boolean = false,
     ) = withContext(Dispatchers.IO) {
         stop()
+        lastSettings = settings.validated()
+        if (bridges.isNotEmpty()) {
+            TorLiveFlow.start(TorFlowStageId.ARCH)
+            try {
+                checkNativeBridgeAbi()
+            } catch (error: Throwable) {
+                TorLiveFlow.fail(TorFlowStageId.ARCH, error.message.orEmpty())
+                throw error
+            }
+            TorLiveFlow.done(
+                TorFlowStageId.ARCH,
+                Build.SUPPORTED_ABIS.firstOrNull().orEmpty(),
+                listOf("abi" to Build.SUPPORTED_ABIS.joinToString(), "libs" to File(appContext.applicationInfo.nativeLibraryDir.orEmpty()).name),
+            )
+        }
+        val password = TorControlAuth.newPassword()
+        TorControlClient.controlPassword = ""
         val runtime = TorNativeRuntime.install(appContext)
         val plugin = runtime.webtunnel.takeIf { it.isFile }
         if (bridges.isNotEmpty()) {
@@ -68,7 +139,10 @@ class TorDaemon(context: Context) {
             }
         }
         val dataDir = preparePrivateDir(File(appContext.filesDir, "tor/data"))
-        val cacheDir = preparePrivateDir(File(appContext.cacheDir, "tor"))
+        // filesDir, not cacheDir: Android must not purge the consensus / microdesc cache.
+        val cacheDir = preparePrivateDir(File(appContext.filesDir, "tor/cache"))
+        lastStartWasCold = !File(cacheDir, "cached-microdesc-consensus").isFile &&
+            !File(dataDir, "cached-microdesc-consensus").isFile
         val rcFile = File(appContext.filesDir, "tor/torrc")
         val defaultsFile = File(appContext.filesDir, "tor/torrc-defaults")
         val noticeLog = File(appContext.filesDir, "tor/notice.log")
@@ -96,29 +170,45 @@ class TorDaemon(context: Context) {
                 noticeLog = noticeLog,
                 geoIpFile = geoIp?.geoip,
                 geoIp6File = geoIp?.geoip6,
+                fragmentProxyPort = fragmentProxyPort,
+                hashedControlPassword = TorControlAuth.hash(password),
             ),
         )
+        TorControlClient.controlPassword = password
         defaultsFile.writeText("# UAC Tor defaults; SocksPort is in torrc\n")
         noticeLog.delete()
         lastControlPort = settings.validated().controlPort
         lastControlSocket = controlSocket
         TorStatusStore.update(TorPhase.STARTING, 0, "Starting Tor")
-        val verifyText = verifyConfig(
-            runtime.tor,
-            rcFile,
-            defaultsFile,
-            dataDir,
-            cacheDir,
-            controlSocket,
-            timeoutSec = if (geoIp != null) 45L else 15L,
-        )
+        // --verify-config spawns a second Tor and parses GeoIP: only after a failed start.
+        val verifyText = if (verifyNext) {
+            verifyConfig(
+                runtime.tor,
+                rcFile,
+                defaultsFile,
+                dataDir,
+                cacheDir,
+                controlSocket,
+                timeoutSec = if (geoIp != null) 45L else 15L,
+            )
+        } else {
+            AppLogRepository.debug(LogSource.TOR, "Skipping torrc --verify-config (last start was clean)")
+            ""
+        }
         if (verifyText.isNotBlank()) {
             verifyText.lineSequence().filter { it.isNotBlank() }.take(12).forEach { line ->
                 AppLogRepository.debug(LogSource.TOR, line.take(400))
             }
         }
         val logLines = startNoticePump(noticeLog)
-        val launchedJni = tryLaunchJni(
+        noticeLines = logLines
+        // An in-process Tor that already watched a PT die cannot run again in this process:
+        // tor's transports.c keeps static counters and aborts the whole app
+        // (assert_unconfigured_count_ok). Use a separate tor process instead.
+        val launchedJni = if (jniTainted) {
+            AppLogRepository.warning(LogSource.TOR, "In-process Tor is unsafe after a PT crash; using a separate Tor process")
+            false
+        } else tryLaunchJni(
             settings = settings,
             torrc = rcFile,
             defaultsTorrc = defaultsFile,
@@ -145,8 +235,12 @@ class TorDaemon(context: Context) {
                 processStdout = process,
                 daemonAlive = { isRunning() },
             )
+            verifyNext = false
+            // Bootstrapped: stop the 120 ms notice.log poll; control port serves later checks.
+            noticePumpRunning.set(false)
         } catch (error: Throwable) {
-            stop()
+            verifyNext = true
+            if (!keepOnFailure || error is TorPtProxyRefusedException || error is TorPtCrashLoopException || !isRunning()) stop()
             throw error
         }
     }
@@ -154,6 +248,7 @@ class TorDaemon(context: Context) {
     fun stop() {
         running.set(false)
         noticePumpRunning.set(false)
+        noticeLines = null
         val thread = torThread
         val current = process
         process = null
@@ -426,6 +521,13 @@ class TorDaemon(context: Context) {
                 var lastProblem = ""
                 var reachedHandshake = false
                 var controlWatch: TorControlWatch? = null
+                val startedAt = System.currentTimeMillis()
+                val coldStart = lastStartWasCold
+                val ptCrashes = PtCrashCounter()
+                var ptDeaths = 0
+                TorLiveFlow.newAttempt()
+                TorLiveFlow.start(TorFlowStageId.PT, "webtunnel", listOf("cache" to if (coldStart) "cold" else "warm"))
+                TorLiveFlow.fact(TorFlowStageId.DIRECTORY, "cache", if (coldStart) "cold (download)" else "warm (on disk)")
                 try {
                     while (true) {
                     coroutineContext.ensureActive()
@@ -442,6 +544,20 @@ class TorDaemon(context: Context) {
                         if (line.contains("helper program for dynamic executables", ignoreCase = true)) {
                             error("Android linker was started instead of Tor. Direct exec of libtor.so is required.")
                         }
+                        if (PtCrashCounter.isPtTermination(line) && torThread != null) jniTainted = true
+                        if (PtCrashCounter.isPtTermination(line)) {
+                            ptDeaths++
+                            TorLiveFlow.fact(TorFlowStageId.PT, "terminations", ptDeaths.toString())
+                        }
+                        if (ptCrashes.record(line, System.currentTimeMillis()) && !reachedHandshake) {
+                            throw TorPtCrashLoopException(
+                                "WebTunnel plugin keeps crashing (${PtCrashCounter.LIMIT}x in " +
+                                    "${PtCrashCounter.WINDOW_MS / 1000}s): ${sanitize(line)}",
+                            )
+                        }
+                        if (TorBootstrapWatch.isProxyRefusal(line)) {
+                            throw TorPtProxyRefusedException(sanitize(line))
+                        }
                         if (isFatalLine(line)) {
                             lastProblem = sanitize(line)
                             AppLogRepository.warning(LogSource.TOR, lastProblem)
@@ -454,6 +570,7 @@ class TorDaemon(context: Context) {
                             lastPercent = percent
                             lastChangeAt = System.currentTimeMillis()
                             if (TorBootstrapWatch.marksHandshake(percent)) reachedHandshake = true
+                            TorLiveFlow.onBootstrap(percent, TorLiveFlow.phaseOf(line))
                             TorStatusStore.update(
                                 phase = if (percent >= 100) TorPhase.CONNECTED else TorPhase.BOOTSTRAPPING,
                                 bootstrapPercent = percent,
@@ -482,6 +599,7 @@ class TorDaemon(context: Context) {
                         lastPercent = controlPercent
                         lastChangeAt = System.currentTimeMillis()
                         if (TorBootstrapWatch.marksHandshake(controlPercent)) reachedHandshake = true
+                        TorLiveFlow.onBootstrap(controlPercent, "")
                         TorStatusStore.update(
                             phase = if (controlPercent >= 100) TorPhase.CONNECTED else TorPhase.BOOTSTRAPPING,
                             bootstrapPercent = controlPercent,
@@ -511,9 +629,23 @@ class TorDaemon(context: Context) {
                             },
                         )
                     }
+                    if (TorBootstrapWatch.handshakeMissed(
+                            elapsedMs = System.currentTimeMillis() - startedAt,
+                            reachedHandshake = reachedHandshake,
+                            coldStart = coldStart,
+                            enabled = settings.stageTimeouts,
+                        )
+                    ) {
+                        error(
+                            lastProblem.ifBlank {
+                                "Tor handshake not done in ${TorBootstrapWatch.handshakeDeadlineMs(coldStart) / 1000}s " +
+                                    "(stage timeout, at $lastPercent%)"
+                            },
+                        )
+                    }
                     val stalled = lastPercent in 1..99 &&
                         System.currentTimeMillis() - lastChangeAt >=
-                        TorBootstrapWatch.stallBudgetMs(lastPercent, reachedHandshake)
+                        TorBootstrapWatch.stallBudgetMs(lastPercent, reachedHandshake, coldStart || !settings.stageTimeouts)
                     if (stalled) {
                         error(
                             lastProblem.ifBlank {
@@ -598,6 +730,23 @@ class TorDaemon(context: Context) {
         }.getOrDefault("")
     }
 
+    /**
+     * An arm/arm64 APK on an x86 emulator runs Java through native-bridge translation, but
+     * a directly exec'd Go PT (libwebtunnel.so) dies with SIGILL there. Fail fast and clearly.
+     */
+    private fun checkNativeBridgeAbi() {
+        val libDir = appContext.applicationInfo.nativeLibraryDir.orEmpty()
+        val hostX86 = System.getProperty("os.arch").orEmpty().contains("x86") ||
+            System.getProperty("os.arch").orEmpty().contains("amd64")
+        val armLibs = libDir.endsWith("/arm64") || libDir.endsWith("/arm")
+        if (hostX86 && armLibs) {
+            error(
+                "This ARM build runs under x86 emulation; the WebTunnel plugin cannot start here. " +
+                    "Install the x86_64 APK on this emulator.",
+            )
+        }
+    }
+
     private fun preparePrivateDir(dir: File): File {
         dir.mkdirs()
         dir.setReadable(true, true)
@@ -619,6 +768,9 @@ class TorDaemon(context: Context) {
 
     companion object {
         private val BOOTSTRAP_PATTERN = Regex("Bootstrapped (\\d+)%")
+
+        /** Process-wide: an in-process tor_main saw a managed proxy die. */
+        @Volatile private var jniTainted = false
         internal const val DIRECT_BOOTSTRAP_TIMEOUT_MS = 30_000L
         internal const val BRIDGE_BOOTSTRAP_TIMEOUT_MS = 90_000L
         private const val MODE_0700 = 448

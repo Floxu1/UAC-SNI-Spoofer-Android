@@ -1076,7 +1076,7 @@ private fun HomeConfigProtocolBadge(profile: ProxyProfile, emphasized: Boolean) 
 }
 
 @Composable
-private fun AnimatedHomeMetricDialog(
+internal fun AnimatedHomeMetricDialog(
     visible: Boolean,
     title: String,
     subtitle: String,

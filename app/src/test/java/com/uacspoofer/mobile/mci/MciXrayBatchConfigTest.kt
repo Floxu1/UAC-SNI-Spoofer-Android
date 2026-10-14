@@ -30,7 +30,7 @@ class MciXrayBatchConfigTest {
             ),
         )
 
-        val config = MciXrayConfigBuilder.buildBatch(routes, ProxyProfile.UAC_SNI_BUILT_IN)
+        val config = MciXrayConfigBuilder.buildBatch(routes, ProxyProfile.ADVANCED_SETTINGS_TEMPLATE)
 
         assertTrue(config.contains("\"tag\":\"in-r0\",\"listen\":\"127.0.0.1\",\"port\":12001"))
         assertTrue(config.contains("\"tag\":\"in-r1\",\"listen\":\"127.0.0.1\",\"port\":12002"))
@@ -51,7 +51,7 @@ class MciXrayBatchConfigTest {
         )
 
         assertThrows(IllegalArgumentException::class.java) {
-            MciXrayConfigBuilder.buildBatch(routes, ProxyProfile.UAC_SNI_BUILT_IN)
+            MciXrayConfigBuilder.buildBatch(routes, ProxyProfile.ADVANCED_SETTINGS_TEMPLATE)
         }
     }
 

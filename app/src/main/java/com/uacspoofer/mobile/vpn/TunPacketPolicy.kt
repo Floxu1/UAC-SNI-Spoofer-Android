@@ -4,6 +4,8 @@ internal enum class TunPacketAction {
     FORWARD,
     DROP,
     SINKHOLE,
+    /** Answer with ICMP port-unreachable so the app gives up on QUIC at once and uses TCP. */
+    REJECT,
 }
 
 /**
@@ -62,6 +64,56 @@ internal object TunPacketPolicy {
         }
     }
 
+    /** ICMP(v6) port unreachable for [packet], addressed back to its sender. Returns 0 if it can't. */
+    fun buildPortUnreachable(packet: ByteArray, length: Int, reply: ByteArray): Int {
+        if (length < 28) return 0
+        return when ((packet[0].toInt() and 0xF0) shr 4) {
+            4 -> {
+                val ihl = (packet[0].toInt() and 0xF) * 4
+                if (ihl < 20 || length < ihl + 8) return 0
+                val quote = ihl + 8
+                val total = 28 + quote
+                if (reply.size < total) return 0
+                java.util.Arrays.fill(reply, 0, 28, 0)
+                reply[0] = 0x45
+                reply[2] = (total shr 8).toByte(); reply[3] = total.toByte()
+                reply[8] = 64; reply[9] = 1
+                System.arraycopy(packet, 16, reply, 12, 4)
+                System.arraycopy(packet, 12, reply, 16, 4)
+                val ipSum = internetChecksum(reply, 0, 20)
+                reply[10] = (ipSum shr 8).toByte(); reply[11] = ipSum.toByte()
+                reply[20] = 3; reply[21] = 3
+                System.arraycopy(packet, 0, reply, 28, quote)
+                val icmpSum = internetChecksum(reply, 20, 8 + quote)
+                reply[22] = (icmpSum shr 8).toByte(); reply[23] = icmpSum.toByte()
+                total
+            }
+            6 -> {
+                if (length < 48) return 0
+                val quote = minOf(length, 1232)
+                val total = 48 + quote
+                if (reply.size < total) return 0
+                java.util.Arrays.fill(reply, 0, 48, 0)
+                reply[0] = 0x60
+                val payload = 8 + quote
+                reply[4] = (payload shr 8).toByte(); reply[5] = payload.toByte()
+                reply[6] = 58; reply[7] = 64
+                System.arraycopy(packet, 24, reply, 8, 16)
+                System.arraycopy(packet, 8, reply, 24, 16)
+                reply[40] = 1; reply[41] = 4
+                System.arraycopy(packet, 0, reply, 48, quote)
+                var pseudo = 0L
+                var i = 8
+                while (i < 40) { pseudo += u16(reply, i); i += 2 }
+                pseudo += payload + 58
+                val sum = internetChecksum(reply, 40, payload, extra = pseudo)
+                reply[42] = (sum shr 8).toByte(); reply[43] = sum.toByte()
+                total
+            }
+            else -> 0
+        }
+    }
+
     private fun inspectIpv4(
         packet: ByteArray,
         length: Int,
@@ -81,7 +133,7 @@ internal object TunPacketPolicy {
         if (udpOff + 4 > length) return TunPacketAction.FORWARD
         val srcPort = u16(packet, udpOff)
         val dstPort = u16(packet, udpOff + 2)
-        if (isQuicBlockerEnabled && dstPort == 443) return TunPacketAction.DROP
+        if (isQuicBlockerEnabled && dstPort == 443) return TunPacketAction.REJECT
         val payloadOff = udpOff + 8
         val payloadLen = length - payloadOff
         if (payloadLen < 0) return TunPacketAction.FORWARD
@@ -108,7 +160,7 @@ internal object TunPacketPolicy {
         if (udpOff + 4 > length) return TunPacketAction.FORWARD
         val srcPort = u16(packet, udpOff)
         val dstPort = u16(packet, udpOff + 2)
-        if (isQuicBlockerEnabled && dstPort == 443) return TunPacketAction.DROP
+        if (isQuicBlockerEnabled && dstPort == 443) return TunPacketAction.REJECT
         val payloadOff = udpOff + 8
         val payloadLen = length - payloadOff
         if (payloadLen < 0) return TunPacketAction.FORWARD

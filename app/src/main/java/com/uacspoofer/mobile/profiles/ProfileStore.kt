@@ -19,10 +19,10 @@ class ProfileStore(context: Context) {
     fun snapshot(): ProfileLibrary {
         migrateLegacyOnce()
         val profiles = readProfiles()
-        val requested = prefs.getString(KEY_SELECTED, ProxyProfile.BUILT_IN_ID) ?: ProxyProfile.BUILT_IN_ID
-        val selected = requested.takeIf { id ->
+        val requested = prefs.getString(KEY_SELECTED, ProxyProfile.AUTO_ID) ?: ProxyProfile.AUTO_ID
+        val selected = ProxyProfile.migrateSelectedId(requested).takeIf { id ->
             ProxyProfile.isProtectedBuiltIn(id) || profiles.any { it.id == id }
-        } ?: ProxyProfile.BUILT_IN_ID
+        } ?: ProxyProfile.AUTO_ID
         if (selected != requested) prefs.edit().putString(KEY_SELECTED, selected).apply()
         return ProfileLibrary(profiles, selected)
     }
@@ -120,12 +120,12 @@ class ProfileStore(context: Context) {
 
     @Synchronized
     fun deleteMany(ids: Set<String>): ProfileLibrary {
-        require(ProxyProfile.BUILT_IN_ID !in ids && ProxyProfile.BUILT_IN_2_ID !in ids) { "Built-in profile is read-only" }
+        require(ProxyProfile.AUTO_ID !in ids) { "Built-in profile is read-only" }
         if (ids.isEmpty()) return snapshot()
         val before = snapshot()
         val remaining = before.customProfiles.filterNot { it.id in ids }
         writeProfiles(remaining)
-        if (before.selectedId in ids) prefs.edit().putString(KEY_SELECTED, ProxyProfile.BUILT_IN_ID).apply()
+        if (before.selectedId in ids) prefs.edit().putString(KEY_SELECTED, ProxyProfile.AUTO_ID).apply()
         return snapshot()
     }
 

@@ -3,6 +3,7 @@ package com.uacspoofer.mobile.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -31,6 +32,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.AltRoute
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.SettingsEthernet
+import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.CellTower
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ExpandLess
@@ -53,6 +59,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.draw.rotate
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -97,33 +104,42 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private data class PowMenuChoice(val id: String, val title: String, val hint: String = "")
+internal data class PowMenuChoice(val id: String, val title: String, val hint: String = "")
 
 /** One radius everywhere on this screen; pills are capsules. */
-private val PowShape = RoundedCornerShape(12.dp)
-private val PowTileShape = RoundedCornerShape(10.dp)
-private val PowPad = 12.dp
-private val PowGap = 10.dp
-private val PowHintSize = 12.sp
-private val PowHintLine = 17.sp
-private val PowBorder = Color.White.copy(alpha = 0.08f)
-private val PowSheetColor = Color(0xFF101C29)
-private val PowCardBrush = Brush.linearGradient(listOf(Color(0xE6142231), Color(0xD90B1724)))
+internal val PowShape = RoundedCornerShape(12.dp)
+internal val PowTileShape = RoundedCornerShape(10.dp)
+internal val PowPad = 12.dp
+internal val PowGap = 10.dp
+internal val PowHintSize = 12.sp
+internal val PowHintLine = 17.sp
+internal val PowBorder = Color.White.copy(alpha = 0.08f)
+internal val PowSheetColor = Color(0xFF101C29)
+internal val PowCardBrush = Brush.linearGradient(listOf(Color(0xE6142231), Color(0xD90B1724)))
 
 @Composable
 internal fun PowSettingsScreen(onBack: () -> Unit) {
     val accent = UacColors.DisconnectedBlue
+    var pathVisible by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     ToolPageScaffold(
         accent = accent,
         verticalSpacing = PowGap,
         header = { PowCompactHeader(accent = accent, onBack = onBack) },
     ) {
+        item { PowLivePathButton(accent = accent, onClick = { pathVisible = true }) }
         item { PowSettingsPanel() }
     }
+    PowLivePathDialog(visible = pathVisible, onDismissRequest = { pathVisible = false })
 }
 
 @Composable
-private fun PowCompactHeader(accent: Color, onBack: () -> Unit) {
+internal fun PowCompactHeader(
+    accent: Color,
+    onBack: () -> Unit,
+    title: String = homeText("UAC PoW", "UAC PoW"),
+    subtitle: String = homeText("Connection settings", "تنظیمات اتصال"),
+    icon: ImageVector = Icons.Outlined.Hub,
+) {
     val backLabel = homeText("Back to settings", "برگشت به تنظیمات")
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -154,11 +170,11 @@ private fun PowCompactHeader(accent: Color, onBack: () -> Unit) {
                 .border(1.dp, accent.copy(alpha = 0.30f), PowShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(Icons.Outlined.Hub, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+            Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                homeText("UAC PoW", "UAC PoW"),
+                title,
                 color = UacColors.TextPrimary,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -166,7 +182,7 @@ private fun PowCompactHeader(accent: Color, onBack: () -> Unit) {
                 maxLines = 1,
             )
             Text(
-                homeText("Connection settings", "تنظیمات اتصال"),
+                subtitle,
                 color = UacColors.TextSecondary,
                 fontSize = 11.sp,
                 textAlign = TextAlign.Start,
@@ -181,7 +197,7 @@ private fun PowCompactHeader(accent: Color, onBack: () -> Unit) {
  * where a Persian reader expects them, and aligns every paragraph to its start.
  */
 @Composable
-private fun PowDirectional(content: @Composable () -> Unit) {
+internal fun PowDirectional(content: @Composable () -> Unit) {
     val persian = LocalHomePersian.current
     CompositionLocalProvider(
         LocalLayoutDirection provides if (persian) LayoutDirection.Rtl else LayoutDirection.Ltr,
@@ -264,6 +280,14 @@ private fun PowSettingsPanel() {
             homeText(
                 "Traffic exits straight through WARP. Psiphon stays off.",
                 "ترافیک مستقیم از WARP خارج می‌شود و Psiphon خاموش می‌ماند.",
+            ),
+        ),
+        PowMenuChoice(
+            "psiphon",
+            homeText("Psiphon only", "فقط Psiphon"),
+            homeText(
+                "Psiphon connects on its own; WARP is never started. Lighter on battery, harder through DPI.",
+                "Psiphon بدون WARP وصل می‌شود. مصرف باتری کمتر، ولی عبور از DPI سخت‌تر.",
             ),
         ),
     )
@@ -365,30 +389,18 @@ private fun PowSettingsPanel() {
                     label = homeText("Exit", "خروجی"),
                     sheetTitle = homeText("Exit", "خروجی"),
                     choices = exits,
-                    selectedId = if (settings.chainPsiphon) "chain" else "warp",
+                    selectedId = settings.exitMode,
                     accent = accent,
-                    onSelect = { store.save(settings.copy(chainPsiphon = it == "chain")) },
+                    onSelect = { store.save(settings.copy(exitMode = it)) },
                 )
                 PowRowDivider()
                 PowSwitchRow(
                     icon = Icons.Outlined.Bolt,
                     title = homeText("Optimized mode", "حالت بهینه"),
-                    subtitle = homeText("Lighter checks, less battery", "بررسی سبک‌تر، باتری کمتر"),
+                    subtitle = homeText("Lighter checks, less battery", "بررسی‌های سبک‌تر؛ باتری کمتر مصرف می‌شه"),
                     checked = settings.optimizedMode,
                     accent = accent,
                     onCheckedChange = { store.save(settings.copy(optimizedMode = it)) },
-                )
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.AutoMirrored.Outlined.AltRoute,
-                    title = homeText("Two tunnels at once", "دو تونل همزمان"),
-                    subtitle = homeText(
-                        "Faster; each site keeps one tunnel",
-                        "سریع‌تر؛ هر سایت از یک تونل ثابت",
-                    ),
-                    checked = settings.psiphonTunnelPool,
-                    accent = accent,
-                    onCheckedChange = { store.save(settings.copy(psiphonTunnelPool = it)) },
                 )
                 PowRowDivider()
                 PowSwitchRow(
@@ -396,15 +408,211 @@ private fun PowSettingsPanel() {
                     title = homeText("HTTP/3 tuning", "بهینه‌سازی HTTP/3"),
                     subtitle = homeText(
                         "Smoother packet pacing, suits Irancell",
-                        "ارسال منظم‌تر بسته‌ها، مناسب ایرانسل",
+                        "ارسال منظم‌تر داده؛ روی ایرانسل بهتر جواب می‌ده",
                     ),
                     checked = settings.quicTuned,
                     accent = accent,
                     onCheckedChange = { store.save(settings.copy(quicTuned = it)) },
                 )
             }
+            PowAdvancedCard(store = store, settings = settings, exits = exits, accent = accent)
             PowKeyCard(store = store, settings = settings, fetches = fetches, accent = accent)
             PowLearnedPathsCard(store = store, accent = accent)
+        }
+    }
+}
+
+/** «تنظیمات پیشرفته»: collapsible card with the HTTP/2 speed and tunnel options. */
+@Composable
+private fun PowAdvancedCard(
+    store: PowEngineStore,
+    settings: PowEngineSettings,
+    exits: List<PowMenuChoice>,
+    accent: Color,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val chevron by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(260),
+        label = "powAdvancedChevron",
+    )
+    val obfuscations = listOf(
+        PowMenuChoice(
+            PowEngineSettings.H2_OBFS_UNCHANGED,
+            homeText("Unchanged", "بدون تغییر"),
+            homeText("Same obfuscation as other methods.", "همان مبهم‌سازی بقیه روش‌ها."),
+        ),
+        PowMenuChoice(
+            "light",
+            homeText("Light", "سبک"),
+            homeText("Less overhead; HTTP/2 already hides in TLS.", "سربار کمتر؛ HTTP/2 خودش داخل TLS پنهان است."),
+        ),
+        PowMenuChoice(
+            "off",
+            homeText("Off", "خاموش"),
+            homeText("Fastest, least CPU. Use if the link is stable.", "سریع‌ترین و کم‌مصرف‌ترین؛ اگر اتصال پایدار است."),
+        ),
+    )
+    val fragments = listOf(
+        PowMenuChoice(
+            PowEngineSettings.H2_FRAG_AUTO,
+            homeText("Auto", "خودکار"),
+            homeText("Recipe default; turns on when DPI is suspected.", "پیش‌فرض روش؛ اگه DPI حس بشه روشن می‌شه."),
+        ),
+        PowMenuChoice(
+            PowEngineSettings.H2_FRAG_ON,
+            homeText("On", "روشن"),
+            homeText("Always split the ClientHello. A bit slower.", "همیشه ClientHello تکه می‌شه. کمی کندتر."),
+        ),
+        PowMenuChoice(
+            PowEngineSettings.H2_FRAG_OFF,
+            homeText("Off", "خاموش"),
+            homeText("Never split. Fastest.", "هیچ‌وقت تکه نمی‌شه. سریع‌ترین."),
+        ),
+    )
+    val mtus = listOf(
+        PowMenuChoice(
+            PowEngineSettings.TUN_MTU_DEFAULT.toString(),
+            homeText("Default", "پیش‌فرض"),
+            homeText("The app's MTU, capped at 1280.", "MTU خود برنامه، حداکثر ۱۲۸۰."),
+        ),
+        PowMenuChoice("1280", homeLtr("1280"), homeText("Safest on every network.", "امن‌ترین روی همه شبکه‌ها.")),
+        PowMenuChoice("1350", homeLtr("1350"), homeText("Bigger packets, less overhead.", "بسته‌های بزرگ‌تر، سربار کمتر.")),
+        PowMenuChoice("1400", homeLtr("1400"), homeText("Largest; may break on some lines.", "بزرگ‌ترین؛ روی بعضی خطوط مشکل دارد.")),
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(PowShape)
+            .background(Color.White.copy(alpha = 0.04f))
+            .border(1.dp, if (expanded) accent.copy(alpha = 0.35f) else UacColors.Divider.copy(alpha = 0.45f), PowShape),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .clickable { expanded = !expanded }
+                .padding(horizontal = PowPad, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PowGap),
+        ) {
+            PowIconTile(Icons.Outlined.Tune, accent)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    homeText("Advanced settings", "تنظیمات پیشرفته"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    homeText("HTTP/2 speed, handover, logs", "سرعت HTTP/2، جابه‌جایی تونل، لاگ"),
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                Icons.Outlined.ExpandMore,
+                contentDescription = null,
+                tint = if (expanded) accent else UacColors.TextSecondary,
+                modifier = Modifier
+                    .size(22.dp)
+                    .rotate(chevron),
+            )
+        }
+        PowExpandBody(visible = expanded) {
+            PowSwitchRow(
+                icon = Icons.Outlined.SwapHoriz,
+                title = homeText("Seamless tunnel swap", "جابه‌جایی بی‌وقفه تونل"),
+                subtitle = homeText(
+                    "New tunnel first, old one kept if it fails",
+                    "اول اتصال جدید آماده می‌شه، بعد قبلی قطع می‌شه؛ بدون قطعی",
+                ),
+                checked = settings.ghostHandover,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(ghostHandover = it)) },
+            )
+            PowRowDivider()
+            PowSwitchRow(
+                icon = Icons.Outlined.Speed,
+                title = homeText("Large HTTP/2 windows", "پنجره بزرگ HTTP/2"),
+                subtitle = homeText("16 MB link / 8 MB stream, faster downloads", "دانلودها سریع‌تر می‌شن"),
+                checked = settings.h2LargeWindows,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(h2LargeWindows = it)) },
+            )
+            PowRowDivider()
+            PowSwitchRow(
+                icon = Icons.Outlined.SettingsEthernet,
+                title = homeText("Socket tuning", "تنظیم سوکت"),
+                subtitle = homeText("TCP_NODELAY + 1 MB buffers on HTTP/2", "ویدیو و دانلود روون‌تر می‌شن"),
+                checked = settings.h2SocketTuning,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(h2SocketTuning = it)) },
+            )
+            PowRowDivider()
+            PowSwitchRow(
+                icon = Icons.Outlined.Radar,
+                title = homeText("Pick the fastest gateway", "انتخاب سریع‌ترین گیت‌وی"),
+                subtitle = homeText("Races the top 3 saved IPs, keeps the quickest", "از بین ۳ سرور ذخیره‌شده، سریع‌ترین انتخاب می‌شه"),
+                checked = settings.h2SpeedPick,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(h2SpeedPick = it)) },
+            )
+            PowRowDivider()
+            PowPickerRow(
+                icon = Icons.Outlined.Shield,
+                label = homeText("HTTP/2 obfuscation", "مبهم‌سازی HTTP/2"),
+                sheetTitle = homeText("Obfuscation on MASQUE HTTP/2", "مبهم‌سازی روی MASQUE HTTP/2"),
+                choices = obfuscations,
+                selectedId = settings.h2Obfuscation,
+                accent = accent,
+                onSelect = { store.save(settings.copy(h2Obfuscation = it)) },
+            )
+            PowRowDivider()
+            PowPickerRow(
+                icon = Icons.Outlined.Shield,
+                label = homeText("H2 fragment", "H2 fragment"),
+                sheetTitle = homeText("H2 fragment (MASQUE HTTP/2)", "H2 fragment (MASQUE HTTP/2)"),
+                choices = fragments,
+                selectedId = settings.h2FragmentMode,
+                accent = accent,
+                onSelect = { store.save(settings.copy(h2FragmentMode = it)) },
+            )
+            PowRowDivider()
+            PowPickerRow(
+                icon = Icons.Outlined.Hub,
+                label = homeText("Tunnel MTU", "MTU تونل"),
+                sheetTitle = homeText("Tunnel MTU", "MTU تونل"),
+                choices = mtus,
+                selectedId = settings.tunMtu.toString(),
+                accent = accent,
+                onSelect = { id -> store.save(settings.copy(tunMtu = id.toIntOrNull() ?: PowEngineSettings.TUN_MTU_DEFAULT)) },
+            )
+            PowRowDivider()
+            PowSwitchRow(
+                icon = Icons.AutoMirrored.Outlined.AltRoute,
+                title = homeText("Two tunnels at once", "دو تونل همزمان"),
+                subtitle = homeText(
+                    "Faster; each site keeps one tunnel",
+                    "سریع‌تر؛ هر سایت از یک تونل ثابت",
+                ),
+                checked = settings.psiphonTunnelPool,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(psiphonTunnelPool = it)) },
+            )
+            PowRowDivider()
+            PowSwitchRow(
+                icon = Icons.Outlined.BugReport,
+                title = homeText("Logs to logcat", "لاگ در logcat"),
+                subtitle = homeText("Read POW logs over adb (tag UAC-POW)", "برای عیب‌یابی با کامپیوتر (adb)"),
+                checked = settings.logcatMirror,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(logcatMirror = it)) },
+            )
         }
     }
 }
@@ -553,7 +761,7 @@ private fun recipeHint(recipe: String): String = when (recipe) {
 }
 
 @Composable
-private fun PowCard(content: @Composable () -> Unit) {
+internal fun PowCard(content: @Composable () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -565,7 +773,7 @@ private fun PowCard(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun PowRowDivider() {
+internal fun PowRowDivider() {
     HorizontalDivider(
         color = UacColors.Divider.copy(alpha = 0.45f),
         thickness = 1.dp,
@@ -574,7 +782,7 @@ private fun PowRowDivider() {
 }
 
 @Composable
-private fun PowIconTile(icon: ImageVector, tint: Color) {
+internal fun PowIconTile(icon: ImageVector, tint: Color) {
     Box(
         modifier = Modifier
             .size(32.dp)
@@ -588,7 +796,7 @@ private fun PowIconTile(icon: ImageVector, tint: Color) {
 
 /** Small capsule used for the current value and for status badges. */
 @Composable
-private fun PowPill(
+internal fun PowPill(
     text: AnnotatedString,
     tint: Color,
     chevron: Boolean = false,
@@ -626,7 +834,7 @@ private fun PowPill(
 
 /** A compact on/off row: icon, title and a one-line subtitle, switch at the end. The whole row toggles. */
 @Composable
-private fun PowSwitchRow(
+internal fun PowSwitchRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
@@ -657,7 +865,7 @@ private fun PowSwitchRow(
                 subtitle,
                 color = UacColors.TextSecondary,
                 fontSize = 11.5.sp,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
@@ -675,7 +883,7 @@ private fun PowSwitchRow(
 
 /** A compact setting row: icon + label at the start, current value pill at the end; tap opens a sheet. */
 @Composable
-private fun PowPickerRow(
+internal fun PowPickerRow(
     icon: ImageVector,
     label: String,
     sheetTitle: String,
@@ -722,7 +930,7 @@ private fun PowPickerRow(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PowChoiceSheet(
+internal fun PowChoiceSheet(
     title: String,
     choices: List<PowMenuChoice>,
     selectedId: String,
@@ -867,7 +1075,7 @@ private fun PowExpandRow(
 }
 
 @Composable
-private fun PowHint(text: String, color: Color = UacColors.TextSecondary) {
+internal fun PowHint(text: String, color: Color = UacColors.TextSecondary) {
     Text(
         latinDigits(text),
         color = color,
@@ -878,7 +1086,7 @@ private fun PowHint(text: String, color: Color = UacColors.TextSecondary) {
 }
 
 @Composable
-private fun PowButton(
+internal fun PowButton(
     text: String,
     enabled: Boolean,
     accent: Color,
@@ -914,7 +1122,7 @@ private fun PowButton(
 }
 
 @Composable
-private fun PowExpandBody(visible: Boolean, content: @Composable () -> Unit) {
+internal fun PowExpandBody(visible: Boolean, content: @Composable () -> Unit) {
     AnimatedVisibility(
         visible = visible,
         enter = expandVertically() + fadeIn(),

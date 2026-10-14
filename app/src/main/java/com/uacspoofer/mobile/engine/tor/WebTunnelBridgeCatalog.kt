@@ -12,18 +12,23 @@ internal object WebTunnelBridgeCatalog {
         return WebTunnelBridgeParser.parseAll(text)
     }
 
+    /**
+     * Last-good first, then pasted lines, then bridges refreshed through Tor, then the
+     * bundled list (always included so a stale paste never strands the user).
+     */
     fun merge(
         userLines: String,
         lastGoodRaw: String,
         bundled: List<WebTunnelBridge>,
+        refreshed: List<WebTunnelBridge> = emptyList(),
     ): List<WebTunnelBridge> {
         val configured = WebTunnelBridgeParser.parseAll(userLines)
         val lastGood = WebTunnelBridgeParser.parseLine(lastGoodRaw)
-        val extras = if (configured.isEmpty()) bundled.shuffled() else emptyList()
         return buildList {
             if (lastGood != null) add(lastGood)
             addAll(configured)
-            addAll(extras)
+            addAll(refreshed.shuffled())
+            addAll(bundled.shuffled())
         }.distinctBy { it.raw.lowercase() }
     }
 }

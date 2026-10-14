@@ -50,8 +50,8 @@ class TorRcWriterTest {
             bridges = emptyList(),
         )
         assertTrue(rc.contains("SocksPort 127.0.0.1:19050"))
-        assertFalse(rc.contains("IsolateDestAddr"))
-        assertTrue(rc.contains("CircuitBuildTimeout 20"))
+        assertTrue(rc.contains("IsolateDestAddr"))
+        assertTrue(rc.contains("LearnCircuitBuildTimeout 1"))
         assertTrue(rc.contains("ControlPort 127.0.0.1:19051"))
         assertTrue(rc.contains("ClientOnly 1"))
         assertTrue(rc.contains("RunAsDaemon 0"))
@@ -72,7 +72,7 @@ class TorRcWriterTest {
         )
         assertNotNull(bridge)
         val rc = TorRcWriter.render(
-            settings = TorEngineSettings.DEFAULT.copy(fragmentEnabled = false),
+            settings = TorEngineSettings.DEFAULT.copy(fragmentMode = TorEngineSettings.FRAGMENT_OFF),
             dataDirectory = File("/tmp/tor-data"),
             webtunnelPlugin = plugin,
             bridges = listOf(bridge!!),
@@ -130,7 +130,7 @@ class TorRcWriterTest {
         )!!
         val rc = TorRcWriter.render(
             settings = TorEngineSettings.DEFAULT.copy(
-                fragmentEnabled = false,
+                fragmentMode = TorEngineSettings.FRAGMENT_OFF,
                 exitCountryCode = "nl",
                 exitStrict = true,
             ),
@@ -157,7 +157,7 @@ class TorRcWriterTest {
             "webtunnel 192.0.2.11:443 AAAAABBBBBCCCCCDDDDDEEEEEFFFFF0000022222 url=https://b.example/y",
         )!!
         val rc = TorRcWriter.render(
-            settings = TorEngineSettings.DEFAULT.copy(fragmentEnabled = false),
+            settings = TorEngineSettings.DEFAULT.copy(fragmentMode = TorEngineSettings.FRAGMENT_OFF),
             dataDirectory = File("/tmp/tor-data"),
             webtunnelPlugin = plugin,
             bridges = listOf(first, second),
@@ -173,7 +173,7 @@ class TorRcWriterTest {
             "webtunnel [2001:db8:63b4:6bd7:a357:7858:898e:718c]:443 059AEB126918A33B8246E8136D565FF57753D5CF url=https://alwaysnewbie.eu.org/homesweethome ver=0.0.2",
         )!!
         val rc = TorRcWriter.render(
-            settings = TorEngineSettings.DEFAULT.copy(fragmentEnabled = false),
+            settings = TorEngineSettings.DEFAULT.copy(fragmentMode = TorEngineSettings.FRAGMENT_OFF),
             dataDirectory = File("/tmp/tor-data"),
             webtunnelPlugin = plugin,
             bridges = listOf(bridge),
@@ -191,7 +191,7 @@ class TorRcWriterTest {
             "webtunnel 192.0.2.10:443 url=https://cdn.example/secret",
         )!!
         val rc = TorRcWriter.render(
-            settings = TorEngineSettings.DEFAULT.copy(fragmentEnabled = false),
+            settings = TorEngineSettings.DEFAULT.copy(fragmentMode = TorEngineSettings.FRAGMENT_OFF),
             dataDirectory = File("/tmp/tor-data"),
             webtunnelPlugin = plugin,
             bridges = listOf(bridge),
@@ -208,7 +208,7 @@ class TorRcWriterTest {
             "webtunnel 192.0.2.10:443 url=https://cdn.example/secret",
         )!!
         val rc = TorRcWriter.render(
-            settings = TorEngineSettings.DEFAULT.copy(fragmentEnabled = false),
+            settings = TorEngineSettings.DEFAULT.copy(fragmentMode = TorEngineSettings.FRAGMENT_OFF),
             dataDirectory = File("/tmp/tor-data"),
             webtunnelPlugin = plugin,
             bridges = listOf(bridge),
@@ -505,7 +505,7 @@ class WebTunnelBridgeCatalogTest {
     }
 
     @Test
-    fun pastedBridgesDoNotPullBundledList() {
+    fun pastedBridgesComeFirstButBundledStays() {
         val bundled = listOf(
             WebTunnelBridgeParser.parseLine(
                 "webtunnel 192.0.2.10:443 AAAAABBBBBCCCCCDDDDDEEEEEFFFFF0000011111 url=https://a.example/x",
@@ -516,7 +516,7 @@ class WebTunnelBridgeCatalogTest {
             "",
             bundled,
         )
-        assertEquals(1, merged.size)
+        assertEquals(2, merged.size)
         assertEquals("192.0.2.99", merged[0].address)
     }
 }

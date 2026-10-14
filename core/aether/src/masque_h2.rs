@@ -33,11 +33,45 @@ const H2_STREAM_WINDOW: u32 = 8 * 1024 * 1024;
 const H2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 const H2_MAX_SEND_BUFFER: usize = 1024 * 1024;
 
+// Smaller windows when the app turns "large HTTP/2 windows" off (less memory).
+const H2_STREAM_WINDOW_SMALL: u32 = 1024 * 1024;
+const H2_CONNECTION_WINDOW_SMALL: u32 = 4 * 1024 * 1024;
+/// SO_SNDBUF / SO_RCVBUF asked for on the outer TCP socket when socket tuning is on.
+const H2_SOCKET_BUFFER: u32 = 1024 * 1024;
+
+fn env_flag(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => default,
+    }
+}
+
+/// `AETHER_MASQUE_H2_LARGE_WINDOWS` (default on): 16 MB connection / 8 MB stream.
+pub(crate) fn large_windows() -> bool {
+    env_flag("AETHER_MASQUE_H2_LARGE_WINDOWS", true)
+}
+
+/// `AETHER_MASQUE_H2_SOCKET_TUNING` (default on): TCP_NODELAY + 1 MB socket buffers.
+pub(crate) fn socket_tuning() -> bool {
+    env_flag("AETHER_MASQUE_H2_SOCKET_TUNING", true)
+}
+
+/// `AETHER_MASQUE_H2_SPEED_PICK` (default on): race the top saved clean
+/// addresses and keep the quickest instead of the first that answers.
+pub(crate) fn speed_pick() -> bool {
+    env_flag("AETHER_MASQUE_H2_SPEED_PICK", true)
+}
+
 fn h2_builder() -> h2::client::Builder {
+    let (stream, connection) = if large_windows() {
+        (H2_STREAM_WINDOW, H2_CONNECTION_WINDOW)
+    } else {
+        (H2_STREAM_WINDOW_SMALL, H2_CONNECTION_WINDOW_SMALL)
+    };
     let mut builder = h2::client::Builder::new();
     builder
-        .initial_window_size(H2_STREAM_WINDOW)
-        .initial_connection_window_size(H2_CONNECTION_WINDOW)
+        .initial_window_size(stream)
+        .initial_connection_window_size(connection)
         .max_send_buffer_size(H2_MAX_SEND_BUFFER);
     builder
 }
@@ -75,6 +109,12 @@ async fn connect_tcp(peer: SocketAddr) -> Result<TcpStream> {
     }
     .map_err(AetherError::Io)?;
     crate::platform::protect_socket(&socket).map_err(AetherError::Io)?;
+    if socket_tuning() {
+        // Best effort: the kernel may clamp these; failure is not fatal.
+        let _ = socket.set_send_buffer_size(H2_SOCKET_BUFFER);
+        let _ = socket.set_recv_buffer_size(H2_SOCKET_BUFFER);
+        let _ = socket.set_nodelay(true);
+    }
     // Bind unspecified so Android does not pick the VPN address (172.16.0.2)
     // as the source after the TUN interface is already up.
     let bind = if peer.is_ipv4() {
@@ -337,7 +377,7 @@ async fn connect_tls_once(
 ) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
     let tls_config = build_tls(cfg)?;
     let tcp = connect_tcp(cfg.peer).await?;
-    let _ = tcp.set_nodelay(true);
+    let _ = tcp.set_nodelay(socket_tuning());
     let stream = FragmentingStream::new(tcp, fragment);
     match tokio::time::timeout(
         Duration::from_secs(8),

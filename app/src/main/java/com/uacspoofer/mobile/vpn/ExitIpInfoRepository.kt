@@ -4,6 +4,7 @@ import android.content.Context
 import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.pow.PowCoreConfig
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.pow.PowLiveExit
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
@@ -63,8 +64,10 @@ class ExitIpInfoRepository private constructor(context: Context) {
     suspend fun refresh(profileId: String, force: Boolean = false) {
         refreshMutex.withLock {
             val engine = engineModeStore.snapshot()
+            val powWarpOnly = engine.isPow && PowLiveExit.warpOnly
             val exitCountry = when {
                 engine.isTor -> torEngineStore.snapshot().exitCountryCode
+                powWarpOnly -> ""
                 engine.isPow -> powEngineStore.snapshot().exitCountryCode
                 else -> ""
             }
@@ -73,6 +76,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
                 torEngine = engine.isTor,
                 exitCountryCode = exitCountry,
                 powEngine = engine.isPow,
+                powWarpOnly = powWarpOnly,
             )
             val now = System.currentTimeMillis()
             val memoryInfo = mutableState.value
@@ -99,7 +103,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
                     val port = if (settings.connectionMode == CONNECTION_MODE_PROXY) {
                         settings.socksPort
                     } else {
-                        PowCoreConfig.SOCKS_PORT
+                        PowLiveExit.tunSocksPort()
                     }
                     MciConfig.LOCAL_SOCKS_ADDRESS to port
                 }
@@ -111,6 +115,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
             val timeoutMs = if (engine.isTor || engine.isPow) TOR_LOOKUP_TIMEOUT_MS else LOOKUP_TIMEOUT_MS
             val via = when {
                 engine.isTor -> "Tor SOCKS"
+                powWarpOnly -> "UAC PoW WARP SOCKS"
                 engine.isPow -> "UAC PoW SOCKS"
                 else -> "Xray SOCKS"
             }
@@ -158,7 +163,6 @@ class ExitIpInfoRepository private constructor(context: Context) {
             throw fallbackError
         }
     }
-
     private fun fetchJson(url: String, proxy: Proxy, timeoutMs: Int): String {
         val connection = URL(url).openConnection(proxy) as HttpsURLConnection
         return try {
@@ -280,11 +284,13 @@ class ExitIpInfoRepository private constructor(context: Context) {
             torEngine: Boolean,
             exitCountryCode: String = "",
             powEngine: Boolean = false,
+            powWarpOnly: Boolean = false,
         ): String = when {
             torEngine -> {
                 val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
                 "$TOR_LOOKUP_ID:$country"
             }
+            powEngine && powWarpOnly -> "$POW_LOOKUP_ID:warp"
             powEngine -> {
                 val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
                 "$POW_LOOKUP_ID:$country"

@@ -43,8 +43,9 @@ internal object TorControlClient {
         controlSocket: File?,
         countryCode: String,
         strict: Boolean,
+        fastExit: Boolean = false,
     ): Boolean {
-        val commands = TorExitCountry.controlCommands(countryCode, strict)
+        val commands = TorExitCountry.controlCommands(countryCode, strict, fastExit)
         val configured = session(
             controlPort = controlPort,
             controlSocket = controlSocket,
@@ -65,7 +66,7 @@ internal object TorControlClient {
         } == true
         if (!configured) return false
         val confirmed = getConf(controlPort, controlSocket, "ExitNodes")
-        if (!TorExitCountry.exitNodesConfigured(confirmed.orEmpty(), countryCode)) {
+        if (!TorExitCountry.exitNodesConfigured(confirmed.orEmpty(), countryCode, fastExit)) {
             AppLogRepository.warning(
                 LogSource.TOR,
                 "ExitNodes did not stick GETCONF=${confirmed.orEmpty().take(120)} wanted={${countryCode.ifBlank { "auto" }}}",
@@ -124,6 +125,85 @@ internal object TorControlClient {
 
     private fun getConf(controlPort: Int, controlSocket: File?, keyword: String): String? =
         controlQuery(controlPort, controlSocket, "GETCONF $keyword")
+
+    /** Replace the bridge set in the running Tor (no restart). */
+    fun setBridges(controlPort: Int, controlSocket: File?, bridgeLines: List<String>): Boolean {
+        if (bridgeLines.isEmpty() || bridgeLines.any { it.contains('"') || it.contains('\n') }) return false
+        val command = buildString {
+            append("SETCONF UseBridges=1")
+            bridgeLines.forEach { append(" Bridge=\"").append(it).append('"') }
+        }
+        return session(
+            controlPort = controlPort,
+            controlSocket = controlSocket,
+            connectTimeoutMs = 1_500,
+            soTimeoutMs = 10_000,
+        ) { writer, reader ->
+            if (!authenticate(writer, reader)) return@session false
+            writer.write("$command\r\n".toByteArray())
+            writer.flush()
+            val body = readUntilComplete(reader).orEmpty()
+            if (isControlError(body)) {
+                AppLogRepository.warning(LogSource.TOR, "Tor SETCONF Bridge failed: ${body.take(180)}")
+                false
+            } else {
+                true
+            }
+        } == true
+    }
+
+    /** Generic SETCONF (e.g. `MiddleNodes=$A,$B` or `MiddleNodes=` to clear). */
+    fun setConf(controlPort: Int, controlSocket: File?, assignment: String): Boolean =
+        session(controlPort, controlSocket, connectTimeoutMs = 1_000, soTimeoutMs = 6_000) { writer, reader ->
+            if (!authenticate(writer, reader)) return@session false
+            writer.write("SETCONF $assignment\r\n".toByteArray())
+            writer.flush()
+            val body = readUntilComplete(reader).orEmpty()
+            if (isControlError(body)) AppLogRepository.warning(LogSource.TOR, "Tor SETCONF failed: ${body.take(160)}")
+            !isControlError(body)
+        } == true
+
+    /** Large GETINFO (ns/all) with a longer read timeout. */
+    fun bigInfo(controlPort: Int, controlSocket: File?, keyword: String): String? =
+        session(controlPort, controlSocket, connectTimeoutMs = 1_500, soTimeoutMs = 20_000) { writer, reader ->
+            if (!authenticate(writer, reader)) return@session null
+            writer.write("GETINFO $keyword\r\n".toByteArray())
+            writer.flush()
+            readUntilComplete(reader)
+        }
+
+    fun signal(controlPort: Int, controlSocket: File?, name: String): Boolean =
+        session(controlPort, controlSocket, connectTimeoutMs = 1_000, soTimeoutMs = 4_000) { writer, reader ->
+            if (!authenticate(writer, reader)) return@session false
+            writer.write("SIGNAL $name\r\n".toByteArray())
+            writer.flush()
+            !isControlError(readUntilComplete(reader).orEmpty())
+        } == true
+
+    fun info(controlPort: Int, controlSocket: File?, keyword: String): String? =
+        getInfo(controlPort, controlSocket, keyword)
+
+    /** Fingerprints of guards Tor reports `up` (entry-guards), upper-case, in order. */
+    internal fun parseUpGuardFingerprints(body: String): List<String> =
+        FINGERPRINT_STATUS.findAll(body)
+            .filter { it.groupValues[2].equals("up", ignoreCase = true) }
+            .map { it.groupValues[1].uppercase() }
+            .toList()
+
+    /** First-hop fingerprints of BUILT circuits from circuit-status. */
+    internal fun parseFirstHops(body: String): List<String> =
+        body.lineSequence().mapNotNull { raw ->
+            val parts = raw.trim().removePrefix("250+circuit-status=").removePrefix("250-circuit-status=")
+                .trim().split(Regex("\\s+"))
+            if (parts.size >= 3 && parts[1].equals("BUILT", ignoreCase = true)) {
+                parts[2].substringBefore(',').removePrefix("$").substringBefore('~').substringBefore('=')
+                    .uppercase().takeIf { it.length == 40 }
+            } else {
+                null
+            }
+        }.distinct().toList()
+
+    private val FINGERPRINT_STATUS = Regex("""\$([0-9A-Fa-f]{40})\S*\s+(\w+)""")
 
     private fun getInfo(controlPort: Int, controlSocket: File?, keyword: String): String? =
         controlQuery(controlPort, controlSocket, "GETINFO $keyword")
@@ -243,8 +323,13 @@ internal object TorControlClient {
         }.getOrNull()
     }
 
+    /** Set per Tor start; matches the HashedControlPassword in torrc. Empty = no auth. */
+    @Volatile var controlPassword: String = ""
+
     private fun authenticate(output: OutputStream, reader: BufferedReader): Boolean {
-        output.write("AUTHENTICATE\r\n".toByteArray())
+        val password = controlPassword
+        val command = if (password.isEmpty()) "AUTHENTICATE\r\n" else "AUTHENTICATE \"$password\"\r\n"
+        output.write(command.toByteArray())
         output.flush()
         return ok(reader)
     }

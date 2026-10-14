@@ -38,6 +38,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 class PowConnectionCoordinator(
@@ -76,6 +77,22 @@ class PowConnectionCoordinator(
         }
     }
 
+    private val ghostInner by lazy {
+        PowGhostInner(service) { sent, received ->
+            if (sent > 0) {
+                txBytes.addAndGet(sent)
+                txPackets.incrementAndGet()
+            }
+            if (received > 0) {
+                rxBytes.addAndGet(received)
+                rxPackets.incrementAndGet()
+            }
+        }
+    }
+    /** True while the relay points at the ghost Psiphon instead of tunnel 1. */
+    @Volatile private var ghostServing = false
+    private val ghostFinishing = AtomicBoolean(false)
+
     @Volatile private var tunFd: ParcelFileDescriptor? = null
     @Volatile private var ownsTun = false
     @Volatile private var proxyMode = false
@@ -84,6 +101,8 @@ class PowConnectionCoordinator(
     @Volatile private var outerCommitted = false
     @Volatile private var directPsiphon = false
     @Volatile private var warpOnly = false
+    /** User picked 'Psiphon only': no Aether/WARP leg at all, for connect and every retune. */
+    @Volatile private var psiphonOnly = false
     @Volatile private var innerReady = false
     @Volatile private var routing = false
     @Volatile private var activeTunnelProtocol = ""
@@ -182,6 +201,7 @@ class PowConnectionCoordinator(
         outerCommitted = false
         warpOnly = false
         directPsiphon = false
+        psiphonOnly = false
         sessionMtu = PowTunRelayConfig.DEFAULT_MTU
         activeTunnelProtocol = ""
         lastOuterProtocol = ""
@@ -194,6 +214,7 @@ class PowConnectionCoordinator(
         currentSettings = store.snapshot()
         proxyMode = settings.connectionMode == CONNECTION_MODE_PROXY
         socksPort = if (proxyMode) settings.socksPort else PowCoreConfig.SOCKS_PORT
+        PowLiveExit.reset()
         armRegionPhase()
         ladderIndex = rememberedLadderStart()
         ladderAttempts = 0
@@ -212,12 +233,23 @@ class PowConnectionCoordinator(
                 PowStatusStore.update(PowPhase.STARTING, 5, "Starting UAC PoW")
                 if (!proxyMode) {
                     PowTun2Socks.selectPrivateAddress()
-                    sessionMtu = PowTunRelayConfig.mtuForChain(settings.tunMtu, underlyingLinkMtu())
+                    val powMtu = store.snapshot().tunMtu
+                    sessionMtu = if (powMtu > 0) {
+                        PowTunRelayConfig.mtuForChain(powMtu, underlyingLinkMtu(), PowTunRelayConfig.MAX_CUSTOM_MTU)
+                    } else {
+                        PowTunRelayConfig.mtuForChain(settings.tunMtu, underlyingLinkMtu())
+                    }
                 }
-                AetherNative.attach(service)
-                val outer = raiseOuterLeg(
-                    scanMode = PowCoreConfig.normalizeScanMode(currentSettings.scanMode),
-                )
+                psiphonOnly = currentSettings.exitMode == PowEngineSettings.EXIT_PSIPHON
+                val outer = if (psiphonOnly) {
+                    AppLogRepository.info(LogSource.POW, "Exit: Psiphon only - WARP leg skipped")
+                    null
+                } else {
+                    AetherNative.attach(service)
+                    raiseOuterLeg(
+                        scanMode = PowCoreConfig.normalizeScanMode(currentSettings.scanMode),
+                    )
+                }
                 val chain = currentSettings.chainPsiphon
                 if (!chain && outer == null) {
                     error("WARP did not come up")
@@ -230,7 +262,7 @@ class PowConnectionCoordinator(
                 } else {
                 directPsiphon = outer == null
                 outerName = outer ?: "Psiphon"
-                if (directPsiphon) {
+                if (directPsiphon && !psiphonOnly) {
                     AppLogRepository.warning(
                         LogSource.POW,
                         "No WARP transport came up; Psiphon will connect on its own",
@@ -352,6 +384,8 @@ class PowConnectionCoordinator(
         unregisterNetworkCallback()
         ladderJob?.cancel()
         runCatching { sidecar.forceRelease() }
+        ghostServing = false
+        runCatching { ghostInner.forceRelease() }
         innerReady = false
         val client = psiphon
         val fd = if (ownsTun) tunFd else null
@@ -533,6 +567,7 @@ class PowConnectionCoordinator(
         val ready = when {
             proxyMode -> "UAC PoW ready · Proxy SOCKS 127.0.0.1:$socksPort"
             warpOnly -> "UAC PoW ready · Tunnel VPN through WARP"
+            directPsiphon -> "UAC PoW ready · Tunnel VPN through Psiphon"
             else -> "UAC PoW ready · Tunnel VPN through Psiphon over WARP"
         }
         PowStatusStore.update(PowPhase.CONNECTED, 100, ready, outerLabel = outer)
@@ -544,6 +579,7 @@ class PowConnectionCoordinator(
         setRetuning(true)
         PowSocksConnectOnly.setFailFast(true)
         AppLogRepository.info(LogSource.POW, "Inner-only rebuild ($reason)")
+        dropGhost("inner rebuild")
         innerReady = false
         return try {
             innerCallbacksArmed.set(false)
@@ -702,7 +738,7 @@ class PowConnectionCoordinator(
             AppLogRepository.info(
                 LogSource.POW,
                 "Firewall $firewall · ${plan.summary} · key ${currentSettings.keyFetch} · " +
-                    if (currentSettings.chainPsiphon) "Psiphon chain" else "WARP only",
+                    when (currentSettings.exitMode) { PowEngineSettings.EXIT_WARP -> "WARP only"; PowEngineSettings.EXIT_PSIPHON -> "Psiphon only"; else -> "Psiphon chain" },
             )
         }
         for ((offset, protocol) in ordered.withIndex()) {
@@ -807,6 +843,19 @@ class PowConnectionCoordinator(
 
     private fun rememberConnectedMode() {
         val protocol = if (directPsiphon || lastOuterProtocol.isBlank()) "psiphon" else lastOuterProtocol
+        PowLiveExit.updatePath {
+            it.copy(
+                mode = when {
+                    warpOnly -> PowEngineSettings.EXIT_WARP
+                    psiphonOnly -> PowEngineSettings.EXIT_PSIPHON
+                    directPsiphon -> "direct"
+                    else -> PowEngineSettings.EXIT_CHAIN
+                },
+                mtu = sessionMtu,
+                outerProtocol = if (directPsiphon) "" else lastOuterProtocol,
+                outerTransport = if (directPsiphon) "" else wonTransport,
+            )
+        }
         store.saveLastConnect(
             protocol = protocol,
             transport = if (protocol == "masque") wonTransport else "",
@@ -889,6 +938,7 @@ class PowConnectionCoordinator(
             routing = true
             socksPort = warpSocks
         }
+        PowLiveExit.publish(socksPort, warp = true)
     }
 
     private suspend fun startPsiphonTunnel(keepExit: Boolean = false, socks: Int = socksPort) {
@@ -1011,8 +1061,9 @@ class PowConnectionCoordinator(
         PowDnsWarm.kick(
             qualityScope,
             appContext,
-            socksPort,
+            if (warpOnly) PowCoreConfig.CHAIN_SOCKS_PORT else socksPort,
             optimized = currentSettings.optimizedMode,
+            exitLabel = if (warpOnly) "WARP" else "Psiphon",
             powerSave = isPowerSave(),
             force = force,
         )
@@ -1127,6 +1178,7 @@ class PowConnectionCoordinator(
         cancelQualityWork()
         PowPageTurbo.cancel()
         PowDnsWarm.cancel()
+        PowLiveExit.reset()
         runCatching { PowDnsWarm.persist(appContext) }
         unregisterNetworkCallback()
         ghostInFlight.set(false)
@@ -1141,6 +1193,8 @@ class PowConnectionCoordinator(
         PowSocksConnectOnly.setFailFast(false)
         withContext(Dispatchers.IO + NonCancellable) {
             runCatching { sidecar.stop() }
+            ghostServing = false
+            runCatching { ghostInner.release("session stopped") }
             val client = psiphon
             if (innerStarted || client != null) {
                 runCatching { client?.stop() }
@@ -1208,6 +1262,7 @@ class PowConnectionCoordinator(
             innerReady = true
             connectedSignal?.complete(Unit)
             retuneSignal?.complete(Unit)
+            if (ghostServing) qualityScope.launch { finishGhost() }
             AppLogRepository.success(
                 LogSource.POW,
                 if (directPsiphon) "Psiphon connected" else "Psiphon connected through WARP",
@@ -1230,7 +1285,8 @@ class PowConnectionCoordinator(
         override fun onListeningSocksProxyPort(port: Int) {
             if (psiphonGeneration.get() != sessionGeneration.get()) return
             socksPort = port
-            PowSocksConnectOnly.setUpstreamPort(port)
+            // While the ghost carries traffic, tunnel 1 must not take the relay back before it connects.
+            if (!ghostServing) PowSocksConnectOnly.setUpstreamPort(port)
             AppLogRepository.info(LogSource.POW, "Psiphon SOCKS listening on $port")
         }
 
@@ -1240,6 +1296,7 @@ class PowConnectionCoordinator(
                 runCatching {
                     activeTunnelProtocol = JSONObject(text.substringAfter("ActiveTunnel:").trim())
                         .optString("protocol")
+                    PowLiveExit.updatePath { it.copy(psiphonProtocol = activeTunnelProtocol) }
                 }
             }
             AppLogRepository.info(LogSource.POW, text.take(300))
@@ -1609,6 +1666,7 @@ class PowConnectionCoordinator(
     private fun setRetuning(active: Boolean) {
         retuning.set(active)
         PowUiProbeGate.setRetuning(active)
+        PowLiveExit.updatePath { it.copy(retuning = active) }
     }
 
     private suspend fun watchQuality() {
@@ -1684,6 +1742,16 @@ class PowConnectionCoordinator(
         try {
             if (stopRequested.get() || qualityRetunes.get() >= PowQualityPolicy.MAX_QUALITY_RETUNES) return
             qualityRetunes.incrementAndGet()
+            // Make-before-break: a second Psiphon comes up beside the live one. If it
+            // fails, the live tunnel is kept as is and the ladder is not restarted.
+            if (ghostEligible() && ghostInFlight.compareAndSet(false, true)) {
+                try {
+                    ghostInnerHandover(reason)
+                    return
+                } finally {
+                    ghostInFlight.set(false)
+                }
+            }
             // Level C: try ghost handover first for zero-downtime, fallback to hard retune.
             if (!proxyMode && PowTun2Socks.isRunning && ghostInFlight.compareAndSet(false, true)) {
                 try {
@@ -1697,6 +1765,100 @@ class PowConnectionCoordinator(
         } finally {
             retuneMutex.unlock()
         }
+    }
+
+    private fun ghostEligible(): Boolean =
+        currentSettings.ghostHandover &&
+            !currentSettings.psiphonTunnelPool &&
+            !proxyMode && !warpOnly && !stopRequested.get() &&
+            PowTun2Socks.isRunning && innerReady &&
+            lastPsiphonConfig.isNotBlank() &&
+            isScreenOn()
+
+    /** Returns true when traffic moved to a new tunnel; false keeps the old one untouched. */
+    private suspend fun ghostInnerHandover(reason: String): Boolean {
+        AppLogRepository.info(LogSource.POW, "Ghost handover ($reason)")
+        setRetuning(true)
+        try {
+            val port = ghostInner.warm(lastPsiphonConfig, PowQualityPolicy.GHOST_HANDOVER_TIMEOUT_MS)
+            if (port <= 0 || stopRequested.get()) {
+                if (port > 0) ghostInner.release("session stopping")
+                AppLogRepository.warning(LogSource.POW, "Ghost handover failed; keeping the current tunnel")
+                return false
+            }
+            val ghostMs = PowPathProbe.measureMsLite(port)
+            if (ghostMs <= 0L) {
+                ghostInner.release("probe failed")
+                AppLogRepository.warning(LogSource.POW, "Ghost tunnel did not answer a probe; keeping the current tunnel")
+                return false
+            }
+            ghostServing = true
+            PowSocksConnectOnly.setUpstreamPort(port)
+            AppLogRepository.success(LogSource.POW, "Ghost handover: traffic moved to the new tunnel (${ghostMs}ms)")
+            // Rebuild tunnel 1 while the ghost serves; when it connects, onConnected flips back.
+            innerReady = false
+            innerCallbacksArmed.set(false)
+            innerStarted = false
+            withContext(Dispatchers.IO) { runCatching { innerClient().stop() } }
+            if (stopRequested.get()) return true
+            delay(400)
+            ladderActive.set(false)
+            ladderJob?.cancel()
+            val keepExit = PowRegions.egressRegion(currentSettings.exitCountryCode) != null
+            val connected = CompletableDeferred<Unit>()
+            retuneSignal = connected
+            innerCallbacksArmed.set(true)
+            startPsiphonTunnel(keepExit = keepExit)
+            val back = withTimeoutOrNull(PowQualityPolicy.INNER_RETUNE_TIMEOUT_MS) { connected.await(); true } ?: false
+            if (back) {
+                finishGhost()
+            } else {
+                // No ladder restart: the ghost keeps serving and tunnel 1 keeps trying;
+                // its onConnected hands traffic back later.
+                AppLogRepository.warning(LogSource.POW, "Tunnel 1 not back yet; the ghost tunnel keeps serving")
+            }
+            lastRetuneAt = SystemClock.elapsedRealtime()
+            return true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            AppLogRepository.warning(LogSource.POW, "Ghost handover error: ${error.message}")
+            return false
+        } finally {
+            retuneSignal = null
+            setRetuning(false)
+        }
+    }
+
+    /** Tunnel 1 is connected again: move the relay back and stop the ghost. */
+    private suspend fun finishGhost() {
+        if (!ghostServing || !ghostFinishing.compareAndSet(false, true)) return
+        try {
+            PowSocksConnectOnly.setUpstreamPort(socksPort)
+            ghostServing = false
+            val sample = PowPathProbe.measureMsLite(socksPort)
+            if (sample > 0L) {
+                baselineRttMs = sample
+                recordStrategyRtt(sample)
+            }
+            AppLogRepository.success(
+                LogSource.POW,
+                "Ghost handover done; tunnel 1 serves again" + if (sample > 0L) " ${sample}ms" else "",
+            )
+            // Give streams opened on the ghost a moment before it goes.
+            delay(GHOST_DRAIN_MS)
+            if (!ghostServing) ghostInner.release("handover finished")
+        } finally {
+            ghostFinishing.set(false)
+        }
+    }
+
+    /** Any other rebuild owns tunnel 1 again: drop the ghost and point the relay at tunnel 1. */
+    private suspend fun dropGhost(reason: String) {
+        if (!ghostServing && !ghostInner.active) return
+        ghostServing = false
+        PowSocksConnectOnly.setUpstreamPort(socksPort)
+        ghostInner.release(reason)
     }
 
     private suspend fun tryGhostHandover(reason: String): Boolean {
@@ -1721,6 +1883,9 @@ class PowConnectionCoordinator(
     private suspend fun retuneLocked(reason: String, quality: Boolean): Boolean {
         if (stopRequested.get()) return false
         if (!proxyMode && !PowTun2Socks.isRunning) return false
+        // Psiphon only: there is no WARP hop to refresh; rebuild Psiphon alone.
+        if (psiphonOnly) return retuneInnerOnly("psiphon-only:$reason")
+        dropGhost("full retune")
         val optimized = currentSettings.optimizedMode
         setRetuning(true)
         PowSocksConnectOnly.setFailFast(true)
@@ -1848,5 +2013,6 @@ class PowConnectionCoordinator(
         private const val OUTER_STOP_GRACE_MS = 4_000L
         private const val FORCE_NATIVE_EXIT_MS = 2_000L
         private const val INNER_CONNECT_TIMEOUT_MS = 8 * 60_000L
+        private const val GHOST_DRAIN_MS = 3_000L
     }
 }

@@ -8,6 +8,16 @@ data class WebTunnelBridge(
 ) {
     val endpoint: String get() = "$address:$port"
 
+    /** 40-hex relay fingerprint from the bridge line, upper-case, or "" when absent. */
+    val fingerprint: String
+        get() = raw.split(Regex("\\s+")).drop(2)
+            .firstOrNull { it.length == 40 && it.all { c -> c.isDigit() || c.lowercaseChar() in 'a'..'f' } }
+            ?.uppercase()
+            .orEmpty()
+
+    /** Short label for logs / UI: the url host (bridge IPs are placeholders). */
+    val label: String get() = runCatching { java.net.URI(url).host }.getOrNull() ?: endpoint
+
     fun torrcLine(): String =
         "Bridge ${WebTunnelBridgeParser.ipv4PlaceholderLine(raw.removePrefix("Bridge ").trim())}"
 }

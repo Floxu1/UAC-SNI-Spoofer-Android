@@ -79,9 +79,7 @@ internal object HomeGuide {
         torMode: Boolean,
         drawerOpen: Boolean,
     ): HomeGuideStep? {
-        if (drawerOpen) return null
-        if (torMode && !countrySeen) return HomeGuideStep.Country
-        if (!engineSeen) return HomeGuideStep.Engine
+        // 2.0.8: coach-mark bubbles removed for every engine.
         return null
     }
 }

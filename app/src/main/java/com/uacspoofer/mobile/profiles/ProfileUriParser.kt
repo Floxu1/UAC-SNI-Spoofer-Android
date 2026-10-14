@@ -5,34 +5,140 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import com.uacspoofer.mobile.logging.AppLogRepository
+import com.uacspoofer.mobile.logging.LogSource
 import org.json.JSONObject
+
+/** Link parameters beyond the classic transport fields (ECH, per-link TLS tuning, REALITY). */
+internal data class LinkExtras(
+    val ech: String = "",
+    val cipherSuites: String = "",
+    val finalmask: String = "",
+    val realityPublicKey: String = "",
+    val realityShortId: String = "",
+    val realitySpiderX: String = "",
+)
 
 object ProfileUriParser {
     private val recognizedKeys = setOf(
         "type", "network", "security", "sni", "servername", "host", "path", "alpn", "fp", "fingerprint",
         "flow", "encryption", "servicename", "authority", "headertype", "mode", "extra", "packetencoding",
         "allowinsecure", "insecure", "country", "countrycode", "cc", "location",
-        // Accepted and then dropped: the engine picks these itself, see [ENGINE_OWNED_KEYS].
-        "cs", "ciphersuites", "cipher", "fm", "fragment", "spx",
+        "ech", "echcl", "echconfiglist", "cs", "ciphersuites", "cipher", "fm", "finalmask",
+        "pbk", "publickey", "sid", "shortid", "spx", "spiderx",
+        // Accepted and dropped: fragmentation is chosen per operator by the adaptive tester.
+        "fragment", "fragment2",
     )
 
-    /**
-     * Keys some subscriptions carry that this engine decides on its own.
-     *
-     * `cs`/`fm` describe a fixed cipher list and a fixed fragment layout. Both are overridden
-     * downstream anyway: the uTLS fingerprint dictates the cipher order, and fragmentation is
-     * chosen per operator by the adaptive tester. Rejecting the URI over them would lose an
-     * otherwise valid config, so they are parsed, ignored, and reported once.
-     */
-    private val ENGINE_OWNED_KEYS = setOf("cs", "ciphersuites", "cipher", "fm", "fragment", "spx")
+    private val REALITY_KEY = Regex("^[A-Za-z0-9_-]{43}=?$")
+    private val REALITY_SHORT_ID = Regex("^[0-9a-fA-F]{0,16}$")
 
-    /** uTLS profiles Xray-core accepts. Anything else, `unsafe` included, falls back to Chrome. */
+    /**
+     * Unknown keys (e.g. `Telegram=@channel` junk) are logged and ignored instead of rejecting
+     * an otherwise valid link.
+     */
+    private fun reportUnknownKeys(keys: Set<String>) {
+        val unknown = keys - recognizedKeys
+        if (unknown.isEmpty()) return
+        runCatching {
+            AppLogRepository.info(LogSource.APP, "Profile link: ignored unknown parameters ${unknown.joinToString()}")
+        }
+    }
+
+    internal fun extractExtras(query: Map<String, String>, security: String): LinkExtras {
+        // URLDecoder turns a literal '+' into a space; neither ECH values nor cipher lists contain spaces.
+        val ech = (query["ech"] ?: query["echcl"] ?: query["echconfiglist"]).orEmpty().trim().replace(' ', '+')
+        val cipherSuites = (query["cs"] ?: query["ciphersuites"] ?: query["cipher"]).orEmpty().trim()
+            .replace(' ', ':').replace(',', ':')
+        val finalmask = normalizeFinalmask((query["fm"] ?: query["finalmask"]).orEmpty())
+        if (security != "reality") {
+            return LinkExtras(ech = ech, cipherSuites = cipherSuites, finalmask = finalmask)
+        }
+        val publicKey = (query["pbk"] ?: query["publickey"]).orEmpty().trim()
+        require(REALITY_KEY.matches(publicKey)) { "REALITY needs a valid pbk public key (TLS/none links need no key)" }
+        val shortId = (query["sid"] ?: query["shortid"]).orEmpty().trim()
+        require(REALITY_SHORT_ID.matches(shortId) && shortId.length % 2 == 0) { "REALITY sid must be even-length hex up to 16 chars" }
+        return LinkExtras(
+            ech = "",
+            cipherSuites = "",
+            finalmask = finalmask,
+            realityPublicKey = publicKey,
+            realityShortId = shortId.lowercase(),
+            realitySpiderX = (query["spx"] ?: query["spiderx"]).orEmpty().trim(),
+        )
+    }
+
+    /** `fm` is a finalmask JSON object; invalid or empty values are dropped, not fatal. */
+    internal fun normalizeFinalmask(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        val compact = compactJsonObject(trimmed)
+        if (compact == null) {
+            runCatching { AppLogRepository.info(LogSource.APP, "Profile link: ignored invalid fm JSON") }
+            return ""
+        }
+        return if (compact == "{}") "" else compact
+    }
+
+    /**
+     * Strips whitespace outside strings and checks bracket balance. Kept free of org.json so it
+     * behaves identically in JVM unit tests; Xray does the full schema validation.
+     */
+    private fun compactJsonObject(raw: String): String? {
+        if (!raw.startsWith("{") || !raw.endsWith("}")) return null
+        val out = StringBuilder(raw.length)
+        val stack = ArrayDeque<Char>()
+        var inString = false
+        var escaped = false
+        for (ch in raw) {
+            if (inString) {
+                out.append(ch)
+                when {
+                    escaped -> escaped = false
+                    ch == '\\' -> escaped = true
+                    ch == '"' -> inString = false
+                }
+                continue
+            }
+            when (ch) {
+                ' ', '\t', '\r', '\n' -> continue
+                '"' -> inString = true
+                '{', '[' -> stack.addLast(ch)
+                '}' -> if (stack.removeLastOrNull() != '{') return null
+                ']' -> if (stack.removeLastOrNull() != '[') return null
+            }
+            out.append(ch)
+        }
+        if (inString || stack.isNotEmpty()) return null
+        return out.toString()
+    }
+
+    internal fun lenientMode(raw: String): String =
+        runCatching { ProfileNetworks.normalizeMode(raw) }.getOrDefault("")
+
+    internal fun lenientPacketEncoding(raw: String): String =
+        runCatching { ProfileNetworks.normalizePacketEncoding(raw) }.getOrDefault("")
+
+    /** Xray dropped the HTTP/2 transport; silently rewriting it to another transport cannot work. */
+    internal fun rejectRemovedTransport(raw: String?) {
+        val value = raw.orEmpty().trim().lowercase()
+        require(value != "h2" && value != "http") {
+            "HTTP/2 transport (type=$value) was removed from Xray-core; use an xhttp or ws link"
+        }
+    }
+    /**
+     * uTLS profiles Xray-core accepts. Anything else falls back to Chrome; `unsafe` (Go TLS) is kept
+     * only when the link pins its own cipher list or finalmask, which is what it exists for.
+     */
     private val KNOWN_FINGERPRINTS = setOf(
         "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized",
     )
 
-    private fun normalizeFingerprint(raw: String): String =
-        raw.trim().lowercase().takeIf { it in KNOWN_FINGERPRINTS } ?: "chrome"
+    internal fun normalizeFingerprint(raw: String, keepUnsafe: Boolean = false): String {
+        val value = raw.trim().lowercase()
+        if (keepUnsafe && value == "unsafe") return value
+        return value.takeIf { it in KNOWN_FINGERPRINTS } ?: "chrome"
+    }
 
     /**
      * Plain configs are accepted alongside TLS ones. `reality` and `xtls` stay rejected because
@@ -42,8 +148,9 @@ object ProfileUriParser {
         val security = raw.orEmpty().trim().lowercase().ifBlank { "tls" }
         return when (security) {
             "tls" -> "tls"
+            "reality" -> "reality"
             "none", "" -> "none"
-            else -> throw IllegalArgumentException("Unsupported security '$security'; use TLS or none")
+            else -> throw IllegalArgumentException("Unsupported security '$security'; use TLS, REALITY or none")
         }
     }
 
@@ -56,12 +163,12 @@ object ProfileUriParser {
         val headerType = raw.orEmpty().trim().lowercase()
         if (ProfileNetworks.isXhttp(network)) return headerType
         return when (headerType) {
-            "", "none" -> ""
             "http" -> {
                 require(network == "tcp") { "http header obfuscation needs type=tcp, not $network" }
                 "http"
             }
-            else -> throw IllegalArgumentException("Unsupported TCP header type: $headerType")
+            // `none` is plain TCP; other header types are meaningless here and ignored.
+            else -> ""
         }
     }
 
@@ -90,17 +197,17 @@ object ProfileUriParser {
         val sourceServerPort = if (uri.port == -1) 443 else uri.port
         require(sourceServerPort in 1..65535) { "Server port is invalid" }
         val query = parseQuery(uri.rawQuery)
-        val unknown = query.keys - recognizedKeys
-        require(unknown.isEmpty()) { "Unsupported parameter: ${unknown.first()}" }
+        reportUnknownKeys(query.keys)
 
+        rejectRemovedTransport(query["type"] ?: query["network"])
         val network = ProfileNetworks.requireSupported(query["type"] ?: query["network"] ?: "ws")
         val security = normalizeSecurity(query["security"])
         val headerType = normalizeHeaderType(query["headertype"], network)
+        val extras = extractExtras(query, security)
 
-        val encryption = query["encryption"].orEmpty().ifBlank { "none" }
-        if (protocol == ProxyProtocol.VLESS) {
-            require(encryption.equals("none", ignoreCase = true)) { "Only VLESS encryption=none is supported" }
-        }
+        // VLESS `none` is the norm; other values (post-quantum encryption) are stored verbatim.
+        val encryption = query["encryption"].orEmpty().trim().ifBlank { "none" }
+            .let { if (it.equals("none", ignoreCase = true)) "none" else it }
         val flow = query["flow"].orEmpty()
         val sni = query["sni"].orEmpty()
             .ifBlank { query["servername"].orEmpty() }
@@ -111,12 +218,13 @@ object ProfileUriParser {
         val alpn = TlsAlpnResolver.canonicalString(query["alpn"].orEmpty(), network)
         val fingerprint = normalizeFingerprint(
             query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() },
+            keepUnsafe = extras.cipherSuites.isNotBlank() || extras.finalmask.isNotBlank(),
         )
         val allowInsecure = parseBoolean(query["allowinsecure"] ?: query["insecure"])
         val serviceName = query["servicename"].orEmpty()
         val authority = query["authority"].orEmpty()
         val xhttpMode = if (ProfileNetworks.isXhttp(network)) {
-            ProfileNetworks.normalizeMode(query["mode"].orEmpty())
+            lenientMode(query["mode"].orEmpty())
                 .ifBlank { ProfileNetworks.optionalMode(headerType) }
         } else {
             ""
@@ -126,7 +234,7 @@ object ProfileUriParser {
         } else {
             ""
         }
-        val packetEncoding = ProfileNetworks.normalizePacketEncoding(query["packetencoding"].orEmpty())
+        val packetEncoding = lenientPacketEncoding(query["packetencoding"].orEmpty())
         val country = CountryMetadata.resolve(
             code = query["countrycode"] ?: query["cc"],
             name = query["country"] ?: query["location"],
@@ -162,6 +270,12 @@ object ProfileUriParser {
             xhttpExtra = xhttpExtra,
             packetEncoding = packetEncoding,
             headerType = headerType,
+            ech = extras.ech,
+            cipherSuites = extras.cipherSuites,
+            finalmask = extras.finalmask,
+            realityPublicKey = extras.realityPublicKey,
+            realityShortId = extras.realityShortId,
+            realitySpiderX = extras.realitySpiderX,
             country = country,
             rawUri = text,
         )
@@ -240,6 +354,12 @@ object ProfileUriParser {
         if (profile.xhttpExtra.isNotBlank()) query["extra"] = profile.xhttpExtra
         if (profile.packetEncoding.isNotBlank()) query["packetEncoding"] = profile.packetEncoding
         if (profile.headerType.isNotBlank()) query["headerType"] = profile.headerType
+        if (profile.ech.isNotBlank()) query["ech"] = profile.ech
+        if (profile.cipherSuites.isNotBlank()) query["cs"] = profile.cipherSuites
+        if (profile.finalmask.isNotBlank()) query["fm"] = profile.finalmask
+        if (profile.realityPublicKey.isNotBlank()) query["pbk"] = profile.realityPublicKey
+        if (profile.realityShortId.isNotBlank()) query["sid"] = profile.realityShortId
+        if (profile.realitySpiderX.isNotBlank()) query["spx"] = profile.realitySpiderX
         profile.country.countryCode?.let { query["countryCode"] = it }
         if (profile.country.isKnown) query["country"] = profile.country.countryName
         val encodedQuery = query.entries.joinToString("&") { (key, value) -> "$key=${encode(value)}" }
@@ -253,8 +373,10 @@ object ProfileUriParser {
         raw.split('&').filter { it.isNotBlank() }.forEach { part ->
             val split = part.split('=', limit = 2)
             val key = decode(split[0]).trim().lowercase()
-            require(key !in result) { "Duplicate parameter: $key" }
-            result[key] = decode(split.getOrElse(1) { "" })
+            if (key.isBlank()) return@forEach
+            val value = decode(split.getOrElse(1) { "" })
+            // Duplicates: the first non-blank value wins.
+            if (result[key].isNullOrBlank()) result[key] = value
         }
         return result
     }
@@ -270,6 +392,7 @@ object ProfileUriParser {
         require(sourceHost.isNotBlank()) { "VMess server host is missing" }
         val sourcePort = json.optString("port", "443").toIntOrNull() ?: json.optInt("port", 443)
         require(sourcePort in 1..65_535) { "VMess server port is invalid" }
+        rejectRemovedTransport(json.optString("net"))
         val network = ProfileNetworks.requireSupported(json.optString("net", "ws"), "VMess transport")
         val security = normalizeSecurity(json.optString("tls"))
         val sni = json.optString("sni").ifBlank { json.optString("host") }.ifBlank { sourceHost }
@@ -289,7 +412,7 @@ object ProfileUriParser {
         } else {
             ""
         }
-        val packetEncoding = ProfileNetworks.normalizePacketEncoding(json.optString("packetEncoding"))
+        val packetEncoding = lenientPacketEncoding(json.optString("packetEncoding"))
         val country = CountryMetadata.resolve(json.optString("countryCode"), json.optString("country"))
         val name = nameOverride?.trim().orEmpty().ifBlank {
             json.optString("ps").trim().ifBlank { "VMESS • $sourceHost" }
@@ -341,7 +464,7 @@ object ProfileUriParser {
         val network = when (sourceNetwork) {
             "ws", "tcp", "httpupgrade", "grpc", "xhttp" -> sourceNetwork
             "splithttp" -> "xhttp"
-            "h2", "http" -> "httpupgrade"
+            "h2", "http" -> { rejectRemovedTransport(sourceNetwork); sourceNetwork }
             "raw", "none" -> "tcp"
             else -> if (query["host"].orEmpty().isNotBlank() || query["path"].orEmpty().isNotBlank()) "ws" else "tcp"
         }
@@ -391,7 +514,7 @@ object ProfileUriParser {
         val network = when (sourceNetwork) {
             "ws", "tcp", "httpupgrade", "grpc", "xhttp" -> sourceNetwork
             "splithttp" -> "xhttp"
-            "h2", "http" -> "httpupgrade"
+            "h2", "http" -> { rejectRemovedTransport(sourceNetwork); sourceNetwork }
             "raw", "none" -> "tcp"
             else -> if (json.optString("host").isNotBlank() || json.optString("path").isNotBlank()) "ws" else "tcp"
         }
@@ -422,8 +545,7 @@ object ProfileUriParser {
         if (raw.isNullOrBlank()) return false
         return when (raw.trim().lowercase()) {
             "1", "true", "yes", "on" -> true
-            "0", "false", "no", "off" -> false
-            else -> throw IllegalArgumentException("Invalid allowInsecure value")
+            else -> false
         }
     }
 

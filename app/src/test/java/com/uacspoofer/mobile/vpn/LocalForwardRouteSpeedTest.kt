@@ -13,16 +13,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalForwardRouteSpeedTest {
+    /** The former built-in 2 shape: a link that only points at the on-device forwarder. */
+    private val LOCAL_FORWARD_FIXTURE = ProxyProfile(
+        id = "test:local-forward",
+        name = "local forward",
+        protocol = ProxyProtocol.TROJAN,
+        credential = "humanity",
+        serverHost = "127.0.0.1",
+        serverPort = 40443,
+        network = "ws",
+        security = "tls",
+        sni = "api-ir.behroozuac.dpdns.org",
+        host = "api-ir.behroozuac.dpdns.org",
+        path = "/assignment",
+        alpn = "http/1.1",
+        fingerprint = "chrome",
+        rawUri = "trojan://humanity@127.0.0.1:40443?type=ws&security=tls&sni=api-ir.behroozuac.dpdns.org&host=api-ir.behroozuac.dpdns.org&path=%2Fassignment&alpn=http%2F1.1&fp=chrome#humanity-user",
+        isBuiltIn = true,
+    )
     @Test
     fun builtInTwoIsLocalForwardProfile() {
-        assertTrue(LocalForwardProfile.isLocalForward(ProxyProfile.UAC_SNI_BUILT_IN_2))
-        assertFalse(LocalForwardProfile.isLocalForward(ProxyProfile.UAC_SNI_BUILT_IN))
+        assertTrue(LocalForwardProfile.isLocalForward(LOCAL_FORWARD_FIXTURE))
+        assertFalse(LocalForwardProfile.isLocalForward(ProxyProfile.ADVANCED_SETTINGS_TEMPLATE))
     }
 
     @Test
     fun builtInTwoIdentityComesFromRawUriDespiteLoopbackEndpoint() {
         val identity = LocalForwardProfile.routingIdentity(
-            ProxyProfile.UAC_SNI_BUILT_IN_2,
+            LOCAL_FORWARD_FIXTURE,
             AdvancedSettingsData.DEFAULT,
         )
         assertEquals(ProxyProtocol.TROJAN, identity.protocol)
@@ -34,8 +52,8 @@ class LocalForwardRouteSpeedTest {
 
     @Test
     fun directCompatParserRejectsLoopbackButKeepsIdentity() {
-        assertNull(DirectCompatProfileParser.parse(ProxyProfile.UAC_SNI_BUILT_IN_2))
-        val identity = DirectCompatProfileParser.parseIdentity(ProxyProfile.UAC_SNI_BUILT_IN_2)
+        assertNull(DirectCompatProfileParser.parse(LOCAL_FORWARD_FIXTURE))
+        val identity = DirectCompatProfileParser.parseIdentity(LOCAL_FORWARD_FIXTURE)
         assertNotNull(identity)
         assertEquals("api-ir.behroozuac.dpdns.org", identity!!.sni)
     }
@@ -43,7 +61,7 @@ class LocalForwardRouteSpeedTest {
     @Test
     fun builtInTwoUsesRoutingPortForCloudflareSuitability() {
         val identity = LocalForwardProfile.routingIdentity(
-            ProxyProfile.UAC_SNI_BUILT_IN_2,
+            LOCAL_FORWARD_FIXTURE,
             AdvancedSettingsData.DEFAULT,
         )
         val decision = evaluateCloudflareSuitability(

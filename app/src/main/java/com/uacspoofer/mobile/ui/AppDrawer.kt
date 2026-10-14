@@ -30,6 +30,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
@@ -126,11 +134,14 @@ private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
     }
     add(DrawerItem(DrawerDestination.LIVE_LOGS, "Logs", Icons.AutoMirrored.Outlined.ListAlt))
     add(DrawerItem(DrawerDestination.APP_BYPASS, "App Bypass", Icons.Outlined.Block))
-    add(DrawerItem(DrawerDestination.SETTINGS, "Settings", Icons.Outlined.Settings))
-    add(DrawerItem(DrawerDestination.SUPPORT, "Support", Icons.Outlined.SupportAgent))
-    if (mode.isPow) {
-        add(DrawerItem(DrawerDestination.POW_SETTINGS, "PoW settings", Icons.Outlined.Tune))
+    add(DrawerItem(DrawerDestination.SETTINGS, "General settings", Icons.Outlined.Settings))
+    when {
+        mode.isPow -> add(DrawerItem(DrawerDestination.POW_SETTINGS, "PoW settings", Icons.Outlined.Tune))
+        mode.isTor -> add(DrawerItem(DrawerDestination.TOR_SETTINGS, "Tor settings", Icons.Outlined.Tune))
+        else -> add(DrawerItem(DrawerDestination.ADVANCED_SETTINGS, "Xray settings", Icons.Outlined.Tune))
     }
+    // Support is always the last item, for every engine.
+    add(DrawerItem(DrawerDestination.SUPPORT, "Support", Icons.Outlined.SupportAgent))
 }
 
 @Composable
@@ -240,15 +251,25 @@ internal fun AppDrawer(
         ) {
             val compact = maxHeight < 720.dp
 
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(
+                        WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical),
+                    ),
+            ) {
+            val viewportHeight = maxHeight
+            // Fills the panel when there is room (bottom block sits at the bottom, no gap under it),
+            // and scrolls when the screen is too short.
             Column(
                 modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(
-                    WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical),
-                )
-                .padding(horizontal = 17.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(min = viewportHeight)
+                    .padding(horizontal = 17.dp),
+                verticalArrangement = Arrangement.SpaceBetween,
             ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 DrawerHeader(compact = compact, engineMode = engineMode)
             HorizontalDivider(color = DrawerDivider, thickness = 1.dp)
             Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
@@ -286,7 +307,9 @@ internal fun AppDrawer(
                 }
             }
 
-            Spacer(Modifier.weight(1f))
+            }
+            Column {
+            Spacer(Modifier.height(if (compact) 8.dp else 14.dp))
             DrawerSupportCard(
                 compact = compact,
                 enabled = drawerOpen,
@@ -306,6 +329,8 @@ internal fun AppDrawer(
                 upFocus = githubFocus,
             )
             Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
+            }
+            }
             }
         }
     }
@@ -423,10 +448,10 @@ private fun DrawerNavItem(
                         DrawerDestination.ROUTE_SPEED_TEST -> "تست سرعت مسیر"
                         DrawerDestination.LIVE_LOGS -> "لاگ‌ها"
                         DrawerDestination.APP_BYPASS -> "عبور انتخابی برنامه‌ها"
-                        DrawerDestination.SETTINGS -> "تنظیمات"
-                        DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات پیشرفته"
+                        DrawerDestination.SETTINGS -> "تنظیمات کلی"
+                        DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات Xray"
                         DrawerDestination.POW_SETTINGS -> "تنظیمات PoW"
-                        DrawerDestination.TOR_SETTINGS -> "Tor"
+                        DrawerDestination.TOR_SETTINGS -> "تنظیمات Tor"
                         DrawerDestination.SUPPORT -> "پشتیبانی"
                     },
                 ),
@@ -448,87 +473,72 @@ private fun DrawerSupportCard(
     upFocus: FocusRequester,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val shape = RoundedCornerShape(19.dp)
-    Column(
+    val persian = LocalHomePersian.current
+    val shape = RoundedCornerShape(16.dp)
+    val textStyle = TextStyle(textDirection = if (persian) TextDirection.Rtl else TextDirection.Ltr)
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(
-                        Color(0xFF282058).copy(alpha = 0.90f),
-                        Color(0xFF171B42).copy(alpha = 0.90f),
-                    ),
-                ),
-                shape,
+            .clip(shape)
+            .background(DrawerBlue.copy(alpha = 0.06f))
+            .border(1.dp, DrawerBlue.copy(alpha = 0.16f), shape)
+            .focusRequester(githubFocus)
+            .dpadMovesFocus(down = downFocus, up = upFocus)
+            .keepFocusInDrawerHorizontally()
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = { openExternalLink(context, AppUpdateManager.REPOSITORY_URL) },
             )
-            .border(1.dp, Color(0xFF8B5CFF).copy(alpha = 0.44f), shape)
-            .padding(if (compact) 8.dp else 13.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Outlined.Star,
-                contentDescription = null,
-                tint = Color(0xFFA579FF),
-                modifier = Modifier.size(if (compact) 18.dp else 22.dp),
-            )
-            Spacer(Modifier.width(if (compact) 7.dp else 9.dp))
-            Text(
-                text = homeText("Love the app?", "برنامه رو دوست داری؟"),
-                color = Color(0xFFF1ECFF),
-                fontSize = if (compact) 13.sp else 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = homeLocalizedFont(),
-            )
-        }
-        Spacer(Modifier.height(if (compact) 3.dp else 5.dp))
-        Text(
-            text = homeText(
-                "Your support helps us grow\nand build better tools.",
-                "حمایت شما کمک می‌کنه\nبرنامه بهتر بشه.",
+            .padding(
+                start = if (compact) 12.dp else 14.dp,
+                end = 10.dp,
+                top = if (compact) 7.dp else 10.dp,
+                bottom = if (compact) 7.dp else 10.dp,
             ),
-            color = Color(0xFFADA8CF),
-            fontSize = if (compact) 9.5.sp else 11.5.sp,
-            lineHeight = if (compact) 13.sp else 16.sp,
-            fontFamily = homeLocalizedFont(),
-        )
-        Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
-        Row(
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(if (compact) 32.dp else 39.dp)
-                .clip(RoundedCornerShape(13.dp))
-                .background(
-                    Brush.horizontalGradient(
-                        colors = listOf(Color(0xFF6841C6), Color(0xFF3D2B79)),
-                    ),
-                )
-                .border(1.dp, Color(0xFFB28AFF).copy(alpha = 0.42f), RoundedCornerShape(13.dp))
-                .focusRequester(githubFocus)
-                .dpadMovesFocus(down = downFocus, up = upFocus)
-                .keepFocusInDrawerHorizontally()
-                .clickable(
-                    enabled = enabled,
-                    role = Role.Button,
-                    onClick = { openExternalLink(context, AppUpdateManager.REPOSITORY_URL) },
-                ),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically,
+                .size(if (compact) 28.dp else 32.dp)
+                .background(DrawerBlue.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
+            contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = Icons.Outlined.Star,
+                imageVector = Icons.Outlined.StarOutline,
                 contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(if (compact) 15.dp else 17.dp),
-            )
-            Spacer(Modifier.width(if (compact) 6.dp else 8.dp))
-            Text(
-                text = homeText("Star on GitHub", "در GitHub ستاره بده"),
-                color = Color.White,
-                fontSize = if (compact) 11.sp else 12.5.sp,
-                fontWeight = FontWeight.Medium,
-                fontFamily = homeLocalizedFont(),
+                tint = Color(0xFFAAD7FF),
+                modifier = Modifier.size(if (compact) 16.dp else 18.dp),
             )
         }
+        Spacer(Modifier.width(if (compact) 10.dp else 12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = homeText("Enjoying the app?", "از برنامه راضی هستی؟"),
+                color = DrawerText,
+                fontSize = if (compact) 12.5.sp else 13.5.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = homeLocalizedFont(),
+                style = textStyle,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = homeText("Support us with a star on GitHub", "با ستاره دادن در گیت‌هاب از ما حمایت کن"),
+                color = DrawerMuted,
+                fontSize = if (compact) 10.sp else 11.sp,
+                lineHeight = if (compact) 14.sp else 16.sp,
+                fontFamily = homeLocalizedFont(),
+                style = textStyle,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            imageVector = if (persian) Icons.AutoMirrored.Outlined.KeyboardArrowLeft else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+            contentDescription = null,
+            tint = DrawerMuted,
+            modifier = Modifier.size(if (compact) 18.dp else 20.dp),
+        )
     }
 }
 

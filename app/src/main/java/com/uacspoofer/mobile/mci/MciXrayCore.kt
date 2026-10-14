@@ -36,7 +36,7 @@ class MciXrayCore(
     suspend fun start(
         edge: MciEdge,
         settings: AdvancedSettingsData = AdvancedSettingsData.DEFAULT,
-        profile: ProxyProfile = ProxyProfile.UAC_SNI_BUILT_IN,
+        profile: ProxyProfile = ProxyProfile.ADVANCED_SETTINGS_TEMPLATE,
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
     ): XrayStartupTiming = lifecycleMutex.withLock {
         stopLocked()
@@ -51,13 +51,14 @@ class MciXrayCore(
     suspend fun startBatch(
         routes: List<MciXrayBatchRoute>,
         profile: ProxyProfile,
+        logLevel: String = "warning",
     ): XrayStartupTiming = lifecycleMutex.withLock {
         stopLocked()
         require(routes.isNotEmpty()) { "Batch route list is empty" }
         startLocked(
             label = "route screening batch (${routes.size})",
             configName = "xray-route-batch-${routes.first().settings.socksPort}-${routes.size}.json",
-            configText = MciXrayConfigBuilder.buildBatch(routes, profile),
+            configText = MciXrayConfigBuilder.buildBatch(routes, profile, logLevel),
             listeners = routes.map { it.settings.socksAddress to it.settings.socksPort },
         )
     }
@@ -203,7 +204,7 @@ class MciXrayCore(
         internal fun buildConfig(
             edge: MciEdge = MciConfig.PRIMARY_EDGE,
             settings: AdvancedSettingsData = AdvancedSettingsData.DEFAULT,
-            profile: ProxyProfile = ProxyProfile.UAC_SNI_BUILT_IN,
+            profile: ProxyProfile = ProxyProfile.ADVANCED_SETTINGS_TEMPLATE,
             runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
         ): String = MciXrayConfigBuilder.build(
             edge,

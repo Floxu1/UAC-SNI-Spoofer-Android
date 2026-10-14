@@ -5,6 +5,10 @@ import java.util.Locale
 internal object TorExitCountry {
     const val AUTOMATIC = ""
 
+    /** "Fastest exit": nearby, well-provisioned exit countries for Iran. */
+    val FAST_EXIT_CODES = listOf("de", "nl", "ch", "at", "fr", "se", "pl", "gb")
+    val FAST_EXIT_NODES: String = FAST_EXIT_CODES.joinToString(",") { "{$it}" }
+
     val RECOMMENDED: List<String> = listOf(
         "de", "nl", "us", "fr", "gb", "ch", "se", "ca", "at", "pl",
         "fi", "ro", "bg", "cz", "es", "it", "ua", "sg", "jp", "au",
@@ -50,8 +54,15 @@ internal object TorExitCountry {
         return haystacks.any { it.contains(needle, ignoreCase = true) || needle.contains(it, ignoreCase = true) }
     }
 
-    fun controlCommands(countryCode: String, strict: Boolean): List<String> {
+    fun controlCommands(countryCode: String, strict: Boolean, fastExit: Boolean = false): List<String> {
         val normalized = normalize(countryCode)
+        if (normalized.isEmpty() && fastExit) {
+            return listOf(
+                """SETCONF ExitNodes="$FAST_EXIT_NODES"""",
+                "SETCONF StrictNodes=0",
+                "SIGNAL NEWNYM",
+            )
+        }
         return if (normalized.isEmpty()) {
             listOf("RESETCONF ExitNodes StrictNodes", "SIGNAL NEWNYM")
         } else {
@@ -64,9 +75,12 @@ internal object TorExitCountry {
         }
     }
 
-    fun exitNodesConfigured(getConfBody: String, countryCode: String): Boolean {
+    fun exitNodesConfigured(getConfBody: String, countryCode: String, fastExit: Boolean = false): Boolean {
         val normalized = normalize(countryCode)
         val body = getConfBody.lowercase(Locale.US)
+        if (normalized.isEmpty() && fastExit) {
+            return FAST_EXIT_CODES.all { body.contains("{$it}") }
+        }
         if (normalized.isEmpty()) {
             return !body.contains("exitnodes={") && !Regex("exitnodes=.+").containsMatchIn(body)
         }

@@ -93,7 +93,7 @@ object PowTun2Socks {
         }
         AppLogRepository.info(
             LogSource.POW,
-            "tun2socks started mtu=${PowTunRelayConfig.mtuForChain(mtu)} → SOCKS 127.0.0.1:$socksProxyPort",
+            "tun2socks started mtu=${mtu.coerceIn(PowTunRelayConfig.MIN_MTU, PowTunRelayConfig.MAX_CUSTOM_MTU)} → SOCKS 127.0.0.1:$socksProxyPort",
         )
         return true
     }

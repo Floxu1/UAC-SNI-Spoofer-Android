@@ -151,6 +151,7 @@ internal object PowDnsWarm {
         optimized: Boolean,
         powerSave: Boolean,
         force: Boolean,
+        exitLabel: String = "Psiphon",
     ) {
         if (socksPort <= 0) return
         val now = SystemClock.elapsedRealtime()
@@ -181,7 +182,7 @@ internal object PowDnsWarm {
             val learnedUsed = hosts.count { it in saved }
             AppLogRepository.info(
                 LogSource.POW,
-                "DNS warm: $ok/${remote.size} names primed at the Psiphon exit" +
+                "DNS warm: $ok/${remote.size} names primed at the $exitLabel exit" +
                     (if (domestic.isNotEmpty()) ", $localOk/${domestic.size} .ir resolved locally" else "") +
                     " in ${SystemClock.elapsedRealtime() - started}ms " +
                     "(learned $learnedUsed, popular ${hosts.size - learnedUsed}" +

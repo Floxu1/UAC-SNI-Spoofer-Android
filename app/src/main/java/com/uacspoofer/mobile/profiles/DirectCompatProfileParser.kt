@@ -48,8 +48,10 @@ object DirectCompatProfileParser {
         require(address.isNotBlank()) { "Direct profile address is missing" }
         val port = uri.port.takeIf { it in 1..65_535 } ?: 443
         val query = parseQuery(uri.rawQuery)
+        ProfileUriParser.rejectRemovedTransport(query["type"] ?: query["network"])
         val network = ProfileNetworks.requireSupported(query["type"] ?: query["network"] ?: "tcp", "Direct transport")
         val security = ProfileUriParser.normalizeSecurity(query["security"])
+        val extras = ProfileUriParser.extractExtras(query, security)
         val headerType = query["headertype"].orEmpty()
         val tcpHeaderType = ProfileUriParser.normalizeHeaderType(headerType, network)
         val credential = decode(uri.rawUserInfo.orEmpty()).trim()
@@ -75,7 +77,10 @@ object DirectCompatProfileParser {
                 host = query["host"].orEmpty(),
                 path = query["path"].orEmpty(),
                 alpn = query["alpn"].orEmpty(),
-                fingerprint = query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() },
+                fingerprint = ProfileUriParser.normalizeFingerprint(
+                    query["fp"].orEmpty().ifBlank { query["fingerprint"].orEmpty() },
+                    keepUnsafe = extras.cipherSuites.isNotBlank() || extras.finalmask.isNotBlank(),
+                ),
                 allowInsecure = boolean(query["allowinsecure"] ?: query["insecure"]),
                 flow = query["flow"].orEmpty(),
                 encryption = encryption,
@@ -84,7 +89,7 @@ object DirectCompatProfileParser {
                 serviceName = serviceName,
                 authority = query["authority"].orEmpty(),
                 xhttpMode = if (ProfileNetworks.isXhttp(network)) {
-                    ProfileNetworks.normalizeMode(query["mode"].orEmpty())
+                    ProfileUriParser.lenientMode(query["mode"].orEmpty())
                         .ifBlank { ProfileNetworks.optionalMode(headerType) }
                 } else {
                     ""
@@ -94,7 +99,13 @@ object DirectCompatProfileParser {
                 } else {
                     ""
                 },
-                packetEncoding = ProfileNetworks.normalizePacketEncoding(query["packetencoding"].orEmpty()),
+                packetEncoding = ProfileUriParser.lenientPacketEncoding(query["packetencoding"].orEmpty()),
+                ech = extras.ech,
+                cipherSuites = extras.cipherSuites,
+                finalmask = extras.finalmask,
+                realityPublicKey = extras.realityPublicKey,
+                realityShortId = extras.realityShortId,
+                realitySpiderX = extras.realitySpiderX,
             ),
         )
     }
@@ -145,7 +156,7 @@ object DirectCompatProfileParser {
                 } else {
                     ""
                 },
-                packetEncoding = ProfileNetworks.normalizePacketEncoding(json.optString("packetEncoding")),
+                packetEncoding = ProfileUriParser.lenientPacketEncoding(json.optString("packetEncoding")),
             ),
         )
     }
@@ -157,7 +168,7 @@ object DirectCompatProfileParser {
                 if (part.isBlank()) return@forEach
                 val split = part.split('=', limit = 2)
                 val key = decode(split[0]).trim().lowercase().removePrefix("amp;")
-                put(key, decode(split.getOrElse(1) { "" }))
+                if (key.isNotBlank() && get(key).isNullOrBlank()) put(key, decode(split.getOrElse(1) { "" }))
             }
         }
     }

@@ -139,6 +139,11 @@ fun MainScreen(
     val updateManager = remember(context.applicationContext) { AppUpdateManager(context.applicationContext) }
     val activity = context as? Activity
     var selectedDestination by rememberSaveable { mutableStateOf(DrawerDestination.HOME) }
+    // Where Back from PoW settings returns: Settings when opened from there, else the dashboard.
+    var powSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
+    var torSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
+    var xraySettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
+    var connectFlowVisible by remember { mutableStateOf(false) }
     val languagePrefs = remember(context) {
         context.getSharedPreferences("app_preferences", android.content.Context.MODE_PRIVATE)
     }
@@ -279,11 +284,13 @@ fun MainScreen(
     BackHandler(enabled = drawerState.isOpen) { closeDrawer() }
     BackHandler(enabled = drawerState.isClosed && selectedDestination != DrawerDestination.HOME) {
         selectedDestination = if (
-            selectedDestination == DrawerDestination.ADVANCED_SETTINGS ||
-            selectedDestination == DrawerDestination.POW_SETTINGS ||
-            selectedDestination == DrawerDestination.TOR_SETTINGS
+            selectedDestination == DrawerDestination.POW_SETTINGS
         ) {
-            DrawerDestination.SETTINGS
+            powSettingsBack
+        } else if (selectedDestination == DrawerDestination.TOR_SETTINGS) {
+            torSettingsBack
+        } else if (selectedDestination == DrawerDestination.ADVANCED_SETTINGS) {
+            xraySettingsBack
         } else {
             DrawerDestination.HOME
         }
@@ -355,15 +362,19 @@ fun MainScreen(
         scrimColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.66f),
         drawerContent = {
             AppDrawer(
-                selectedDestination = when (selectedDestination) {
-                    DrawerDestination.ADVANCED_SETTINGS,
-                    DrawerDestination.POW_SETTINGS,
-                    DrawerDestination.TOR_SETTINGS -> DrawerDestination.SETTINGS
-                    else -> selectedDestination
-                },
+                selectedDestination = selectedDestination,
                 selectedLanguage = selectedLanguage,
                 drawerOpen = drawerOpen,
                 onDestinationSelected = {
+                    if (it == DrawerDestination.POW_SETTINGS && selectedDestination != DrawerDestination.POW_SETTINGS) {
+                        powSettingsBack = if (selectedDestination == DrawerDestination.SETTINGS) DrawerDestination.SETTINGS else DrawerDestination.HOME
+                    }
+                    if (it == DrawerDestination.ADVANCED_SETTINGS && selectedDestination != DrawerDestination.ADVANCED_SETTINGS) {
+                        xraySettingsBack = if (selectedDestination == DrawerDestination.SETTINGS) DrawerDestination.SETTINGS else DrawerDestination.HOME
+                    }
+                    if (it == DrawerDestination.TOR_SETTINGS && selectedDestination != DrawerDestination.TOR_SETTINGS) {
+                        torSettingsBack = if (selectedDestination == DrawerDestination.SETTINGS) DrawerDestination.SETTINGS else DrawerDestination.HOME
+                    }
                     selectedDestination = it
                     closeDrawer()
                 },
@@ -416,18 +427,27 @@ fun MainScreen(
                 DrawerDestination.APP_BYPASS -> AppBypassScreen(onMenuClick = openDrawer)
                 DrawerDestination.SETTINGS -> SettingsScreen(
                     onMenuClick = openDrawer,
-                    onAdvancedSettingsClick = { selectedDestination = DrawerDestination.ADVANCED_SETTINGS },
-                    onPowSettingsClick = { selectedDestination = DrawerDestination.POW_SETTINGS },
-                    onTorSettingsClick = { selectedDestination = DrawerDestination.TOR_SETTINGS },
+                    onAdvancedSettingsClick = {
+                        xraySettingsBack = DrawerDestination.SETTINGS
+                        selectedDestination = DrawerDestination.ADVANCED_SETTINGS
+                    },
+                    onPowSettingsClick = {
+                        powSettingsBack = DrawerDestination.SETTINGS
+                        selectedDestination = DrawerDestination.POW_SETTINGS
+                    },
+                    onTorSettingsClick = {
+                        torSettingsBack = DrawerDestination.SETTINGS
+                        selectedDestination = DrawerDestination.TOR_SETTINGS
+                    },
                 )
-                DrawerDestination.ADVANCED_SETTINGS -> AdvancedSettingsScreen(
-                    onBackClick = { selectedDestination = DrawerDestination.SETTINGS },
+                DrawerDestination.ADVANCED_SETTINGS -> XraySettingsScreen(
+                    onBack = { selectedDestination = xraySettingsBack },
                 )
                 DrawerDestination.POW_SETTINGS -> PowSettingsScreen(
-                    onBack = { selectedDestination = DrawerDestination.SETTINGS },
+                    onBack = { selectedDestination = powSettingsBack },
                 )
                 DrawerDestination.TOR_SETTINGS -> TorSettingsScreen(
-                    onBack = { selectedDestination = DrawerDestination.SETTINGS },
+                    onBack = { selectedDestination = torSettingsBack },
                 )
                 DrawerDestination.SUPPORT -> SupportScreen(
                     onMenuClick = openDrawer,
@@ -463,6 +483,40 @@ fun MainScreen(
                         },
                     )
             }
+            if (selectedDestination == DrawerDestination.HOME) {
+                ConnectProgressOverlay(
+                    state = state,
+                    engine = when {
+                        engineMode.isTor -> ConnectOverlayEngine.TOR
+                        engineMode.isPow -> ConnectOverlayEngine.POW
+                        else -> ConnectOverlayEngine.GENERIC
+                    },
+                    onOpenDetails = when {
+                        engineMode.isTor -> ({ connectFlowVisible = true })
+                        engineMode.isPow -> ({ connectFlowVisible = true })
+                        engineMode.isXray -> ({ connectFlowVisible = true })
+                        else -> null
+                    },
+                    onRetry = onConnect,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(WindowInsets.safeDrawing.asPaddingValues())
+                        .padding(top = 58.dp, start = 16.dp, end = 16.dp)
+                        .zIndex(30f),
+                )
+            }
+            TorLiveFlowDialog(
+                visible = connectFlowVisible && engineMode.isTor,
+                onDismissRequest = { connectFlowVisible = false },
+            )
+            XrayLiveFlowDialog(
+                visible = connectFlowVisible && engineMode.isXray,
+                onDismissRequest = { connectFlowVisible = false },
+            )
+            PowLivePathDialog(
+                visible = connectFlowVisible && engineMode.isPow,
+                onDismissRequest = { connectFlowVisible = false },
+            )
             if (engineMode.isXray) {
                 ConnectRescueOverlay(
                     modifier = Modifier
@@ -654,7 +708,7 @@ private fun DoubleBackPrompt(
 @Composable
 private fun HomeScreenContent(
     state: ConnectionState,
-    profile: ProxyProfile = ProxyProfile.UAC_SNI_BUILT_IN,
+    profile: ProxyProfile = ProxyProfile.ADVANCED_SETTINGS_TEMPLATE,
     motionEnabled: Boolean = true,
     onPrimaryAction: () -> Unit,
     onMenuClick: () -> Unit,

@@ -32,10 +32,18 @@ class EngineOwnedParamsTest {
     }
 
     @Test
-    fun unknownFingerprintFallsBackToAWorkingUtlsProfile() {
+    fun unsafeFingerprintIsKeptWhenTheLinkPinsItsCipherList() {
         val profile = ProfileUriParser.parse(trojanWithCsAndFm)
 
-        // `unsafe` is not a uTLS profile Xray-core accepts; shipping it verbatim breaks TLS
+        // `unsafe` (Go TLS) is what makes a per-link `cs` list take effect.
+        assertEquals("unsafe", profile.fingerprint)
+        assertEquals("TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256", profile.cipherSuites)
+    }
+
+    @Test
+    fun unsafeWithoutCipherListFallsBackToChrome() {
+        val profile = ProfileUriParser.parse("trojan://p@1.2.3.4:443?security=tls&type=ws&host=h&fp=unsafe")
+
         assertEquals("chrome", profile.fingerprint)
     }
 
@@ -49,15 +57,16 @@ class EngineOwnedParamsTest {
 
         assertEquals(ProxyProtocol.VLESS, profile.protocol)
         assertTrue(ProfileNetworks.isXhttp(profile.network))
-        assertEquals("chrome", profile.fingerprint)
+        assertEquals("unsafe", profile.fingerprint)
+        assertEquals("", profile.finalmask)
     }
 
     @Test
-    fun aTrulyUnknownParameterIsStillRejected() {
+    fun aTrulyUnknownParameterIsIgnored() {
         val bogus = "trojan://p@1.2.3.4:443?security=tls&type=ws&host=h&totallyUnknownKey=1"
 
-        val failure = runCatching { ProfileUriParser.parse(bogus) }.exceptionOrNull()
+        val profile = ProfileUriParser.parse(bogus)
 
-        assertTrue(failure is IllegalArgumentException)
+        assertEquals("h", profile.host)
     }
 }
