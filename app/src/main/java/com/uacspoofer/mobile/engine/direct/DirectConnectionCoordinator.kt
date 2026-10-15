@@ -45,7 +45,49 @@ class DirectConnectionCoordinator(private val context: Context) {
         } else {
             attempt.getOrThrow()
         }
-        DirectStatusStore.update(DirectPhase.CHECKING, 85, "Core running")
+        DirectStatusStore.update(DirectPhase.CHECKING, 75, "Checking real reachability through the tunnel")
+        val probe = verify(s.socksAddress, s.socksPort)
+        if (!probe.ok) {
+            stopLocked()
+            error("No site answered through UAC Direct (${probe.detail}). DNS or the ClientHello split is blocked on this network; try variant B or other split settings.")
+        }
+        AppLogRepository.success(LogSource.XRAY, "UAC Direct probe passed: ${probe.detail}")
+    }
+
+    data class ProbeResult(val ok: Boolean, val detail: String)
+
+    /**
+     * Real end-to-end check: HTTPS GETs through the core's own SOCKS inbound, with the hostname
+     * resolved by the core (so DNS and the ClientHello split are both exercised). Connected is only
+     * reported when at least one foreign HTTPS site answers.
+     */
+    private fun verify(address: String, port: Int): ProbeResult {
+        val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress.createUnresolved(address, port))
+        val results = mutableListOf<String>()
+        val deadline = System.currentTimeMillis() + PROBE_BUDGET_MS
+        for (round in 0 until 2) {
+            for (url in PROBE_URLS) {
+                if (System.currentTimeMillis() > deadline) break
+                val started = System.currentTimeMillis()
+                val outcome = runCatching {
+                    val conn = (java.net.URL(url).openConnection(proxy) as java.net.HttpURLConnection).apply {
+                        connectTimeout = PROBE_TIMEOUT_MS
+                        readTimeout = PROBE_TIMEOUT_MS
+                        instanceFollowRedirects = false
+                        requestMethod = "GET"
+                    }
+                    try { conn.responseCode } finally { conn.disconnect() }
+                }
+                val host = java.net.URL(url).host
+                val ms = System.currentTimeMillis() - started
+                outcome.onSuccess { code ->
+                    results += "$host=$code/${ms}ms"
+                    if (code in 100..599) return ProbeResult(true, results.joinToString(" "))
+                }.onFailure { results += "$host=${it.javaClass.simpleName}" }
+            }
+            Thread.sleep(500)
+        }
+        return ProbeResult(false, results.joinToString(" "))
     }
 
     private fun start(
@@ -123,6 +165,13 @@ class DirectConnectionCoordinator(private val context: Context) {
     private fun Process.isAliveCompat(): Boolean = try { exitValue(); false } catch (_: IllegalThreadStateException) { true }
 
     companion object {
+        private const val PROBE_TIMEOUT_MS = 6_000
+        private const val PROBE_BUDGET_MS = 25_000L
+        private val PROBE_URLS = listOf(
+            "https://www.gstatic.com/generate_204",
+            "https://www.youtube.com/generate_204",
+            "https://cp.cloudflare.com/",
+        )
         private val TAGS = listOf(
             DirectXrayConfig.TAG_TLS, DirectXrayConfig.TAG_TCP, DirectXrayConfig.TAG_PLAIN,
             DirectXrayConfig.TAG_UDP, DirectXrayConfig.TAG_NOISE,
