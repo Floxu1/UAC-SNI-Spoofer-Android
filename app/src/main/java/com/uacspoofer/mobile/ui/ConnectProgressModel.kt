@@ -4,6 +4,7 @@ import com.uacspoofer.mobile.auto.AutoBootstrapSnapshot
 import com.uacspoofer.mobile.auto.AutoStage
 import com.uacspoofer.mobile.auto.AutoStageState
 import com.uacspoofer.mobile.engine.pow.PowPhase
+import com.uacspoofer.mobile.engine.direct.DirectPhase
 import com.uacspoofer.mobile.engine.tor.TorFlowSnapshot
 import com.uacspoofer.mobile.engine.tor.TorFlowStageId
 import com.uacspoofer.mobile.engine.tor.TorFlowState
@@ -96,6 +97,32 @@ object ConnectProgressModel {
             AutoStageState.SKIPPED -> MiniStepState.SKIPPED
         }
         MiniStep(stage.key, stage.english, stage.persian, state, snap.details[stage].orEmpty())
+    }
+
+    private val directOrder = listOf(DirectPhase.BUILDING, DirectPhase.STARTING, DirectPhase.CHECKING)
+    private val directLabels = listOf(
+        Triple("config", "Config", "کانفیگ"),
+        Triple("core", "Core", "هسته"),
+        Triple("check", "Check", "بررسی"),
+    )
+
+    /** Engine 4 (UAC Direct) steps. */
+    fun directSteps(phase: DirectPhase, lastActive: DirectPhase): List<MiniStep> {
+        val failed = phase == DirectPhase.FAILED
+        val pos = when (val p = if (failed) lastActive else phase) {
+            DirectPhase.CONNECTED -> directOrder.size
+            DirectPhase.IDLE, DirectPhase.FAILED -> 0
+            else -> directOrder.indexOf(p).coerceAtLeast(0)
+        }
+        return directLabels.mapIndexed { i, (k, en, fa) ->
+            val st = when {
+                i < pos -> MiniStepState.DONE
+                i == pos && failed -> MiniStepState.FAILED
+                i == pos -> MiniStepState.RUNNING
+                else -> MiniStepState.PENDING
+            }
+            MiniStep(k, en, fa, st)
+        }
     }
 
     /** Index of the step the card highlights. */

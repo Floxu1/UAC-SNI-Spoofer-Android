@@ -60,12 +60,14 @@ import com.uacspoofer.mobile.auto.AutoBootstrapStore
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.engine.pow.PowPhase
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
+import com.uacspoofer.mobile.engine.direct.DirectPhase
+import com.uacspoofer.mobile.engine.direct.DirectStatusStore
 import com.uacspoofer.mobile.engine.tor.TorFlowState
 import com.uacspoofer.mobile.engine.tor.TorLiveFlow
 import com.uacspoofer.mobile.ui.theme.UacColors
 import kotlinx.coroutines.delay
 
-enum class ConnectOverlayEngine { TOR, POW, GENERIC }
+enum class ConnectOverlayEngine { TOR, POW, DIRECT, GENERIC }
 
 private enum class OverlayMode { HIDDEN, CONNECTING, SUCCESS, FAILED }
 
@@ -159,6 +161,12 @@ internal fun ConnectProgressOverlay(
                 val steps = ConnectProgressModel.powSteps(status.phase, lastActive)
                 OverlayData(steps, status.detail.ifBlank { status.steps.lastOrNull()?.text.orEmpty() }, 0L)
             }
+            ConnectOverlayEngine.DIRECT -> {
+                val status by DirectStatusStore.status.collectAsStateWithLifecycle()
+                var lastActive by remember { mutableStateOf(DirectPhase.BUILDING) }
+                if (status.phase != DirectPhase.FAILED && status.phase != DirectPhase.IDLE) lastActive = status.phase
+                OverlayData(ConnectProgressModel.directSteps(status.phase, lastActive), status.detail, status.startedAt)
+            }
             ConnectOverlayEngine.GENERIC -> {
                 val auto by AutoBootstrapStore.snapshot.collectAsStateWithLifecycle()
                 if (auto.active) {
@@ -216,6 +224,7 @@ internal fun ConnectProgressOverlay(
         val engineName = when (engine) {
             ConnectOverlayEngine.TOR -> "Tor"
             ConnectOverlayEngine.POW -> "UAC PoW"
+            ConnectOverlayEngine.DIRECT -> "UAC Direct"
             ConnectOverlayEngine.GENERIC -> if (data.bootstrapping) "Auto" else ""
         }
         val detail = when {

@@ -86,12 +86,14 @@ internal fun EngineMode.identityAccent(): Color = when (this) {
     EngineMode.XRAY_CF -> Color(0xFF7EE4FF)
     EngineMode.TOR_WEBTUNNEL -> Color(0xFFE0C4FF)
     EngineMode.UAC_POW -> Color(0xFF6FF6D0)
+    EngineMode.UAC_DIRECT -> Color(0xFFFFC46B)
 }
 
 internal fun EngineMode.toHomeRemoteSlot(): HomeRemoteSlot = when (this) {
     EngineMode.XRAY_CF -> HomeRemoteSlot.EngineXray
     EngineMode.TOR_WEBTUNNEL -> HomeRemoteSlot.EngineTor
     EngineMode.UAC_POW -> HomeRemoteSlot.EnginePow
+    EngineMode.UAC_DIRECT -> HomeRemoteSlot.EngineDirect
 }
 
 @Composable
@@ -99,18 +101,21 @@ internal fun EngineMode.switchContentDescription(): String = when (this) {
     EngineMode.XRAY_CF -> homeText("Cloudflare SNI engine", "موتور کلودفلر")
     EngineMode.TOR_WEBTUNNEL -> homeText("Tor engine", "موتور تور")
     EngineMode.UAC_POW -> homeText("PoW engine", "موتور PoW")
+    EngineMode.UAC_DIRECT -> homeText("Direct engine (serverless)", "موتور Direct (بدون سرور)")
 }
 
 private fun EngineMode.identityIcon(): ImageVector = when (this) {
     EngineMode.XRAY_CF -> XrayBoltIcon
     EngineMode.TOR_WEBTUNNEL -> TorOnionIcon
     EngineMode.UAC_POW -> PowHexIcon
+    EngineMode.UAC_DIRECT -> DirectArrowIcon
 }
 
 private fun EngineMode.shortName(): String = when (this) {
     EngineMode.XRAY_CF -> "Xray"
     EngineMode.TOR_WEBTUNNEL -> "Tor"
     EngineMode.UAC_POW -> "PoW"
+    EngineMode.UAC_DIRECT -> "Direct"
 }
 
 /**
@@ -300,5 +305,17 @@ private val PowHexIcon: ImageVector by lazy {
         moveTo(12f, 2.5f); lineTo(20.2f, 7.2f); lineTo(20.2f, 16.8f); lineTo(12f, 21.5f); lineTo(3.8f, 16.8f); lineTo(3.8f, 7.2f); close()
     }, {
         moveTo(8.6f, 12.2f); lineTo(11f, 14.6f); lineTo(15.6f, 9.8f)
+    })
+}
+
+private val DirectArrowIcon: ImageVector by lazy {
+    strokeIcon("Engine.DirectArrow", {
+        moveTo(4f, 12f); lineTo(19f, 12f)
+    }, {
+        moveTo(14f, 7f); lineTo(19f, 12f); lineTo(14f, 17f)
+    }, {
+        moveTo(7f, 8.5f); lineTo(9.5f, 8.5f)
+    }, {
+        moveTo(7f, 15.5f); lineTo(9.5f, 15.5f)
     })
 }

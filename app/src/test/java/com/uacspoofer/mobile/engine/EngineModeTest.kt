@@ -46,7 +46,11 @@ class EngineModeTest {
     fun toggledCyclesXrayTorAndPow() {
         assertEquals(EngineMode.TOR_WEBTUNNEL, EngineMode.XRAY_CF.toggled())
         assertEquals(EngineMode.UAC_POW, EngineMode.TOR_WEBTUNNEL.toggled())
-        assertEquals(EngineMode.XRAY_CF, EngineMode.UAC_POW.toggled())
+        assertEquals(EngineMode.UAC_DIRECT, EngineMode.UAC_POW.toggled())
+        assertEquals(EngineMode.XRAY_CF, EngineMode.UAC_DIRECT.toggled())
+        assertEquals(EngineMode.UAC_DIRECT, EngineMode.fromStored("uac_direct"))
+        assertTrue(EngineMode.UAC_DIRECT.isDirect)
+        assertFalse(EngineMode.UAC_DIRECT.isXray)
     }
 
     @Test

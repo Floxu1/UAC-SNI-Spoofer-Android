@@ -95,6 +95,7 @@ internal enum class DrawerDestination {
     ADVANCED_SETTINGS,
     POW_SETTINGS,
     TOR_SETTINGS,
+    DIRECT_SETTINGS,
     SUPPORT,
 }
 
@@ -120,6 +121,7 @@ internal fun DrawerDestination.visibleFor(mode: EngineMode): Boolean = when (thi
     DrawerDestination.ADVANCED_SETTINGS -> mode.isXray
     DrawerDestination.POW_SETTINGS -> mode.isPow
     DrawerDestination.TOR_SETTINGS -> mode.isTor
+    DrawerDestination.DIRECT_SETTINGS -> mode.isDirect
     else -> true
 }
 
@@ -127,6 +129,8 @@ private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
     add(DrawerItem(DrawerDestination.HOME, "Home", Icons.Outlined.Home))
     if (mode.isTor || mode.isPow) {
         add(DrawerItem(DrawerDestination.CONFIGS, "Select country", Icons.Outlined.Public))
+    } else if (mode.isDirect) {
+        // Engine 4 has no configs or countries: it dials sites directly.
     } else {
         add(DrawerItem(DrawerDestination.CONFIGS, "Configs", Icons.Outlined.Description))
         add(DrawerItem(DrawerDestination.SNI_MAKER, "Config Maker", Icons.Outlined.Code))
@@ -138,6 +142,7 @@ private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
     when {
         mode.isPow -> add(DrawerItem(DrawerDestination.POW_SETTINGS, "PoW settings", Icons.Outlined.Tune))
         mode.isTor -> add(DrawerItem(DrawerDestination.TOR_SETTINGS, "Tor settings", Icons.Outlined.Tune))
+        mode.isDirect -> add(DrawerItem(DrawerDestination.DIRECT_SETTINGS, "Direct settings", Icons.Outlined.Tune))
         else -> add(DrawerItem(DrawerDestination.ADVANCED_SETTINGS, "Xray settings", Icons.Outlined.Tune))
     }
     // Support is always the last item, for every engine.
@@ -358,6 +363,7 @@ private fun DrawerHeader(compact: Boolean, engineMode: EngineMode) {
             text = when {
                 engineMode.isTor -> "UAC TOR BRIDGE"
                 engineMode.isPow -> "UAC PoW"
+                engineMode.isDirect -> "UAC Direct"
                 else -> "UAC SNI Spoofer"
             },
             color = DrawerText,
@@ -452,6 +458,7 @@ private fun DrawerNavItem(
                         DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات Xray"
                         DrawerDestination.POW_SETTINGS -> "تنظیمات PoW"
                         DrawerDestination.TOR_SETTINGS -> "تنظیمات Tor"
+                        DrawerDestination.DIRECT_SETTINGS -> "تنظیمات Direct"
                         DrawerDestination.SUPPORT -> "پشتیبانی"
                     },
                 ),

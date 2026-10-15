@@ -87,6 +87,7 @@ import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.canChangeEngineMode
 import com.uacspoofer.mobile.engine.tor.TorStatusStore
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
+import com.uacspoofer.mobile.engine.direct.DirectStatusStore
 import com.uacspoofer.mobile.engine.pow.PowStepState
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
@@ -238,6 +239,7 @@ internal fun AppTitle(compact: Boolean, accent: Color) {
             text = when {
                 engineMode.isTor -> "UAC TOR BRIDGE"
                 engineMode.isPow -> "UAC PoW"
+                engineMode.isDirect -> "UAC DIRECT"
                 else -> "UAC SNI SPOOFER"
             },
             fontSize = if (compact) 20.sp else 23.sp,
@@ -531,6 +533,7 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val advanced by advancedStore.state.collectAsStateWithLifecycle()
     val torStatus by TorStatusStore.status.collectAsStateWithLifecycle()
     val powStatus by PowStatusStore.status.collectAsStateWithLifecycle()
+    val directStatus by DirectStatusStore.status.collectAsStateWithLifecycle()
     val routeProgress by ConnectionStateStore.routeProgress.collectAsStateWithLifecycle()
     val killSwitchBlocking by NetworkGuardStore.blocking.collectAsStateWithLifecycle()
     var showRouteProgress by remember(state) { mutableStateOf(false) }
@@ -587,6 +590,10 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
                 showRouteProgress = showRouteProgress,
             ),
         )
+        engineMode.isDirect -> homeText(
+            "Starting direct mode (no server) ${directStatus.progressPercent}%",
+            "در حال راه‌اندازی حالت مستقیم (بدون سرور) ${directStatus.progressPercent}٪",
+        )
         else -> when {
             showRouteProgress && routeProgress.isActive -> homeText(
                 "Connecting with route ${routeProgress.current}/${routeProgress.total}",
@@ -614,6 +621,10 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             } else {
                 homeText("Device VPN is routing through UAC PoW", "VPN دستگاه از UAC PoW می‌گذره")
             }
+            engineMode.isDirect -> homeText(
+                "Direct, no server · IP-blocked sites stay unreachable",
+                "مستقیم و بدون سرور · سایت‌هایی که IPشون بسته‌ست باز نمی‌شن",
+            )
             else -> homeText("Your connection is secure", "اتصال شما امنه")
         }
         ConnectionState.DISCONNECTING -> homeText("Closing the secure tunnel", "در حال بستن اتصال امن")
@@ -625,6 +636,10 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             engineMode.isPow && powStatus.detail.isNotBlank() -> homeText(
                 powStatus.detail,
                 PowStatusCopy.errorHint(true, powStatus.detail) ?: powStatus.detail,
+            )
+            engineMode.isDirect && directStatus.detail.isNotBlank() -> homeText(
+                directStatus.detail,
+                "اتصال مستقیم راه نیفتاد: ${directStatus.detail}",
             )
             else -> homeText("Tap retry to try again", "دوباره امتحان کن")
         }

@@ -113,6 +113,7 @@ internal fun SettingsScreen(
     onAdvancedSettingsClick: () -> Unit,
     onPowSettingsClick: () -> Unit,
     onTorSettingsClick: () -> Unit,
+    onDirectSettingsClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val isPersian = LocalHomePersian.current
@@ -192,6 +193,19 @@ internal fun SettingsScreen(
                             isPersian = isPersian,
                             showDivider = true,
                             onClick = onTorSettingsClick,
+                        )
+                    }
+                    if (engineMode.isDirect) {
+                        SettingsNavRow(
+                            icon = Icons.Outlined.Tune,
+                            title = homeText("Direct settings", "تنظیمات Direct"),
+                            summary = homeText(
+                                "Serverless: ClientHello split, UDP noise, DNS",
+                                "بدون سرور: تیکه‌کردن ClientHello، نویز UDP، DNS",
+                            ),
+                            isPersian = isPersian,
+                            showDivider = true,
+                            onClick = onDirectSettingsClick,
                         )
                     }
                     if (engineMode.isXray) {

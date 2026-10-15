@@ -24,6 +24,7 @@ class EngineModeStore private constructor(context: Context) {
                 .apply()
             if (!resolved.isTor) TorStatusStore.reset()
             if (!resolved.isPow) com.uacspoofer.mobile.engine.pow.PowStatusStore.reset()
+            if (!resolved.isDirect) com.uacspoofer.mobile.engine.direct.DirectStatusStore.reset()
         }
         return resolved
     }
@@ -40,6 +41,7 @@ class EngineModeStore private constructor(context: Context) {
         mutableMode.value = mode
         if (!mode.isTor) TorStatusStore.reset()
         if (!mode.isPow) com.uacspoofer.mobile.engine.pow.PowStatusStore.reset()
+        if (!mode.isDirect) com.uacspoofer.mobile.engine.direct.DirectStatusStore.reset()
         return EngineModeChangeResult.APPLIED
     }
 

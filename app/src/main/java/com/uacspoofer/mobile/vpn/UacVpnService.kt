@@ -26,6 +26,9 @@ import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeStore
+import com.uacspoofer.mobile.engine.direct.DirectConnectionCoordinator
+import com.uacspoofer.mobile.engine.direct.DirectPhase
+import com.uacspoofer.mobile.engine.direct.DirectStatusStore
 import com.uacspoofer.mobile.engine.tor.TorConnectionCoordinator
 import com.uacspoofer.mobile.engine.tor.TorDaemon
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
@@ -134,6 +137,7 @@ class UacVpnService : VpnService() {
     private lateinit var torCoordinator: TorConnectionCoordinator
     private lateinit var powEngineStore: PowEngineStore
     private lateinit var powCoordinator: PowConnectionCoordinator
+    private lateinit var directCoordinator: DirectConnectionCoordinator
     private lateinit var networkGuardStore: NetworkGuardStore
 
     override fun onCreate() {
@@ -167,6 +171,7 @@ class UacVpnService : VpnService() {
         powCoordinator.notificationSink = { connected ->
             runCatching { updateNotification(connected) }
         }
+        directCoordinator = DirectConnectionCoordinator(this)
         networkGuardStore = NetworkGuardStore.get(this)
         androidx.core.content.ContextCompat.registerReceiver(
             this,
@@ -513,6 +518,7 @@ class UacVpnService : VpnService() {
                     when {
                         activeEngine.isTor -> connectTorEngine(token, settings)
                         activeEngine.isPow -> connectPowEngine(token, settings)
+                        activeEngine.isDirect -> connectDirectEngine(token, settings)
                         else -> {
                             val profile = profileStore.selectedProfile()
                             connectXray(token, settings, profile)
@@ -533,6 +539,9 @@ class UacVpnService : VpnService() {
                 ) {
                     PowStatusStore.reset()
                 }
+                if (activeEngine.isDirect && ConnectionStateStore.state.value != ConnectionState.CONNECTING) {
+                    DirectStatusStore.reset()
+                }
             } catch (error: Throwable) {
                 ConnectRescueStore.hide()
                 if (activeEngine.isTor) {
@@ -540,6 +549,9 @@ class UacVpnService : VpnService() {
                 }
                 if (activeEngine.isPow) {
                     PowStatusStore.update(PowPhase.FAILED, 0, error.message.orEmpty().ifBlank { "UAC PoW connect failed" })
+                }
+                if (activeEngine.isDirect) {
+                    DirectStatusStore.update(DirectPhase.FAILED, 0, error.message.orEmpty().ifBlank { "UAC Direct connect failed" })
                 }
                 Log.e(TAG, "connection worker failed", error)
                 AppLogRepository.error(LogSource.SERVICE, "Connection worker failed", error)
@@ -1344,6 +1356,28 @@ class UacVpnService : VpnService() {
         AppLogRepository.success(LogSource.POW, "UAC PoW engine is active")
     }
 
+    private suspend fun connectDirectEngine(token: Long, settings: AdvancedSettingsData) {
+        coroutineContext.ensureActive()
+        if (token != generation.get()) throw CancellationException("stale connect generation")
+        activeEngine = EngineMode.UAC_DIRECT
+        directCoordinator.connect(settings, isProxyMode()) { establishTun(settings) }
+        coroutineContext.ensureActive()
+        if (token != generation.get()) throw CancellationException("stale connect generation")
+        resourcesActive = true
+        if (!ConnectionStateStore.markConnected()) {
+            cleanupRoute()
+            resourcesActive = false
+            return
+        }
+        directCoordinator.markConnected()
+        runCatching { updateNotification(connected = true) }
+            .onFailure { Log.w(TAG, "connected notification update failed", it) }
+        if (!isProxyMode()) startStatsMonitor(token)
+        startHealthMonitor(token)
+        onSessionUp()
+        AppLogRepository.success(LogSource.XRAY, "UAC Direct (engine 4) is active: serverless, direct outbounds only")
+    }
+
     private fun requestApplyPowExit() {
         if (!engineModeStore.snapshot().isPow) return
         val state = ConnectionStateStore.state.value
@@ -1511,6 +1545,7 @@ class UacVpnService : VpnService() {
         latencyJob = null
         runCatching { torCoordinator.stop() }
         runCatching { powCoordinator.stop() }
+        runCatching { directCoordinator.stop() }
         nativeTunEngine.stop()
         proxyCore.stop()
         TunPacketFilter.stop()
@@ -1532,6 +1567,7 @@ class UacVpnService : VpnService() {
         isProxyMode() -> TunStats.ZERO
         activeEngine.isTor -> torCoordinator.tunStats()
         activeEngine.isPow -> powCoordinator.tunStats()
+        activeEngine.isDirect -> directCoordinator.tunStats()
         else -> nativeTunEngine.stats()
     }
 
@@ -1539,6 +1575,7 @@ class UacVpnService : VpnService() {
         isProxyMode() -> TunStats.ZERO
         activeEngine.isTor -> TunStats.ZERO
         activeEngine.isPow -> TunStats.ZERO
+        activeEngine.isDirect -> TunStats.ZERO
         else -> nativeTunEngine.probeStats()
     }
 
@@ -1547,6 +1584,7 @@ class UacVpnService : VpnService() {
         activeEngine.isTor -> torCoordinator.isDaemonRunning() && torCoordinator.isRelayRunning()
         activeEngine.isPow && isProxyMode() -> powCoordinator.isOuterRunning() && powCoordinator.isRunning()
         activeEngine.isPow -> powCoordinator.isRunning()
+        activeEngine.isDirect -> directCoordinator.isRunning()
         isProxyMode() -> proxyCore.isRunning()
         else -> nativeTunEngine.isRunning()
     }
@@ -1774,7 +1812,7 @@ class UacVpnService : VpnService() {
 
     private fun maybePrewarm(reason: String) {
         if (!resourcesActive || ConnectionStateStore.state.value != ConnectionState.CONNECTED) return
-        if (activeEngine.isTor || activeEngine.isPow) return
+        if (activeEngine.isTor || activeEngine.isPow || activeEngine.isDirect) return
         if (!advancedSettingsStore.snapshot().prewarm) return
         val now = android.os.SystemClock.elapsedRealtime()
         if (now - lastPrewarmAt < PREWARM_MIN_GAP_MS) return
@@ -1821,6 +1859,16 @@ class UacVpnService : VpnService() {
                     if (powCoordinator.isAwaitingNetworkRestore() || powCoordinator.isRetuning()) {
                         nextDelayMs = 2_000L
                         continue
+                    }
+                    nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
+                    continue
+                }
+                if (activeEngine.isDirect) {
+                    // Serverless: there is no route to fail over to, only the local core to watch.
+                    if (!activeCoreRunning()) {
+                        AppLogRepository.warning(LogSource.XRAY, "UAC Direct core exited; recovering")
+                        scheduleRuntimeRecovery(token, "UAC Direct core exited", penalizeCandidate = false)
+                        return@launch
                     }
                     nextDelayMs = MciConfig.HEALTH_CHECK_INTERVAL_MS
                     continue
@@ -1953,6 +2001,7 @@ class UacVpnService : VpnService() {
                     when {
                         activeEngine.isTor -> connectTorEngine(recoveryToken, settings)
                         activeEngine.isPow -> connectPowEngine(recoveryToken, settings)
+                        activeEngine.isDirect -> connectDirectEngine(recoveryToken, settings)
                         else -> connectXray(recoveryToken, settings, profile, recovering = true)
                     }
                 }
@@ -2062,6 +2111,7 @@ class UacVpnService : VpnService() {
 
     private fun lanShareUpstreamPort(): Int = when {
         activeEngine.isPow -> powCoordinator.socksPort().takeIf { it > 0 } ?: PowCoreConfig.SOCKS_PORT
+        activeEngine.isDirect -> directCoordinator.socksPort()
         activeEngine.isTor -> torEngineStore.snapshot().socksPort
         else -> advancedSettingsStore.snapshot().socksPort
     }

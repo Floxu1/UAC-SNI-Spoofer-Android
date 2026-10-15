@@ -142,6 +142,7 @@ fun MainScreen(
     // Where Back from PoW settings returns: Settings when opened from there, else the dashboard.
     var powSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
     var torSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
+    var directSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
     var xraySettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
     var connectFlowVisible by remember { mutableStateOf(false) }
     val languagePrefs = remember(context) {
@@ -269,7 +270,8 @@ fun MainScreen(
             selectedDestination = when (selectedDestination) {
                 DrawerDestination.ADVANCED_SETTINGS,
                 DrawerDestination.POW_SETTINGS,
-                DrawerDestination.TOR_SETTINGS -> DrawerDestination.SETTINGS
+                DrawerDestination.TOR_SETTINGS,
+                DrawerDestination.DIRECT_SETTINGS -> DrawerDestination.SETTINGS
                 else -> DrawerDestination.HOME
             }
         }
@@ -289,6 +291,8 @@ fun MainScreen(
             powSettingsBack
         } else if (selectedDestination == DrawerDestination.TOR_SETTINGS) {
             torSettingsBack
+        } else if (selectedDestination == DrawerDestination.DIRECT_SETTINGS) {
+            directSettingsBack
         } else if (selectedDestination == DrawerDestination.ADVANCED_SETTINGS) {
             xraySettingsBack
         } else {
@@ -375,6 +379,9 @@ fun MainScreen(
                     if (it == DrawerDestination.TOR_SETTINGS && selectedDestination != DrawerDestination.TOR_SETTINGS) {
                         torSettingsBack = if (selectedDestination == DrawerDestination.SETTINGS) DrawerDestination.SETTINGS else DrawerDestination.HOME
                     }
+                    if (it == DrawerDestination.DIRECT_SETTINGS && selectedDestination != DrawerDestination.DIRECT_SETTINGS) {
+                        directSettingsBack = if (selectedDestination == DrawerDestination.SETTINGS) DrawerDestination.SETTINGS else DrawerDestination.HOME
+                    }
                     selectedDestination = it
                     closeDrawer()
                 },
@@ -439,6 +446,10 @@ fun MainScreen(
                         torSettingsBack = DrawerDestination.SETTINGS
                         selectedDestination = DrawerDestination.TOR_SETTINGS
                     },
+                    onDirectSettingsClick = {
+                        directSettingsBack = DrawerDestination.SETTINGS
+                        selectedDestination = DrawerDestination.DIRECT_SETTINGS
+                    },
                 )
                 DrawerDestination.ADVANCED_SETTINGS -> XraySettingsScreen(
                     onBack = { selectedDestination = xraySettingsBack },
@@ -448,6 +459,9 @@ fun MainScreen(
                 )
                 DrawerDestination.TOR_SETTINGS -> TorSettingsScreen(
                     onBack = { selectedDestination = torSettingsBack },
+                )
+                DrawerDestination.DIRECT_SETTINGS -> DirectSettingsScreen(
+                    onBack = { selectedDestination = directSettingsBack },
                 )
                 DrawerDestination.SUPPORT -> SupportScreen(
                     onMenuClick = openDrawer,
@@ -471,6 +485,10 @@ fun MainScreen(
                             when {
                                 engineMode.isTor -> homeTorCountriesVisible = true
                                 engineMode.isPow -> homePowCountriesVisible = true
+                                engineMode.isDirect -> {
+                                    directSettingsBack = DrawerDestination.HOME
+                                    selectedDestination = DrawerDestination.DIRECT_SETTINGS
+                                }
                                 else -> {
                                     val latestLibrary = profileStore.snapshot()
                                     homeConfigsLibrary = latestLibrary
@@ -489,6 +507,7 @@ fun MainScreen(
                     engine = when {
                         engineMode.isTor -> ConnectOverlayEngine.TOR
                         engineMode.isPow -> ConnectOverlayEngine.POW
+                        engineMode.isDirect -> ConnectOverlayEngine.DIRECT
                         else -> ConnectOverlayEngine.GENERIC
                     },
                     onOpenDetails = when {
@@ -992,11 +1011,13 @@ private fun SelectedProfileRow(
         } else {
             PowRegions.name(powSettings.exitCountryCode, nameLocale)
         }
+        engineMode.isDirect -> homeText("Direct · no server", "مستقیم · بدون سرور")
         else -> profile.name
     }
     val selectionKey = when {
         engineMode.isTor -> "tor:${torSettings.exitCountryCode}"
         engineMode.isPow -> "pow:${powSettings.exitCountryCode}"
+        engineMode.isDirect -> "direct"
         else -> profile.id
     }
     val interactionSource = remember { MutableInteractionSource() }

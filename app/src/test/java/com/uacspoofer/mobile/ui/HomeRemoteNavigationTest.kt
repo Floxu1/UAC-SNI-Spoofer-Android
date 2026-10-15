@@ -63,7 +63,7 @@ class HomeRemoteNavigationTest {
         )
         assertEquals(
             HomeRemoteAction.Focus(HomeRemoteSlot.Connect),
-            HomeRemoteNavigation.action(HomeRemoteSlot.EnginePow, RemoteDpad.Down),
+            HomeRemoteNavigation.action(HomeRemoteSlot.EngineDirect, RemoteDpad.Down),
         )
     }
 
