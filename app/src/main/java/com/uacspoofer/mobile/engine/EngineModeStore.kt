@@ -8,15 +8,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class EngineModeStore private constructor(context: Context) {
-    private val prefs = context.applicationContext
-        .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val mutableMode = MutableStateFlow(loadInitialMode())
     val mode: StateFlow<EngineMode> = mutableMode.asStateFlow()
 
     private fun loadInitialMode(): EngineMode {
         val stored = EngineMode.fromStored(prefs.getString(KEY_MODE, null))
         val introApplied = prefs.getBoolean(EnginePowIntro.FLAG_KEY, false)
-        val resolved = EnginePowIntro.resolve(stored, introApplied)
+        var resolved = EnginePowIntro.resolve(stored, introApplied)
+        // Engine 4 stays off the rail until unlocked; never boot into a hidden mode.
+        if (resolved.isDirect && !Engine4UnlockStore.get(appContext).snapshot()) {
+            resolved = EngineMode.UAC_POW
+        }
         if (!introApplied || resolved != stored) {
             prefs.edit()
                 .putString(KEY_MODE, resolved.id)
@@ -37,11 +41,17 @@ class EngineModeStore private constructor(context: Context) {
         if (!canChangeEngineMode(ConnectionStateStore.state.value)) {
             return EngineModeChangeResult.BLOCKED_WHILE_ACTIVE
         }
-        prefs.edit().putString(KEY_MODE, mode.id).apply()
-        mutableMode.value = mode
-        if (!mode.isTor) TorStatusStore.reset()
-        if (!mode.isPow) com.uacspoofer.mobile.engine.pow.PowStatusStore.reset()
-        if (!mode.isDirect) com.uacspoofer.mobile.engine.direct.DirectStatusStore.reset()
+        val target = if (mode.isDirect && !Engine4UnlockStore.get(appContext).snapshot()) {
+            EngineMode.UAC_POW
+        } else {
+            mode
+        }
+        if (target == mutableMode.value) return EngineModeChangeResult.APPLIED
+        prefs.edit().putString(KEY_MODE, target.id).apply()
+        mutableMode.value = target
+        if (!target.isTor) TorStatusStore.reset()
+        if (!target.isPow) com.uacspoofer.mobile.engine.pow.PowStatusStore.reset()
+        if (!target.isDirect) com.uacspoofer.mobile.engine.direct.DirectStatusStore.reset()
         return EngineModeChangeResult.APPLIED
     }
 

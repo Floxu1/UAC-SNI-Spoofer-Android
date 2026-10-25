@@ -14,9 +14,13 @@ mod masque;
 mod masque_h2;
 mod netstack;
 mod noize;
+mod oob;
+#[cfg(windows)]
+mod oob_schannel;
 pub mod platform;
 mod prober;
 mod quic;
+mod relay;
 mod routing;
 mod socks;
 #[cfg(unix)]

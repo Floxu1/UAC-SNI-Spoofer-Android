@@ -44,6 +44,16 @@ class PowEngineStore private constructor(context: Context) {
     private val appContext = context.applicationContext
 
     init {
+        // Toggles removed: force seamless/H2 speed features on for everyone.
+        if (!prefs.getBoolean(KEY_ADV_ALWAYS_ON_MIGRATION, false)) {
+            prefs.edit()
+                .putBoolean(KEY_GHOST_HANDOVER, true)
+                .putBoolean(KEY_H2_LARGE_WINDOWS, true)
+                .putBoolean(KEY_H2_SOCKET_TUNING, true)
+                .putBoolean(KEY_H2_SPEED_PICK, true)
+                .putBoolean(KEY_ADV_ALWAYS_ON_MIGRATION, true)
+                .apply()
+        }
         if (!prefs.getBoolean(KEY_H2_QUALITY_MIGRATION, false)) {
             prefs.edit()
                 .putBoolean(KEY_H2_FRAGMENT, false)
@@ -109,14 +119,15 @@ class PowEngineStore private constructor(context: Context) {
             .putString(KEY_FETCH, validated.keyFetch)
             .putBoolean(KEY_PSIPHON_POOL, validated.psiphonTunnelPool)
             .putBoolean(KEY_QUIC_TUNED, validated.quicTuned)
-            .putBoolean(KEY_GHOST_HANDOVER, validated.ghostHandover)
+            .putBoolean(KEY_GHOST_HANDOVER, true)
             .putString(KEY_H2_FRAGMENT_MODE, validated.h2FragmentMode)
             .putBoolean(KEY_LOGCAT_MIRROR, validated.logcatMirror)
-            .putBoolean(KEY_H2_LARGE_WINDOWS, validated.h2LargeWindows)
-            .putBoolean(KEY_H2_SOCKET_TUNING, validated.h2SocketTuning)
-            .putBoolean(KEY_H2_SPEED_PICK, validated.h2SpeedPick)
+            .putBoolean(KEY_H2_LARGE_WINDOWS, true)
+            .putBoolean(KEY_H2_SOCKET_TUNING, true)
+            .putBoolean(KEY_H2_SPEED_PICK, true)
             .putString(KEY_H2_OBFUSCATION, validated.h2Obfuscation)
             .putInt(KEY_TUN_MTU, validated.tunMtu)
+            .putBoolean(KEY_SOCKET_PROTECT, validated.socketProtectEnabled)
             .apply()
         AppLogRepository.powLogcatMirror = validated.logcatMirror
         mutableSettings.value = validated
@@ -224,14 +235,15 @@ class PowEngineStore private constructor(context: Context) {
         keyFetch = prefs.getString(KEY_FETCH, PowCoreConfig.KEY_AUTO).orEmpty(),
         psiphonTunnelPool = prefs.getBoolean(KEY_PSIPHON_POOL, false),
         quicTuned = prefs.getBoolean(KEY_QUIC_TUNED, false),
-        ghostHandover = prefs.getBoolean(KEY_GHOST_HANDOVER, true),
+        ghostHandover = true, // always on (UI toggle removed)
         logcatMirror = prefs.getBoolean(KEY_LOGCAT_MIRROR, true),
-        h2LargeWindows = prefs.getBoolean(KEY_H2_LARGE_WINDOWS, true),
-        h2SocketTuning = prefs.getBoolean(KEY_H2_SOCKET_TUNING, true),
-        h2SpeedPick = prefs.getBoolean(KEY_H2_SPEED_PICK, true),
+        h2LargeWindows = true, // always on (UI toggle removed)
+        h2SocketTuning = true, // always on (UI toggle removed)
+        h2SpeedPick = true, // always on (UI toggle removed)
         h2Obfuscation = prefs.getString(KEY_H2_OBFUSCATION, PowEngineSettings.H2_OBFS_UNCHANGED).orEmpty(),
         tunMtu = prefs.getInt(KEY_TUN_MTU, PowEngineSettings.TUN_MTU_DEFAULT),
         h2FragmentMode = prefs.getString(KEY_H2_FRAGMENT_MODE, PowEngineSettings.H2_FRAG_AUTO).orEmpty(),
+        socketProtectEnabled = prefs.getBoolean(KEY_SOCKET_PROTECT, true),
     ).validated()
 
     private fun readLastConnect(): PowLastConnect {
@@ -267,6 +279,7 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_FETCH = "key_fetch"
         private const val KEY_PSIPHON_POOL = "psiphon_tunnel_pool"
         private const val KEY_QUIC_TUNED = "quic_tuned"
+        private const val KEY_ADV_ALWAYS_ON_MIGRATION = "adv_always_on_v1"
         private const val KEY_GHOST_HANDOVER = "adv_ghost_handover"
         private const val KEY_LOGCAT_MIRROR = "adv_logcat_mirror"
         private const val KEY_H2_LARGE_WINDOWS = "adv_h2_large_windows"
@@ -275,6 +288,7 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_H2_OBFUSCATION = "adv_h2_obfuscation"
         private const val KEY_TUN_MTU = "adv_tun_mtu"
         private const val KEY_H2_FRAGMENT_MODE = "adv_h2_fragment_mode"
+        private const val KEY_SOCKET_PROTECT = "socket_protect_enabled"
         private const val KEY_LAST_PROTOCOL = "last_connect_protocol"
         private const val KEY_LAST_TRANSPORT = "last_connect_transport"
         private const val KEY_LAST_IP = "last_connect_ip"

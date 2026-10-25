@@ -1,4 +1,4 @@
-package com.uacspoofer.mobile.engine.pow
+﻿package com.uacspoofer.mobile.engine.pow
 
 import android.content.Context
 import android.net.ConnectivityManager
@@ -6,6 +6,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
+import android.telephony.SubscriptionManager
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
@@ -13,9 +15,12 @@ import android.system.Os
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.mci.DomesticDirect
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.vpn.TunStats
+import com.uacspoofer.mobile.vpn.VpnPauseStore
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
@@ -133,6 +138,12 @@ class PowConnectionCoordinator(
     @Volatile private var restoreJob: Job? = null
     private val restoreWaiting = AtomicBoolean(false)
     private val restoreAttempts = AtomicInteger(0)
+    /** Ignore VPN-up / link callbacks as path-loss until first settle after ready. */
+    @Volatile private var connectGraceUntilMs = 0L
+    @Volatile private var lastRadioIdentity: PowRadioIdentity? = null
+    @Volatile private var simSwitchJob: Job? = null
+    private val simSwitchInFlight = AtomicBoolean(false)
+    private var subscriptionsCallback: SubscriptionManager.OnSubscriptionsChangedListener? = null
     private var watchdogTx = -1L
     private var watchdogRx = -1L
     private var watchdogProcessMisses = 0
@@ -189,6 +200,10 @@ class PowConnectionCoordinator(
         establishTun: (PowTun2Socks.PrivateAddress, Int) -> ParcelFileDescriptor?,
     ) {
         lifecycle.withLock { stopLocked() }
+        DomesticDirect.ensure(appContext)
+        val iranOn = NetworkGuardStore.get(appContext).snapshot().iranDirect
+        DomesticDirect.applyEnabled(iranOn)
+        PowSocksConnectOnly.setDomesticDirect(iranOn)
         stopRequested.set(false)
         sessionGeneration.incrementAndGet()
         txBytes.set(0L)
@@ -324,6 +339,10 @@ class PowConnectionCoordinator(
                 }
                 PowStatusStore.update(PowPhase.CONNECTED, 100, ready, outerLabel = outerName)
                 AppLogRepository.success(LogSource.POW, ready)
+                // Arm before markConnected: VPN-up callbacks race the service's second
+                // markConnected and must not treat TUN bring-up as path loss.
+                connectGraceUntilMs = SystemClock.elapsedRealtime() + CONNECT_GRACE_MS
+                ConnectionStateStore.markConnected()
             }
             startSessionWatch()
             PowPageTurbo.kick(qualityScope, socksPort, keepWarm = true)
@@ -430,11 +449,16 @@ class PowConnectionCoordinator(
                 AppLogRepository.warning(LogSource.POW, "UAC PoW path refresh limit reached")
                 return@withLock false
             }
-            val outerAlive = AetherNative.isRunning() && AetherNative.isReady()
+            // Outer must accept SOCKS — isRunning alone can be a zombie after SIM switch.
+            val outerAlive = !psiphonOnly &&
+                AetherNative.isRunning() &&
+                AetherNative.isReady() &&
+                outerProxyAccepts()
             val recovered = if (outerAlive) {
                 AppLogRepository.info(LogSource.POW, "Outer still healthy — inner-only rebuild")
                 retuneInnerOnly(reason)
             } else {
+                AppLogRepository.info(LogSource.POW, "Outer down or SOCKS dead — full outer then Psiphon rebuild")
                 retuneLocked(reason, quality = false)
             }
             if (recovered && currentSettings.optimizedMode) resetWatchdogBaseline()
@@ -469,9 +493,10 @@ class PowConnectionCoordinator(
 
             override fun onLost(network: Network) {
                 if (PowNetworkRestore.shouldVerifyOnLost(
-                        sessionLive = innerReady,
+                        sessionLive = sessionSupposedUp(),
                         retuning = retuning.get(),
                         stopRequested = stopRequested.get(),
+                        paused = VpnPauseStore.isPaused(),
                     )) {
                     qualityScope.launch { verifyPathAfterNetworkChange() }
                 }
@@ -479,11 +504,66 @@ class PowConnectionCoordinator(
         }
         runCatching { cm.registerNetworkCallback(req, cb) }
         networkCallback = cb
+        registerSubscriptionListener()
+    }
+
+    private fun registerSubscriptionListener() {
+        if (subscriptionsCallback != null) return
+        val sm = appContext.getSystemService(SubscriptionManager::class.java) ?: return
+        val listener = object : SubscriptionManager.OnSubscriptionsChangedListener() {
+            override fun onSubscriptionsChanged() {
+                if (stopRequested.get() || VpnPauseStore.isPaused() || retuning.get()) return
+                val previous = lastRadioIdentity
+                val current = PowCarrier.radioIdentity(appContext)
+                // VPN bring-up fires this with no baseline — only learn identity, never wipe.
+                if (previous == null) {
+                    if (sessionSupposedUp()) {
+                        lastRadioIdentity = current
+                        AppLogRepository.debug(
+                            LogSource.POW,
+                            "Subscription event — baseline radio ${current.summary()}",
+                        )
+                    }
+                    return
+                }
+                if (!current.isSimOrOperatorChange(previous)) return
+                if (sessionSupposedUp() && !retuning.get() && !stopRequested.get()
+                    && !VpnPauseStore.isPaused() && !restoreWaiting.get()
+                ) {
+                    scheduleSimSwitchReset("subscriptions changed")
+                }
+            }
+        }
+        val registered = runCatching {
+            if (Build.VERSION.SDK_INT >= 29) {
+                sm.addOnSubscriptionsChangedListener(appContext.mainExecutor, listener)
+            } else {
+                @Suppress("DEPRECATION")
+                sm.addOnSubscriptionsChangedListener(listener)
+            }
+        }
+        if (registered.isFailure) {
+            AppLogRepository.debug(
+                LogSource.POW,
+                "Subscription listener unavailable: ${registered.exceptionOrNull()?.message}",
+            )
+            return
+        }
+        subscriptionsCallback = listener
+    }
+
+    private fun unregisterSubscriptionListener() {
+        val listener = subscriptionsCallback ?: return
+        subscriptionsCallback = null
+        val sm = appContext.getSystemService(SubscriptionManager::class.java) ?: return
+        runCatching { sm.removeOnSubscriptionsChangedListener(listener) }
     }
 
     private fun unregisterNetworkCallback() {
         val cb = networkCallback ?: return
         networkCallback = null
+        cancelSimSwitchWork()
+        unregisterSubscriptionListener()
         runCatching { appContext.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
     }
 
@@ -543,6 +623,7 @@ class PowConnectionCoordinator(
         restoreAttempts.set(0)
         restoreJob?.cancel()
         restoreJob = null
+        cancelSimSwitchWork()
         // The network callback stays registered for the session — push-based, costs nothing.
     }
 
@@ -559,6 +640,7 @@ class PowConnectionCoordinator(
 
     private fun publishConnected() {
         if (stopRequested.get()) return
+        lastRadioIdentity = PowCarrier.radioIdentity(appContext)
         ConnectionStateStore.markConnecting()
         ConnectionStateStore.markConnected()
         val outer = PowStatusStore.status.value.outerLabel.ifBlank {
@@ -809,6 +891,9 @@ class PowConnectionCoordinator(
                             LogSource.POW,
                             "$label ended: ${AetherNative.lastError().ifBlank { "exit $result" }}",
                         )
+                        qualityScope.launch {
+                            onOuterLegDied(label)
+                        }
                     }
                 } catch (error: Throwable) {
                     AppLogRepository.warning(LogSource.POW, "$label threw: ${error.message}")
@@ -1044,6 +1129,12 @@ class PowConnectionCoordinator(
     }
 
     private suspend fun restartPsiphonController() {
+        // onConnected may race a ladder escalate: never tear down a tunnel that
+        // already published ready / is serving traffic.
+        if (innerReady || stopRequested.get()) {
+            AppLogRepository.debug(LogSource.POW, "Psiphon restart skipped (ready=$innerReady)")
+            return
+        }
         innerStarted = false
         withContext(Dispatchers.IO) {
             runCatching { innerClient().stop() }
@@ -1587,22 +1678,231 @@ class PowConnectionCoordinator(
         }
     }
 
+    /** True while Engine-3 is supposed to be serving traffic (not paused / idle). */
+    private fun sessionSupposedUp(): Boolean {
+        if (stopRequested.get() || VpnPauseStore.isPaused()) return false
+        if (restoreWaiting.get()) return false
+        return innerReady || isRunning()
+    }
+
+    private fun scheduleSimSwitchReset(reason: String) {
+        if (stopRequested.get() || VpnPauseStore.isPaused()) return
+        if (!sessionSupposedUp() && !restoreWaiting.get()) return
+        simSwitchJob?.cancel()
+        simSwitchJob = qualityScope.launch {
+            delay(PowNetworkRestore.SIM_SWITCH_DEBOUNCE_MS)
+            if (stopRequested.get() || VpnPauseStore.isPaused()) return@launch
+            runSimSwitchReset(reason)
+        }
+    }
+
+    /**
+     * Irancell ↔ MCI (or any default-data SIM change): ordered rebuild —
+     * stop Psiphon → tear MASQUE → re-attach/protect on NEW radio → raise
+     * outer successfully → only then start Psiphon. Never leave Psiphon
+     * dialing a dead upstream SOCKS.
+     */
+    private suspend fun runSimSwitchReset(reason: String) {
+        if (!simSwitchInFlight.compareAndSet(false, true)) return
+        try {
+            if (stopRequested.get() || VpnPauseStore.isPaused()) return
+
+            val previous = lastRadioIdentity
+            val current = PowCarrier.radioIdentity(appContext)
+            if (previous == null) {
+                lastRadioIdentity = current
+                AppLogRepository.info(LogSource.POW, "SIM reset skipped - no radio baseline yet")
+                return
+            }
+            if (!current.isSimOrOperatorChange(previous)) {
+                AppLogRepository.info(
+                    LogSource.POW,
+                    "SIM reset skipped - same radio ${current.summary()}",
+                )
+                return
+            }
+
+            AppLogRepository.warning(
+                LogSource.POW,
+                "SIM/operator switch - ordered outer→Psiphon reset ($reason) " +
+                    "${previous.summary()} → ${current.summary()}",
+            )
+            publishSimSwitchReconnecting()
+
+            val carrierFlip = current.isConfirmedCarrierFlip(previous)
+
+            PowSocksConnectOnly.setFailFast(true)
+            PowSocksConnectOnly.dropRelays()
+            dropGhost("sim switch")
+            innerReady = false
+            cancelQualityWork()
+
+            // 1) Stop Psiphon first so it cannot hammer a dying outer SOCKS.
+            innerCallbacksArmed.set(false)
+            innerStarted = false
+            withContext(Dispatchers.IO) {
+                runCatching { innerClient().stop() }
+            }
+            // 2) Tear outer MASQUE/WARP.
+            stopOuterLeg()
+
+            val forgotten = PowCoreConfig.forgetPathMemory(appContext)
+            var keyDropped = false
+            if (carrierFlip) {
+                keyDropped = PowIdentityStatus.forget(appContext)
+            }
+            AppLogRepository.info(
+                LogSource.POW,
+                "SIM switch cleared path cache=$forgotten identityDropped=$keyDropped " +
+                    "(carrierFlip=$carrierFlip)",
+            )
+
+            // 3) Re-bind VpnService.protect to the NEW active network.
+            runCatching { AetherNative.attach(service) }
+            delay(500)
+            if (stopRequested.get() || VpnPauseStore.isPaused()) return
+
+            // 4) Full rebuild: raise outer, then Psiphon (retuneLocked order).
+            val recovered = try {
+                retuneMutex.withLock {
+                    if (stopRequested.get()) return@withLock false
+                    retuneLocked("sim-switch:$reason", quality = false)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                AppLogRepository.warning(LogSource.POW, "SIM switch rebuild failed: ${error.message}")
+                false
+            } finally {
+                PowSocksConnectOnly.setFailFast(false)
+            }
+
+            if (stopRequested.get() || VpnPauseStore.isPaused()) return
+            if (recovered && outerProxyAccepts()) {
+                val check = measureQualityProbeLite()
+                if (check > 0L) {
+                    lastRadioIdentity = PowCarrier.radioIdentity(appContext)
+                    publishConnected()
+                    AppLogRepository.success(LogSource.POW, "SIM switch reconnect ok (${check}ms)")
+                    return
+                }
+            }
+
+            if (!carrierFlip && !stopRequested.get() && !VpnPauseStore.isPaused()) {
+                AppLogRepository.info(LogSource.POW, "SIM switch retry with fresh identity/key")
+                PowIdentityStatus.forget(appContext)
+                PowCoreConfig.forgetPathMemory(appContext)
+                runCatching { AetherNative.attach(service) }
+                val retry = try {
+                    retuneMutex.withLock {
+                        if (stopRequested.get()) return@withLock false
+                        retuneLocked("sim-switch-retry:$reason", quality = false)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    false
+                }
+                if (retry && outerProxyAccepts()) {
+                    val check = measureQualityProbeLite()
+                    if (check > 0L) {
+                        lastRadioIdentity = PowCarrier.radioIdentity(appContext)
+                        publishConnected()
+                        AppLogRepository.success(LogSource.POW, "SIM switch retry ok (${check}ms)")
+                        return
+                    }
+                }
+            }
+
+            beginNetworkRestore("sim switch reconnect failed")
+        } finally {
+            simSwitchInFlight.set(false)
+            PowSocksConnectOnly.setFailFast(false)
+        }
+    }
+
+    /**
+     * MASQUE/WARP died while the session should still be up. Cancel Psiphon
+     * establish against the dead SOCKS and rebuild outer first, then Psiphon.
+     */
+    private suspend fun onOuterLegDied(label: String) {
+        if (stopRequested.get() || VpnPauseStore.isPaused()) return
+        if (retuning.get() || simSwitchInFlight.get() || restoreWaiting.get()) return
+        if (!sessionSupposedUp() && !innerReady) return
+        AppLogRepository.warning(
+            LogSource.POW,
+            "$label died mid-session - stopping Psiphon and rebuilding from outer",
+        )
+        publishReconnecting("$label ended")
+        PowSocksConnectOnly.setFailFast(true)
+        PowSocksConnectOnly.dropRelays()
+        innerReady = false
+        cancelQualityWork()
+        innerCallbacksArmed.set(false)
+        withContext(Dispatchers.IO) {
+            runCatching { innerClient().stop() }
+        }
+        stopOuterLeg()
+        runCatching { AetherNative.attach(service) }
+        delay(500)
+        if (stopRequested.get() || VpnPauseStore.isPaused()) return
+        val ok = try {
+            retuneMutex.withLock {
+                if (stopRequested.get()) return@withLock false
+                retuneLocked("outer-died:$label", quality = false)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            AppLogRepository.warning(LogSource.POW, "Outer-died rebuild failed: ${error.message}")
+            false
+        } finally {
+            PowSocksConnectOnly.setFailFast(false)
+        }
+        if (stopRequested.get() || VpnPauseStore.isPaused()) return
+        if (ok && outerProxyAccepts()) {
+            publishConnected()
+        } else {
+            beginNetworkRestore("$label ended")
+        }
+    }
+
+    private fun publishSimSwitchReconnecting() {
+        if (stopRequested.get()) return
+        ConnectionStateStore.markConnecting()
+        PowStatusStore.update(
+            PowPhase.STARTING,
+            20,
+            PowNetworkRestore.simSwitchDetail(),
+        )
+        notificationSink?.invoke(false)
+    }
+
+    private fun cancelSimSwitchWork() {
+        simSwitchJob?.cancel()
+        simSwitchJob = null
+        simSwitchInFlight.set(false)
+    }
+
     /**
      * onLost is not proof the tunnel died — the default network may simply have
-     * changed. Verify cheaply first; only a failing probe starts the restore flow.
-     * This is what turns a Wi-Fi/cell handoff into a seconds-long blip instead of
-     * waiting on the full liveness poll.
+     * changed. Probe once; only enter the restore waiter if the path is dead.
      */
-    private suspend fun verifyPathAfterNetworkChange() {
+        private suspend fun verifyPathAfterNetworkChange() {
+        if (SystemClock.elapsedRealtime() < connectGraceUntilMs) {
+            AppLogRepository.debug(LogSource.POW, "Network change ignored during connect grace")
+            return
+        }
         if (!isHealthyPath()) {
             beginNetworkRestore("network changed")
             return
         }
         val sample = measureQualityProbeLite()
-        if (sample <= 0L && !retuning.get() && !stopRequested.get()) {
+        if (sample <= 0L && !retuning.get() && !stopRequested.get() && !VpnPauseStore.isPaused()) {
             beginNetworkRestore("network lost")
         }
     }
+
 
     private suspend fun watchLiveness() {
         delay(PowWatchdog.SETTLE_MS)
@@ -1915,6 +2215,9 @@ class PowConnectionCoordinator(
             delay(350)
             if (stopRequested.get()) return false
             stopOuterLeg()
+            // Re-bind VpnService.protect to the active network after tearing
+            // the outer leg (SIM switch / radio change / mid-session death).
+            runCatching { AetherNative.attach(service) }
             if (stopRequested.get()) return false
             val outer = if (optimized && quality) {
                 raiseOuterLeg(
@@ -2009,6 +2312,7 @@ class PowConnectionCoordinator(
     }
 
     companion object {
+        private const val CONNECT_GRACE_MS = 8_000L
         private const val OUTER_START_GRACE_MS = 4_000L
         private const val OUTER_STOP_GRACE_MS = 4_000L
         private const val FORCE_NATIVE_EXIT_MS = 2_000L

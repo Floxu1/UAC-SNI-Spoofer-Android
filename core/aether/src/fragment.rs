@@ -110,6 +110,16 @@ pub struct FragmentingStream<S> {
     cfg: FragmentConfig,
     fragmenting: bool,
     pending_delay: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// OOB desync of the first write (see `crate::oob`).
+    oob: OobState,
+}
+
+enum OobState {
+    Off,
+    /// Next non-trivial write is the ClientHello: send its desync prefix.
+    Prefix(crate::oob::OobMethod, String),
+    /// Prefix sent; wait, then send `buf[resume..]` normally.
+    Pause(Pin<Box<tokio::time::Sleep>>, usize),
 }
 
 impl<S> FragmentingStream<S> {
@@ -119,7 +129,19 @@ impl<S> FragmentingStream<S> {
             fragmenting: cfg.enabled,
             cfg,
             pending_delay: None,
+            oob: OobState::Off,
         }
+    }
+
+    /// The first write goes out with an OOB desync `method`; no fragmenting.
+    pub fn with_oob(mut self, method: crate::oob::OobMethod, sni_host: &str) -> Self {
+        self.oob = OobState::Prefix(method, sni_host.to_string());
+        self.fragmenting = false;
+        self
+    }
+
+    pub fn get_ref(&self) -> &S {
+        &self.inner
     }
 }
 
@@ -140,7 +162,7 @@ where
 
 impl<S> AsyncWrite for FragmentingStream<S>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncWrite + Unpin + crate::oob::DesyncSocket,
 {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -148,6 +170,39 @@ where
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
+
+        if let OobState::Prefix(method, host) = &this.oob {
+            if buf.len() > 1 {
+                let method = *method;
+                match this.inner.poll_oob_prefix(cx, buf, method, host) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => {
+                        this.oob = OobState::Off;
+                        return Poll::Ready(Err(error));
+                    }
+                    Poll::Ready(Ok(resume)) => {
+                        this.oob =
+                            OobState::Pause(Box::pin(tokio::time::sleep(method.pause())), resume);
+                    }
+                }
+            }
+        }
+        if let OobState::Pause(sleep, resume) = &mut this.oob {
+            // The caller retries the same hello buffer until bytes are taken.
+            if sleep.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            let resume = (*resume).min(buf.len());
+            this.oob = OobState::Off;
+            return match Pin::new(&mut this.inner).poll_write(cx, &buf[resume..]) {
+                Poll::Ready(Ok(n)) => Poll::Ready(Ok(resume + n)),
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                // Bytes before `resume` already left; report them. With
+                // resume 0 nothing was taken yet: the retry writes normally.
+                Poll::Pending if resume > 0 => Poll::Ready(Ok(resume)),
+                Poll::Pending => Poll::Pending,
+            };
+        }
 
         if buf.is_empty() || !this.fragmenting {
             return Pin::new(&mut this.inner).poll_write(cx, buf);

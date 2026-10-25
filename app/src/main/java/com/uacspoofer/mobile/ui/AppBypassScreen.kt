@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -24,11 +25,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
@@ -48,7 +46,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -56,7 +53,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -81,21 +77,25 @@ private fun bypassLtr(value: String): String = "\u2066$value\u2069"
 
 private data class RoutingModeUi(
     val mode: AppRoutingMode,
-    val title: String,
-    val icon: ImageVector,
+    val english: String,
+    val persian: String,
 )
 
 private val RoutingModes = listOf(
-    RoutingModeUi(AppRoutingMode.ALL_APPS, "All apps", Icons.Outlined.Public),
+    RoutingModeUi(
+        AppRoutingMode.ALL_APPS,
+        "All apps use the VPN",
+        "همه برنامه‌ها از ${bypassLtr("VPN")} استفاده کنند",
+    ),
     RoutingModeUi(
         AppRoutingMode.BYPASS_SELECTED,
-        "Bypass selected",
-        Icons.Outlined.Block,
+        "Selected apps do not use the VPN",
+        "برنامه‌های انتخابی از ${bypassLtr("VPN")} استفاده نکنند",
     ),
     RoutingModeUi(
         AppRoutingMode.VPN_ONLY_SELECTED,
-        "Selected apps only",
-        Icons.Outlined.Shield,
+        "Only selected apps use the VPN",
+        "فقط برنامه‌های انتخابی از ${bypassLtr("VPN")} استفاده کنند",
     ),
 )
 
@@ -188,41 +188,35 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
                 Text(
                     text = homeText("App Bypass", "عبور انتخابی برنامه‌ها"),
                     color = UacColors.TextPrimary,
-                    fontSize = 28.sp,
+                    fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(3.dp))
+                Spacer(Modifier.height(2.dp))
                 Text(
-                    text = homeText("Choose which apps use the secure tunnel", "انتخاب کن کدوم برنامه‌ها از تونل امن استفاده کنن"),
+                    text = homeText(
+                        "Choose which apps should use VPN and which should go direct",
+                        "مشخص کن کدوم برنامه‌ها ${bypassLtr("VPN")} داشته باشن و کدوم مستقیم",
+                    ),
                     color = UacColors.TextSecondary,
-                    fontSize = 15.sp,
+                    fontSize = 12.5.sp,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(12.dp))
 
-                Row(
+                RoutingModeRadioList(
+                    selected = settings.mode,
+                    onSelect = { AppRoutingPreferences.setMode(context, it) },
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    val visibleModes = if (isPersian) RoutingModes.asReversed() else RoutingModes
-                    visibleModes.forEach { item ->
-                        RoutingModeCard(
-                            item = item,
-                            selected = settings.mode == item.mode,
-                            onClick = { AppRoutingPreferences.setMode(context, item.mode) },
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
+                )
             } else {
                 Spacer(Modifier.height(8.dp))
             }
 
             if (settings.mode != AppRoutingMode.ALL_APPS) {
-                Spacer(Modifier.height(if (searchMode) 4.dp else 15.dp))
+                Spacer(Modifier.height(if (searchMode) 4.dp else 12.dp))
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
@@ -355,65 +349,74 @@ internal fun AppBypassScreen(onMenuClick: () -> Unit) {
 }
 
 @Composable
-private fun RoutingModeCard(
-    item: RoutingModeUi,
-    selected: Boolean,
-    onClick: () -> Unit,
+private fun RoutingModeRadioList(
+    selected: AppRoutingMode,
+    onSelect: (AppRoutingMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(18.dp)
     val isPersian = LocalHomePersian.current
-    val title = when (item.mode) {
-        AppRoutingMode.ALL_APPS -> homeText(item.title, "همه برنامه‌ها")
-        AppRoutingMode.BYPASS_SELECTED -> homeText(item.title, "عبور انتخابی برنامه‌ها")
-        AppRoutingMode.VPN_ONLY_SELECTED -> homeText(item.title, "فقط برنامه‌های انتخابی")
-    }
     Column(
-        modifier = modifier
-            .height(108.dp)
-            .shadow(
-                elevation = if (selected) 12.dp else 0.dp,
-                shape = shape,
-                ambientColor = UacColors.DisconnectedBlue.copy(alpha = 0.35f),
-                spotColor = UacColors.DisconnectedBlue.copy(alpha = 0.55f),
-            )
-            .clip(shape)
-            .background(
-                if (selected) {
-                    Brush.verticalGradient(listOf(Color(0xFF0B3C67), Color(0xFF081F35)))
-                } else {
-                    Brush.verticalGradient(listOf(Color(0xE6102030), Color(0xE6091724)))
-                },
-            )
-            .border(
-                if (selected) 1.5.dp else 1.dp,
-                if (selected) Color(0xFF26B8FF) else UacColors.CardBorder,
-                shape,
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp, vertical = 9.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(41.dp)
-                .background(UacColors.DisconnectedBlue.copy(alpha = if (selected) 0.18f else 0.10f), CircleShape)
-                .border(1.dp, UacColors.DisconnectedBlue.copy(alpha = 0.42f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(item.icon, null, tint = if (selected) Color(0xFF32C2FF) else Color(0xFFB6CBD8), modifier = Modifier.size(22.dp))
+        RoutingModes.forEach { item ->
+            val active = selected == item.mode
+            val label = homeText(item.english, item.persian)
+            val shape = RoundedCornerShape(14.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+                    .clip(shape)
+                    .background(if (active) Color(0xCC0C3558) else Color(0x990B1622))
+                    .border(
+                        if (active) 1.5.dp else 1.dp,
+                        if (active) Color(0xFF2BB4FF) else UacColors.CardBorder,
+                        shape,
+                    )
+                    .clickable { onSelect(item.mode) }
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isPersian) {
+                    RadioButton(
+                        selected = active,
+                        onClick = null,
+                        colors = RadioButtonDefaults.colors(
+                            selectedColor = Color(0xFF32C2FF),
+                            unselectedColor = Color(0xFF7E93A8),
+                        ),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = label,
+                        color = if (active) UacColors.TextPrimary else Color(0xFFC2D3E2),
+                        fontSize = 13.5.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Text(
+                        text = label,
+                        color = if (active) UacColors.TextPrimary else Color(0xFFC2D3E2),
+                        fontSize = 13.5.sp,
+                        lineHeight = 19.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    RadioButton(
+                        selected = active,
+                        onClick = null,
+                        colors = RadioButtonDefaults.colors(
+                            selectedColor = Color(0xFF32C2FF),
+                            unselectedColor = Color(0xFF7E93A8),
+                        ),
+                    )
+                }
+            }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = title,
-            color = UacColors.TextPrimary,
-            fontSize = if (isPersian) 12.5.sp else 12.sp,
-            lineHeight = if (isPersian) 17.sp else 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 

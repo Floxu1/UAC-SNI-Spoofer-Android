@@ -57,6 +57,14 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import com.uacspoofer.mobile.engine.pow.MtuAutoScanner
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.draw.rotate
@@ -294,10 +302,18 @@ private fun PowSettingsPanel() {
     val fetches = listOf(
         PowMenuChoice(
             PowCoreConfig.KEY_AUTO,
-            homeText("Automatic (all three)", "خودکار (هر سه همزمان)"),
+            homeText("Automatic", "خودکار"),
             homeText(
-                "Tries ECH, split ClientHello, and the current network together. The first ready route sends the request.",
-                "ECH، تکه‌کردن ClientHello و شبکه فعلی همزمان امتحان می‌شوند؛ هر کدام زودتر آماده شود همان کلید را می‌گیرد.",
+                "First the three OOB methods, one at a time (disoob-byte0-ttl1, then oob-insni+5-ttl1, then oob-byte0-nottl). Only if all three fail: relay, ECH, split ClientHello and the current network together; the first ready route sends the request.",
+                "اول سه روش OOB یکی‌یکی امتحان می‌شود (disoob-byte0-ttl1، بعد oob-insni+5-ttl1، بعد oob-byte0-nottl). فقط اگر هر سه ناموفق باشند، رله، ECH، تکه‌کردن ClientHello و شبکه فعلی با هم امتحان می‌شوند و اولین مسیر آماده درخواست را می‌فرستد.",
+            ),
+        ),
+        PowMenuChoice(
+            PowCoreConfig.KEY_OOB,
+            homeText("OOB only", "فقط OOB"),
+            homeText(
+                "Only the OOB desync (Android: oob-byte0-nottl first, then ttl1 variants; TLS 1.2 then 1.3). Winning method tried first next time. No relay, ECH or split hello.",
+                "فقط روش OOB، یکی‌یکی: disoob-byte0-ttl1، بعد oob-insni+5-ttl1، بعد oob-byte0-nottl (اول TLS 1.3، بعد TLS 1.2). روش برنده برای درخواست بعدی اول امتحان می‌شود. بدون رله، ECH یا تکه‌کردن ClientHello.",
             ),
         ),
         PowMenuChoice(
@@ -479,7 +495,14 @@ private fun PowAdvancedCard(
         PowMenuChoice("1280", homeLtr("1280"), homeText("Safest on every network.", "امن‌ترین روی همه شبکه‌ها.")),
         PowMenuChoice("1350", homeLtr("1350"), homeText("Bigger packets, less overhead.", "بسته‌های بزرگ‌تر، سربار کمتر.")),
         PowMenuChoice("1400", homeLtr("1400"), homeText("Largest; may break on some lines.", "بزرگ‌ترین؛ روی بعضی خطوط مشکل دارد.")),
-    )
+    ).let { list ->
+        val id = settings.tunMtu.toString()
+        if (list.none { it.id == id }) {
+            list + PowMenuChoice(id, homeLtr(id), homeText("Custom value", "مقدار دلخواه"))
+        } else {
+            list
+        }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -507,7 +530,7 @@ private fun PowAdvancedCard(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    homeText("HTTP/2 speed, handover, logs", "سرعت HTTP/2، جابه‌جایی تونل، لاگ"),
+                    homeText("HTTP/2, MTU, tunnels, logs", "HTTP/2، MTU، تونل، لاگ"),
                     color = UacColors.TextSecondary,
                     fontSize = 11.5.sp,
                     maxLines = 2,
@@ -524,45 +547,6 @@ private fun PowAdvancedCard(
             )
         }
         PowExpandBody(visible = expanded) {
-            PowSwitchRow(
-                icon = Icons.Outlined.SwapHoriz,
-                title = homeText("Seamless tunnel swap", "جابه‌جایی بی‌وقفه تونل"),
-                subtitle = homeText(
-                    "New tunnel first, old one kept if it fails",
-                    "اول اتصال جدید آماده می‌شه، بعد قبلی قطع می‌شه؛ بدون قطعی",
-                ),
-                checked = settings.ghostHandover,
-                accent = accent,
-                onCheckedChange = { store.save(settings.copy(ghostHandover = it)) },
-            )
-            PowRowDivider()
-            PowSwitchRow(
-                icon = Icons.Outlined.Speed,
-                title = homeText("Large HTTP/2 windows", "پنجره بزرگ HTTP/2"),
-                subtitle = homeText("16 MB link / 8 MB stream, faster downloads", "دانلودها سریع‌تر می‌شن"),
-                checked = settings.h2LargeWindows,
-                accent = accent,
-                onCheckedChange = { store.save(settings.copy(h2LargeWindows = it)) },
-            )
-            PowRowDivider()
-            PowSwitchRow(
-                icon = Icons.Outlined.SettingsEthernet,
-                title = homeText("Socket tuning", "تنظیم سوکت"),
-                subtitle = homeText("TCP_NODELAY + 1 MB buffers on HTTP/2", "ویدیو و دانلود روون‌تر می‌شن"),
-                checked = settings.h2SocketTuning,
-                accent = accent,
-                onCheckedChange = { store.save(settings.copy(h2SocketTuning = it)) },
-            )
-            PowRowDivider()
-            PowSwitchRow(
-                icon = Icons.Outlined.Radar,
-                title = homeText("Pick the fastest gateway", "انتخاب سریع‌ترین گیت‌وی"),
-                subtitle = homeText("Races the top 3 saved IPs, keeps the quickest", "از بین ۳ سرور ذخیره‌شده، سریع‌ترین انتخاب می‌شه"),
-                checked = settings.h2SpeedPick,
-                accent = accent,
-                onCheckedChange = { store.save(settings.copy(h2SpeedPick = it)) },
-            )
-            PowRowDivider()
             PowPickerRow(
                 icon = Icons.Outlined.Shield,
                 label = homeText("HTTP/2 obfuscation", "مبهم‌سازی HTTP/2"),
@@ -583,7 +567,7 @@ private fun PowAdvancedCard(
                 onSelect = { store.save(settings.copy(h2FragmentMode = it)) },
             )
             PowRowDivider()
-            PowPickerRow(
+            PowMtuPickerRow(
                 icon = Icons.Outlined.Hub,
                 label = homeText("Tunnel MTU", "MTU تونل"),
                 sheetTitle = homeText("Tunnel MTU", "MTU تونل"),
@@ -928,6 +912,295 @@ internal fun PowPickerRow(
     }
 }
 
+/** MTU picker with Scan + manual entry inside the same bottom sheet. */
+@Composable
+internal fun PowMtuPickerRow(
+    icon: ImageVector,
+    label: String,
+    sheetTitle: String,
+    choices: List<PowMenuChoice>,
+    selectedId: String,
+    accent: Color,
+    onSelect: (String) -> Unit,
+    tileTint: Color = accent,
+) {
+    var open by remember { mutableStateOf(false) }
+    val selected = choices.firstOrNull { it.id == selectedId }
+        ?: PowMenuChoice(selectedId, homeLtr(selectedId), homeText("Custom value", "مقدار دلخواه"))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clickable { open = true }
+            .padding(horizontal = PowPad, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(PowGap),
+    ) {
+        PowIconTile(icon, tileTint)
+        Text(
+            label,
+            color = UacColors.TextPrimary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        PowPill(latinDigits(selected.title), accent, chevron = true)
+    }
+    if (open) {
+        PowMtuChoiceSheet(
+            title = sheetTitle,
+            choices = choices,
+            selectedId = selectedId,
+            accent = accent,
+            onSelect = { id ->
+                onSelect(id)
+            },
+            onDismiss = { open = false },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PowMtuChoiceSheet(
+    title: String,
+    choices: List<PowMenuChoice>,
+    selectedId: String,
+    accent: Color,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    var scanning by remember { mutableStateOf(false) }
+    var tryingMtu by remember { mutableIntStateOf(0) }
+    var scannedMtu by remember { mutableIntStateOf(MtuAutoScanner.lastScannedMtu(context)) }
+    var customText by remember { mutableStateOf(if (selectedId == "0") "" else selectedId) }
+    var customError by remember { mutableStateOf("") }
+    val scannedLabelPrefix = homeText("Scanned MTU: ", "MTU اسکن‌شده: ")
+    val customRangeError = homeText(
+        "Enter a number between 1000 and 1500.",
+        "عددی بین ۱۰۰۰ تا ۱۵۰۰ وارد کنید.",
+    )
+
+    fun closeAfterSelect(id: String) {
+        onSelect(id)
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onDismiss()
+        }
+    }
+
+    /** Apply MTU and keep this sheet open (used by Scan). */
+    fun applyKeepOpen(id: String) {
+        onSelect(id)
+        customText = if (id == "0") "" else id
+        customError = ""
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = PowSheetColor,
+        contentColor = Color.White,
+        dragHandle = {
+            Box(
+                Modifier
+                    .padding(top = 10.dp, bottom = 4.dp)
+                    .size(width = 38.dp, height = 4.dp)
+                    .background(Color.White.copy(alpha = 0.24f), CircleShape),
+            )
+        },
+    ) {
+        PowDirectional {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    title,
+                    color = UacColors.TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                )
+                choices.forEach { choice ->
+                    val chosen = choice.id == selectedId
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(PowShape)
+                            .background(if (chosen) accent.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.03f))
+                            .border(1.dp, if (chosen) accent.copy(alpha = 0.55f) else PowBorder, PowShape)
+                            .clickable(enabled = !scanning) {
+                                closeAfterSelect(choice.id)
+                            }
+                            .padding(horizontal = PowPad, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(PowGap),
+                    ) {
+                        Icon(
+                            if (chosen) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
+                            contentDescription = null,
+                            tint = if (chosen) accent else UacColors.TextSecondary.copy(alpha = 0.7f),
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                latinDigits(choice.title),
+                                color = if (chosen) accent else UacColors.TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (choice.hint.isNotBlank()) {
+                                Text(
+                                    latinDigits(choice.hint),
+                                    color = UacColors.TextSecondary,
+                                    fontSize = PowHintSize,
+                                    lineHeight = PowHintLine,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(
+                    color = UacColors.Divider.copy(alpha = 0.45f),
+                    thickness = 1.dp,
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+
+                Text(
+                    homeText("Scan or type your own", "اسکن یا مقدار دلخواه"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+                PowHint(
+                    homeText(
+                        "Recommended is usually 1280. Scan checks 1500 down to 1000 and picks the largest that fits.",
+                        "معمولاً ۱۲۸۰ بهترینه. اسکن از ۱۵۰۰ تا ۱۰۰۰ را چک می‌کند و بزرگ‌ترین اندازهٔ مناسب را برمی‌دارد.",
+                    ),
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(PowGap),
+                ) {
+                    if (scanning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = accent,
+                            strokeWidth = 2.dp,
+                        )
+                        Text(
+                            if (tryingMtu > 0) {
+                                homeText("Trying ", "در حال تست ") + homeLtr(tryingMtu.toString()) + "…"
+                            } else {
+                                homeText("Scanning…", "در حال اسکن…")
+                            },
+                            color = UacColors.TextSecondary,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        PowButton(
+                            text = homeText("Scan", "اسکن"),
+                            enabled = true,
+                            accent = accent,
+                            filled = true,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                scanning = true
+                                customError = ""
+                                scope.launch {
+                                    val result = MtuAutoScanner.scan(context) { tryingMtu = it }
+                                    scanning = false
+                                    tryingMtu = 0
+                                    scannedMtu = result.mtu
+                                    applyKeepOpen(result.mtu.toString())
+                                }
+                            },
+                        )
+                    }
+                }
+                if (scannedMtu in MtuAutoScanner.MIN_SAVED..MtuAutoScanner.MAX_SAVED) {
+                    Text(
+                        latinDigits(scannedLabelPrefix + homeLtr(scannedMtu.toString())),
+                        color = UacColors.ConnectedGreen,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(PowShape)
+                            .background(UacColors.ConnectedGreen.copy(alpha = 0.10f))
+                            .border(1.dp, UacColors.ConnectedGreen.copy(alpha = 0.35f), PowShape)
+                            .padding(horizontal = PowPad, vertical = 10.dp),
+                    )
+                }
+
+                OutlinedTextField(
+                    value = customText,
+                    onValueChange = {
+                        customText = it.filter { ch -> ch.isDigit() }.take(4)
+                        customError = ""
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !scanning,
+                    label = { Text(homeText("Custom MTU", "مقدار دلخواه")) },
+                    placeholder = { Text(homeLtr("1000–1500")) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = accent,
+                        cursorColor = accent,
+                        focusedLabelColor = accent,
+                    ),
+                )
+                if (customError.isNotBlank()) {
+                    Text(
+                        customError,
+                        color = UacColors.ErrorRed,
+                        fontSize = PowHintSize,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                }
+                PowButton(
+                    text = homeText("Apply custom", "اعمال مقدار دلخواه"),
+                    enabled = !scanning && customText.isNotBlank(),
+                    accent = accent,
+                    filled = false,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        val value = customText.toIntOrNull()
+                        val clamped = value?.let(MtuAutoScanner::clampManual)
+                        if (clamped == null) {
+                            customError = customRangeError
+                        } else {
+                            customText = clamped.toString()
+                            closeAfterSelect(clamped.toString())
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PowChoiceSheet(
@@ -937,6 +1210,7 @@ internal fun PowChoiceSheet(
     accent: Color,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
+    footer: (@Composable () -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
@@ -1018,6 +1292,7 @@ internal fun PowChoiceSheet(
                         }
                     }
                 }
+                footer?.invoke()
             }
         }
     }

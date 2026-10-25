@@ -33,6 +33,34 @@ object AetherNative {
 
     fun prepare(config: String): TunnelAddresses {
         checkAvailable()
+        // When the user chose OOB-only and there is no identity yet, try the
+        // Java SslSocket+OOB lane first (desktop keyfetch-net parity). BoringSSL
+        // OOB on Android often completes the TLS handshake then gets 0 HTTP bytes.
+        runCatching {
+            val json = JSONObject(config)
+            if (json.optString("api_camo") == "oob") {
+                val path = json.optString("config_path")
+                if (path.isNotBlank()) {
+                    val file = java.io.File(path)
+                    if (!file.exists()) {
+                        val ok = OobKeyFetch.tryFetch(file)
+                        android.util.Log.i("UAC-POW", "Key: java-oob tryFetch returned $ok")
+                    }
+                }
+            }
+        }.onFailure { err ->
+            android.util.Log.e("UAC-POW", "Key: java-oob lane crashed: ${err.javaClass.simpleName}: ${err.message}", err)
+        }
+        // Defensive: rewrite identity PEMs if an older build left blank lines in cert_pem.
+        runCatching {
+            val path = JSONObject(config).optString("config_path")
+            if (path.isNotBlank()) {
+                val file = java.io.File(path)
+                if (PemUtil.sanitizeIdentityFile(file)) {
+                    android.util.Log.i("UAC-POW", "Key: sanitized blank lines out of identity PEM")
+                }
+            }
+        }
         check(nativePrepare(config) == 0) { nativeLastError().ifBlank { "prepare failed" } }
         val result = JSONObject(nativeLastResult())
         return TunnelAddresses(
@@ -123,6 +151,7 @@ object AetherNative {
 
     fun attach(service: VpnService) {
         checkAvailable()
+        OobKeyFetch.bindVpn(service)
         nativeAttach(service)
     }
 

@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import android.os.SystemClock
+import com.uacspoofer.mobile.mci.DomesticDirect
 
 internal object PowSocksConnectOnly {
     private const val CMD_CONNECT = 0x01
@@ -139,18 +140,31 @@ internal object PowSocksConnectOnly {
     private const val DOMESTIC_CONNECT_TIMEOUT_MS = 4_000
     private val DOMESTIC_SUCCESS = byteArrayOf(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0)
     @Volatile private var domesticDirect = true
+    @Volatile private var trafficPaused = false
     private val domesticLogged = AtomicBoolean(false)
 
     fun setDomesticDirect(enabled: Boolean) {
         domesticDirect = enabled
+        DomesticDirect.applyEnabled(enabled)
         domesticLogged.set(false)
     }
 
-    /** True for a host name under the .ir TLD (SOCKS ATYP domain only). */
-    fun isDomesticHost(host: String): Boolean {
-        val name = host.trim().trimEnd('.').lowercase()
-        return name.length > 3 && name.endsWith(".ir")
+    fun setTrafficPaused(paused: Boolean) {
+        trafficPaused = paused
+        domesticLogged.set(false)
+        if (paused) {
+            // Kill in-flight tunnel sessions so Pause takes effect immediately.
+            val n = liveSockets.size
+            liveSockets.forEach { runCatching { it.close() } }
+            liveSockets.clear()
+            if (n > 0) {
+                AppLogRepository.info(LogSource.POW, "Pause: dropped $n live sockets (direct-only)")
+            }
+        }
     }
+
+    /** Iranian / domestic host (.ir, category-ir, fallback list). */
+    fun isDomesticHost(host: String): Boolean = DomesticDirect.isDomesticHost(host)
 
     private fun requestDomain(request: ByteArray): Pair<String, Int>? {
         if (request.size < 7 || (request[3].toInt() and 0xff) != 0x03) return null
@@ -183,6 +197,67 @@ internal object PowSocksConnectOnly {
     /** Warm the .ir direct-route cache (phone network DNS; never through Psiphon or WARP). */
     fun prefetchDomestic(host: String): Boolean =
         isDomesticHost(host) && runCatching { resolveDomestic(host) }.isSuccess
+
+
+
+    /** hev mapdns answers in 100.64.0.0/10; Tor uses 198.18.0.0/15 locally. Not real destinations. */
+    private fun isHevFakeIp(ip: InetAddress): Boolean {
+        val b = ip.address
+        if (b.size != 4) return false
+        val a0 = b[0].toInt() and 0xff
+        val a1 = b[1].toInt() and 0xff
+        if (a0 == 100 && a1 in 64..127) return true
+        if (a0 == 198 && a1 in 18..19) return true
+        return false
+    }
+
+    /** Pause: every CONNECT leaves on the phone network (domains + literal IPs). */
+    private fun connectPausedDirect(request: ByteArray): Socket? {
+        val atyp = request[3].toInt() and 0xff
+        val direct = Socket()
+        try {
+            direct.tcpNoDelay = true
+            direct.keepAlive = true
+            when (atyp) {
+                0x03 -> {
+                    val pair = requestDomain(request) ?: run {
+                        runCatching { direct.close() }
+                        return null
+                    }
+                    if (pair.second <= 0) {
+                        runCatching { direct.close() }
+                        return null
+                    }
+                    direct.connect(InetSocketAddress(pair.first, pair.second), DOMESTIC_CONNECT_TIMEOUT_MS)
+                }
+                0x01 -> {
+                    if (request.size < 10) {
+                        runCatching { direct.close() }
+                        return null
+                    }
+                    val ip = InetAddress.getByAddress(request.copyOfRange(4, 8))
+                    // hev mapdns fake nets are not routable on the phone network.
+                    if (isHevFakeIp(ip)) {
+                        runCatching { direct.close() }
+                        return null
+                    }
+                    val port = ((request[8].toInt() and 0xff) shl 8) or (request[9].toInt() and 0xff)
+                    direct.connect(InetSocketAddress(ip, port), DOMESTIC_CONNECT_TIMEOUT_MS)
+                }
+                else -> {
+                    runCatching { direct.close() }
+                    return null
+                }
+            }
+            if (domesticLogged.compareAndSet(false, true)) {
+                AppLogRepository.info(LogSource.POW, "Pause: traffic going direct (not through tunnel)")
+            }
+            return direct
+        } catch (_: Throwable) {
+            runCatching { direct.close() }
+            return null
+        }
+    }
 
     private fun connectDomestic(request: ByteArray): Socket? {
         if (!domesticDirect) return null
@@ -366,6 +441,28 @@ internal object PowSocksConnectOnly {
             requestDomain(request)?.let { PowDnsWarm.note(it.first) }
             if ((request[1].toInt() and 0xff) != CMD_CONNECT) {
                 output.write(COMMAND_NOT_SUPPORTED)
+                output.flush()
+                return
+            }
+            if (trafficPaused) {
+                val bypass = connectPausedDirect(request)
+                if (bypass != null) {
+                    upstream = bypass
+                    track(bypass)
+                    output.write(DOMESTIC_SUCCESS)
+                    output.flush()
+                    client.soTimeout = 0
+                    spliceWithQos(
+                        client, bypass, input, output,
+                        bypass.getInputStream(), bypass.getOutputStream(),
+                        started, measure = false,
+                    )
+                    return
+                }
+                // Hard stop: never fall through to Psiphon while paused.
+                val target = requestTarget(request) ?: "?"
+                AppLogRepository.warning(LogSource.POW, "Pause: direct failed for $target; refusing tunnel")
+                output.write(byteArrayOf(0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0))
                 output.flush()
                 return
             }

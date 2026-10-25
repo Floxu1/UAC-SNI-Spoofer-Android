@@ -85,7 +85,9 @@ Key and certificate (no tunnel; prints JSON and exits):
   --prepare-only           provision the WARP key and MASQUE certificate, then exit
   --renew-cert             with --prepare-only, mint a new MASQUE certificate
                            even when one is already saved
-  --api-camo <mode>        key-request camouflage: ech | fragment | external
+  --api-camo <mode>        key-request camouflage: auto | oob | relay | ech | doh | fragment | external
+  --api-relay <urls>       comma-separated relay URLs for the relay route (AETHER_API_RELAY)
+  --api-ech <base64>       ECHConfigList for the doh key route (AETHER_API_ECH)
   --discovery <mode>       endpoint discovery: cache | fresh | clean
   --scan-once              one failed hunt returns instead of rescanning
 
@@ -193,6 +195,8 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<()> {
             "--prepare-only" => set("AETHER_PREPARE_ONLY", "1"),
             "--renew-cert" => set("AETHER_RENEW_CERT", "1"),
             "--api-camo" => set("AETHER_API_CAMO", next_value!()),
+            "--api-ech" => set("AETHER_API_ECH", next_value!()),
+            "--api-relay" => set("AETHER_API_RELAY", next_value!()),
             "--discovery" => set("AETHER_DISCOVERY", next_value!()),
             "--scan-once" => set("AETHER_SCAN_ONCE", "1"),
 

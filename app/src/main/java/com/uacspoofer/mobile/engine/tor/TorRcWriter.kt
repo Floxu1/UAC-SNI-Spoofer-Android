@@ -33,7 +33,7 @@ internal object TorRcWriter {
             if (geoIp6File != null) {
                 appendLine("GeoIPv6File ${geoIp6File.absolutePath}")
             }
-            appendLine("SocksPort 127.0.0.1:${validated.socksPort}" + if (validated.multiCircuit) " IsolateDestAddr" else "")
+            appendLine("SocksPort 127.0.0.1:${validated.daemonSocksPort}" + if (validated.multiCircuit) " IsolateDestAddr" else "")
             appendLine("ControlPort 127.0.0.1:${validated.controlPort}")
             appendLine("CookieAuthentication 0")
             if (hashedControlPassword.isNotBlank()) {

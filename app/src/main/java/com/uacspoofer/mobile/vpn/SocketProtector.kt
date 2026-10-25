@@ -19,6 +19,10 @@ class VpnSocketProtector(
         service.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     override fun protect(socket: Socket): Boolean {
+        if (!SocketProtectGate.isEnabled(service)) {
+            Log.i(TAG, "protect skipped (socket_protect_enabled=false)")
+            return true
+        }
         if (!service.protect(socket)) return false
         val underlying = findUnderlyingNetwork()
             ?: error("No non-VPN underlying network available")

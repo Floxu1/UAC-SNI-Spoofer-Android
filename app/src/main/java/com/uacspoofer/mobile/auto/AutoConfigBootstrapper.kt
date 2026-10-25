@@ -11,6 +11,7 @@ import com.uacspoofer.mobile.mci.MciXrayCore
 import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
 import com.uacspoofer.mobile.profiles.DirectCompatProfile
 import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
+import com.uacspoofer.mobile.profiles.LocalForwardProfile
 import com.uacspoofer.mobile.profiles.ProfileUriParser
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
@@ -124,36 +125,65 @@ class AutoConfigBootstrapper(context: Context) {
         XrayLiveFlow.start(XrayFlowStageId.CLEAN_IP)
         coroutineContext.ensureActive()
 
-        // 3. Clean IP copies for non-ECH Cloudflare configs; ECH keeps its own address.
+        // 3. Clean IP copies: FM always; ECH only when Patterniha uses 127.0.0.1:40443
+        // (DirectCompat drops loopback, so those ECH links never reached the probe).
         AutoBootstrapStore.stage(AutoStage.CLEAN_IP, AutoStageState.RUNNING)
         val cleanIps = buildList {
             edgePoolStore.champion(fingerprint, ProxyProfile.AUTO_ID)?.address?.let(::add)
             edgePoolStore.pool(fingerprint, ProxyProfile.AUTO_ID)?.map(MciEdge::address)?.let(::addAll)
             addAll(DEFAULT_CLEAN_IPS)
         }.filter { !it.contains(':') }.distinct().take(CLEAN_IP_ALTERNATES)
+        fun isLoopbackHost(address: String): Boolean =
+            address.equals(LocalForwardProfile.HOST, ignoreCase = true) ||
+                address.equals("localhost", ignoreCase = true)
         val base = PatternihaList.order(parsed, dpi, fingerprint.hasIpv6, MAX_CANDIDATES)
         val copies = base.filter { it.variant == AutoVariant.FM }.take(CLEAN_IP_SOURCES).flatMap { c ->
             cleanIps.filter { it != c.address }.take(2).map { ip ->
                 c.copy(uri = PatternihaList.withAddress(c.uri, ip), address = ip, cleanIp = true)
             }
         }
-        val ordered = PatternihaList.order(parsed + copies, dpi, fingerprint.hasIpv6, MAX_CANDIDATES)
-        AutoBootstrapStore.stage(AutoStage.CLEAN_IP, AutoStageState.DONE, "${cleanIps.size} IP · ${copies.size}")
-        XrayLiveFlow.done(XrayFlowStageId.CLEAN_IP, "${cleanIps.size} IP · ${copies.size} نسخه", listOf("IPs" to cleanIps.take(4).joinToString(", ")))
+        val echPlaceholders = base.filter { it.variant == AutoVariant.ECH && isLoopbackHost(it.address) }
+        val echCopies = echPlaceholders.flatMap { c ->
+            cleanIps.take(CLEAN_IP_ALTERNATES).map { ip ->
+                c.copy(uri = PatternihaList.withAddress(c.uri, ip), address = ip, cleanIp = true)
+            }
+        }
+        val stripped = parsed.filterNot { it.variant == AutoVariant.ECH && isLoopbackHost(it.address) }
+        val ordered = PatternihaList.order(stripped + copies + echCopies, dpi, fingerprint.hasIpv6, MAX_CANDIDATES)
+        log(
+            "AUTO clean-IP: ${cleanIps.size} IPs, FM copies=${copies.size}, " +
+                "ECH placeholders=${echPlaceholders.size} -> remapped=${echCopies.size}",
+        )
+        AutoBootstrapStore.stage(AutoStage.CLEAN_IP, AutoStageState.DONE, "${cleanIps.size} IP · ${copies.size + echCopies.size}")
+        XrayLiveFlow.done(
+            XrayFlowStageId.CLEAN_IP,
+            "${cleanIps.size} IP · ${copies.size + echCopies.size} نسخه",
+            listOf("IPs" to cleanIps.take(4).joinToString(", ")),
+        )
         XrayLiveFlow.start(XrayFlowStageId.ECH, "UDP type-65 → DoH → cache")
 
         // 4. Batch real-delay test
         AutoBootstrapStore.stage(AutoStage.TEST, AutoStageState.RUNNING, "0/${ordered.size}")
         val echCache = HashMap<String, String>()
+        var droppedLoopback = 0
         val prepared = ordered.mapNotNull { c ->
             val testUri = withEchKey(c.uri, snapshot, systemDns, echCache)
             runCatching {
                 val profile = ProfileUriParser.parse(testUri)
-                val direct = DirectCompatProfileParser.parse(profile) ?: return@runCatching null
+                val direct = DirectCompatProfileParser.parse(profile)
+                if (direct == null) {
+                    if (isLoopbackHost(c.address)) droppedLoopback++
+                    return@runCatching null
+                }
                 Prepared(c, profile, direct)
             }.getOrNull()
         }
         val total = prepared.size
+        val echReady = prepared.count { it.candidate.variant == AutoVariant.ECH }
+        log(
+            "AUTO prepared $total/${ordered.size} (ECH=$echReady, keys=${echCache.size}, " +
+                "loopback-dropped=$droppedLoopback)",
+        )
         XrayLiveFlow.done(XrayFlowStageId.ECH, "${echCache.size} کلید", listOf("domains" to echCache.keys.take(3).joinToString(", ")))
         XrayLiveFlow.start(XrayFlowStageId.BATCH, "0/$total", listOf("batch" to "$BATCH_SIZE", "probe" to "gstatic 204"))
         XrayLiveFlow.progress(0, total, "0/$total")

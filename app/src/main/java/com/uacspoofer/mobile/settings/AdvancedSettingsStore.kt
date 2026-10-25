@@ -45,7 +45,8 @@ data class AdvancedSettingsData(
 data class AdvancedSettings(val server:String="104.26.13.100",val port:String="443",val protocol:String="vless",val password:String="4e4f1f70-5e56-4a76-bb9d-db087f4690c4",val transport:String="ws",val security:String="tls",val sni:String="jp3.yohototo.top",val wsHost:String="jp3.yohototo.top",val wsPath:String="/tyxyws",val alpn:String="http/1.1",val fingerprint:String="unsafe",val packets:String="tlshello",val fragmentLength:String="5",val fragmentDelay:String="0",val maxSplit:String="2",val domainStrategy:String="UseIPv4",val keepAliveIdle:String="11",val keepAliveInterval:String="15",val mtu:String="1280",val dns:String="1.1.1.1",val route:String="0.0.0.0/0",val mux:Boolean=false,val blockUdp443:Boolean=false,val socksUdp:Boolean=true)
 
 class AdvancedSettingsStore(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREF, Context.MODE_PRIVATE)
     init {
         if (!prefs.getBoolean(STREAMING_MTU1400_MIGRATION, false)) {
             prefs.edit()
@@ -122,7 +123,7 @@ class AdvancedSettingsStore(context: Context) {
     private val mutable = MutableStateFlow(read())
     val state: StateFlow<AdvancedSettingsData> = mutable
 
-    fun snapshot(): AdvancedSettingsData = read().also { mutable.value = it }
+    fun snapshot(): AdvancedSettingsData = read().copy(iranDirect = NetworkGuardStore.get(appContext).snapshot().iranDirect).also { mutable.value = it }
     fun update(block: (AdvancedSettingsData) -> AdvancedSettingsData) = save(block(snapshot()))
     fun resetDefaults(): AdvancedSettingsData = save(AdvancedSettingsData.DEFAULT)
 
@@ -146,6 +147,7 @@ class AdvancedSettingsStore(context: Context) {
             .putInt("tunMtu", v.tunMtu).putString("tunAddress", v.tunAddress).putString("nativeDns", v.nativeDns).putString("dnsResolverUrl",v.dnsResolverUrl).putString("tunRoute", v.tunRoute)
             .putBoolean("dnsServeStale", v.dnsServeStale).putBoolean("tcpFastOpen", v.tcpFastOpen).putBoolean("bigBuffers", v.bigBuffers).putBoolean("prewarm", v.prewarm)
             .apply()
+        NetworkGuardStore.get(appContext).setIranDirect(v.iranDirect)
         mutable.value = v
         return v
     }

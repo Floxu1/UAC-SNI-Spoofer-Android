@@ -36,6 +36,12 @@ object EchDns {
     fun hintedServer(hint: String): String? =
         Regex("^(?:udp://)?(\\d{1,3}(?:\\.\\d{1,3}){3})(?::53)?$").find(hint.trim())?.groupValues?.get(1)
 
+    /** Pull base64 `ech=` from Google-style DNS JSON HTTPS answers. */
+    fun echFromDnsJson(body: String): String {
+        val re = Regex("""ech="?([A-Za-z0-9+/]+={0,2})"?""")
+        return re.findAll(body).map { it.groupValues[1] }.firstOrNull(::isBase64List).orEmpty()
+    }
+
     fun isBase64List(value: String): Boolean {
         val v = value.trim()
         if (v.length < 16 || '.' in v || ("+" in v && "://" in v)) return false
@@ -134,7 +140,12 @@ class EchKeyResolver(
         }.distinct()
         var result = race(udpServers.map { server -> "udp $server" to suspend { queryUdp(domain, server) } })
         if (result == null) {
+            // On MCI, UDP type-65 and Cloudflare DoH are often stripped; Google DoH by bare
+            // IP (JSON /resolve and wire /dns-query) still returns the ECHConfigList without
+            // ever dialing the filtered cloudflare-ech.com SNI.
             val second = systemDns.take(3).map { addr -> "system ${addr.hostAddress}" to suspend { queryUdp(domain, addr.hostAddress.orEmpty()) } } +
+                DOH_IP_JSON.map { url -> "doh-json ${url.substringAfter("//").substringBefore('/')}" to suspend { queryDohJson(domain, url) } } +
+                DOH_IP_WIRE.map { url -> "doh ${url.substringAfter("//").substringBefore('/')}" to suspend { queryDoh(domain, url) } } +
                 DOH_RESOLVERS.map { url -> "doh ${url.substringAfter("//").substringBefore('/')}" to suspend { queryDoh(domain, url) } }
             result = race(second)
         }
@@ -208,11 +219,32 @@ class EchKeyResolver(
         }
     }
 
+    /** Google JSON DoH (`/resolve?name=&type=HTTPS`); works on MCI when hostname DoH is blocked. */
+    private fun queryDohJson(domain: String, baseUrl: String): String {
+        val url = URL("$baseUrl?name=${java.net.URLEncoder.encode(domain, Charsets.UTF_8.name())}&type=HTTPS")
+        val connection = (network?.openConnection(url) ?: url.openConnection()) as HttpURLConnection
+        try {
+            connection.connectTimeout = STAGE_DEADLINE_MS.toInt()
+            connection.readTimeout = STAGE_DEADLINE_MS.toInt()
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Accept", "application/dns-json")
+            if (connection.responseCode != 200) return ""
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            return EchDns.echFromDnsJson(body)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun log(message: String) = runCatching { AppLogRepository.info(LogSource.ADAPTIVE, message) }
 
     companion object {
         val UDP_RESOLVERS = listOf("1.1.1.1", "1.0.0.1", "8.8.8.8", "9.9.9.9")
+        /** Hostname DoH; often blocked on MCI together with cloudflare-ech.com SNI. */
         val DOH_RESOLVERS = listOf("https://1.1.1.1/dns-query", "https://dns.google/dns-query")
+        /** Google DoH by bare IP — same path the Windows build uses when MCI strips the rest. */
+        val DOH_IP_JSON = listOf("https://8.8.8.8/resolve", "https://8.8.4.4/resolve")
+        val DOH_IP_WIRE = listOf("https://8.8.8.8/dns-query", "https://8.8.4.4/dns-query")
         const val STAGE_DEADLINE_MS = 3_000L
         /** Cloudflare rotates ECH keys; a key younger than this is used without a refetch. */
         const val FRESH_MS = 60L * 60 * 1000

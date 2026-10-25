@@ -269,6 +269,13 @@ pub async fn run_cli() -> Result<()> {
     options.gateway = std::env::var("AETHER_GATEWAY").is_ok();
     options.api_camo = std::env::var("AETHER_API_CAMO").unwrap_or_default();
     options.quic_tuned = std::env::var("AETHER_QUIC_TUNED").is_ok_and(|v| v.trim() == "1");
+    // Windows CLI: same endpoint cache the Android FFI gets via `endpoint_cache_path`.
+    options.endpoint_cache_path = std::env::var("AETHER_MASQUE_CACHE").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    // Windows CLI: the HTTP/2 speed switches the Android FFI gets as JSON (default on).
+    let h2_flag = |key: &str| !matches!(std::env::var(key).ok().as_deref().map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("0" | "false" | "no" | "off"));
+    options.h2_large_windows = h2_flag("AETHER_MASQUE_H2_LARGE_WINDOWS");
+    options.h2_socket_tuning = h2_flag("AETHER_MASQUE_H2_SOCKET_TUNING");
+    options.h2_speed_pick = h2_flag("AETHER_MASQUE_H2_SPEED_PICK");
     options.endpoint_discovery =
         EndpointDiscovery::parse(&std::env::var("AETHER_DISCOVERY").unwrap_or_default());
     options.scan_once = std::env::var("AETHER_SCAN_ONCE").is_ok_and(|v| {
@@ -390,7 +397,7 @@ fn apply_runtime_options(options: &StartOptions) {
         std::env::set_var(key, if on { "1" } else { "0" });
     }
     match options.api_camo.trim() {
-        "auto" | "ech" | "fragment" | "external" => {
+        "auto" | "ech" | "fragment" | "external" | "doh" | "relay" | "oob" => {
             std::env::set_var("AETHER_API_CAMO", options.api_camo.trim())
         }
         _ => std::env::remove_var("AETHER_API_CAMO"),

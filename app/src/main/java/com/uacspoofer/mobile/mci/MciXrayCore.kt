@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import java.io.File
@@ -78,6 +79,8 @@ class MciXrayCore(
             "Xray binary is not executable"
         }
 
+        DomesticDirect.ensure(context)
+        DomesticDirect.applyEnabled(com.uacspoofer.mobile.settings.NetworkGuardStore.get(context).snapshot().iranDirect)
         val configStarted = SystemClock.elapsedRealtime()
         val config = File(context.filesDir, configName).apply {
             writeText(configText, Charsets.UTF_8)

@@ -7,6 +7,8 @@ import com.uacspoofer.mobile.profiles.ProxyProtocol
 import com.uacspoofer.mobile.profiles.RuntimeProxyIdentity
 import com.uacspoofer.mobile.profiles.TlsAlpnResolver
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
+import com.uacspoofer.mobile.vpn.VpnPauseStore
+import com.uacspoofer.mobile.settings.DirectDomainWhitelist
 import com.uacspoofer.mobile.vpn.AdaptiveDnsResolvers
 
 data class MciXrayRuntimeOptions(
@@ -58,6 +60,7 @@ internal object MciXrayConfigBuilder {
         }
         val cleanHop = aiRoute?.takeIf { aiOutbound != null }
 
+        val whitelistHosts = DirectDomainWhitelist.snapshotOrEmpty()
         val outbounds = buildList {
             add(
                 proxyOutbound(
@@ -76,17 +79,32 @@ internal object MciXrayConfigBuilder {
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
             // Xray runs outside the VPN (the app is a disallowed application), so direct sockets
             // never loop back into the tunnel.
-            if (s.iranDirect) add("""{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"AsIs"},"streamSettings":{"sockopt":{${TcpFastOpenSupport.field(s.tcpFastOpen)}"tcpNoDelay":true}}}""")
+            if (s.iranDirect || VpnPauseStore.isPaused() || whitelistHosts.isNotEmpty()) {
+                add("""{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"AsIs"},"streamSettings":{"sockopt":{${TcpFastOpenSupport.field(s.tcpFastOpen)}"tcpNoDelay":true}}}""")
+            }
         }.joinToString(",\n")
 
         val acceptedInbounds = "[\"socks-in\"]"
         val dnsInbounds = if (nativeTun) "[\"socks-in\",\"tun-in\"]" else acceptedInbounds
         val routingRules = buildList {
             add("""{"type":"field","inboundTag":$dnsInbounds,"network":"tcp,udp","port":"53","outboundTag":"dns-out"}""")
-            add("""{"type":"field","inboundTag":["dns-query"],"outboundTag":"proxy"}""")
-            if (s.iranDirect) {
-                add("""{"type":"field","inboundTag":$dnsInbounds,"ip":[${IranDirectRules.ipsJson()}],"outboundTag":"direct"}""")
-                add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[${IranDirectRules.domainsJson()}],"outboundTag":"direct"}""")
+            if (VpnPauseStore.isPaused()) {
+                // Pause: force EVERYTHING off the proxy (user TCP/UDP + Xray DNS module).
+                // dns-query must not stay on proxy or DoH still tunnels while "Paused".
+                add("""{"type":"field","inboundTag":["dns-query"],"outboundTag":"direct"}""")
+                add("""{"type":"field","inboundTag":$dnsInbounds,"network":"tcp,udp","outboundTag":"direct"}""")
+            } else {
+                add("""{"type":"field","inboundTag":["dns-query"],"outboundTag":"proxy"}""")
+                val wlJson = DirectDomainWhitelist.xrayDomainsJson(whitelistHosts)
+                if (wlJson.isNotEmpty()) {
+                    // Manual whitelist: always direct, even when Iran-direct is off.
+                    add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[$wlJson],"outboundTag":"direct"}""")
+                }
+                if (s.iranDirect) {
+                    // Domains first (SNI / sniffed name), then Iranian + private IPs.
+                    add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[${IranDirectRules.domainsJson()}],"outboundTag":"direct"}""")
+                    add("""{"type":"field","inboundTag":$dnsInbounds,"ip":[${IranDirectRules.allDirectIpsJson()}],"outboundTag":"direct"}""")
+                }
             }
             if (s.ipv4Only) {
                 add("""{"type":"field","inboundTag":$acceptedInbounds,"network":"tcp","ip":["::/0"],"outboundTag":"block"}""")
@@ -95,7 +113,8 @@ internal object MciXrayConfigBuilder {
                 val domains = plan.domains.joinToString(",") { "\"${q(it)}\"" }
                 add("""{"type":"field","inboundTag":$dnsInbounds,"domain":[$domains],"outboundTag":"ai-out"}""")
             }
-            add("""{"type":"field","inboundTag":["socks-in"],"network":"tcp,udp","outboundTag":"probe-proxy"}""")
+            val finalInbounds = if (nativeTun) """["socks-in","tun-in"]""" else acceptedInbounds
+            add("""{"type":"field","inboundTag":$finalInbounds,"network":"tcp,udp","outboundTag":"probe-proxy"}""")
         }.joinToString(",\n")
 
         val rootExtras = if (nativeTun) {
@@ -128,10 +147,17 @@ internal object MciXrayConfigBuilder {
         }
         // Iranian names resolve with the phone's own resolver (Xray is outside the VPN) so they get
         // Iranian CDN answers for the direct route; everything else uses DoH through the tunnel.
-        val iranDns = if (s.iranDirect) {
-            """{"address":"localhost","domains":[${IranDirectRules.domainsJson()}],"skipFallback":true},"""
-        } else {
-            ""
+        val wlDns = DirectDomainWhitelist.xrayDomainsJson(DirectDomainWhitelist.snapshotOrEmpty())
+        val iranDns = when {
+            VpnPauseStore.isPaused() ->
+                """{"address":"localhost","skipFallback":true},"""
+            s.iranDirect && wlDns.isNotEmpty() ->
+                """{"address":"localhost","domains":[${IranDirectRules.domainsJson()},$wlDns],"skipFallback":true},"""
+            s.iranDirect ->
+                """{"address":"localhost","domains":[${IranDirectRules.domainsJson()}],"skipFallback":true},"""
+            wlDns.isNotEmpty() ->
+                """{"address":"localhost","domains":[$wlDns],"skipFallback":true},"""
+            else -> ""
         }
         val dns = """"dns":{"hosts":{$resolverHosts},"servers":[$iranDns$resolverServers],"queryStrategy":"UseIPv4","disableCache":false,"serveStale":${s.dnsServeStale},"serveExpiredTTL":${if (s.dnsServeStale) DNS_STALE_CAP_SECONDS else 0},"enableParallelQuery":false,"tag":"dns-query"},"""
 
@@ -145,7 +171,7 @@ internal object MciXrayConfigBuilder {
               $dns
               "inbounds":[$inbounds],
               "outbounds":[$outbounds],
-              "routing":{"domainStrategy":"${q(s.routingDomainStrategy)}","rules":[$routingRules]}
+              "routing":{"domainStrategy":"${q(if (s.iranDirect || DirectDomainWhitelist.snapshotOrEmpty().isNotEmpty()) "IPIfNonMatch" else s.routingDomainStrategy)}","rules":[$routingRules]}
             }
         """.trimIndent()
     }

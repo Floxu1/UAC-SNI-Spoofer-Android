@@ -44,7 +44,9 @@ data class TorEngineSettings(
     /** Tor TUN MTU; 0 = app default. */
     val tunMtu: Int = 0,
 ) {
+    /** Public SOCKS (hev / apps). Tor daemon listens on [daemonSocksPort]; DomesticSocksSplit bridges them. */
     fun effectiveMtu(appMtu: Int): Int = if (tunMtu in MTU_CHOICES) tunMtu else appMtu
+    val daemonSocksPort: Int get() = (socksPort + SOCKS_SPLIT_OFFSET).coerceAtMost(65_535)
     val fragmentEnabled: Boolean get() = fragmentMode != FRAGMENT_OFF
 
     fun validated(): TorEngineSettings = copy(
@@ -64,6 +66,7 @@ data class TorEngineSettings(
 
     companion object {
         const val SOCKS_PORT = 19_050
+        const val SOCKS_SPLIT_OFFSET = 10
         const val CONTROL_PORT = 19_051
         const val FRAGMENT_AUTO = "auto"
         const val FRAGMENT_ON = "on"

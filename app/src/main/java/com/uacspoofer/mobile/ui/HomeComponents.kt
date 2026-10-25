@@ -551,7 +551,14 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             homeText("Internet blocked", "اینترنت مسدود است")
         else -> when (state) {
             ConnectionState.DISCONNECTED -> homeText("Disconnected", "وصل نیست")
-            ConnectionState.CONNECTING -> homeText("Connecting...", "در حال اتصال…")
+            ConnectionState.CONNECTING -> {
+                val detail = powStatus.detail.trim()
+                when {
+                    engineMode.isPow && detail.startsWith("SIM changed") ->
+                        homeText("SIM changed…", "سیم‌کارت عوض شد…")
+                    else -> homeText("Connecting...", "در حال اتصال…")
+                }
+            }
             ConnectionState.CONNECTED -> homeText("Connected", "وصل شد")
             ConnectionState.DISCONNECTING -> homeText("Disconnecting...", "در حال قطع...")
             ConnectionState.ERROR -> homeText("Connection failed", "اتصال برقرار نشد")

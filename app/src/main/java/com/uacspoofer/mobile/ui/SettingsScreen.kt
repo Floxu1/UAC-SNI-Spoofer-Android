@@ -10,6 +10,8 @@ import android.os.SystemClock
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,12 +22,33 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import java.util.Date
+import java.text.DateFormat
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import com.uacspoofer.mobile.mci.GeoAssets
+import com.uacspoofer.mobile.mci.DomesticDirect
+import com.uacspoofer.mobile.settings.DirectDomainWhitelist
+import java.text.SimpleDateFormat
+import java.util.Locale
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.automirrored.outlined.AltRoute
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.ChevronLeft
@@ -68,7 +91,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
@@ -158,6 +183,8 @@ internal fun SettingsScreen(
                     AutoConnectSettingsRow(showDivider = true)
                     LanShareSettingsRow(showDivider = true)
                     QuicBlockSettingsRow(showDivider = true)
+                    IranDirectSettingsRow(showDivider = true)
+                    ManualDirectDomainsSettingsRow(showDivider = true)
                     TrafficUsageSettingsRow(showDivider = false)
                 }
             }
@@ -372,6 +399,262 @@ private fun LanShareSettingsRow(showDivider: Boolean) {
             store.setLanShare(checked)
             VpnController.applyNetworkGuard(context)
         },
+    )
+}
+
+
+
+@Composable
+private fun IranDirectSettingsRow(showDivider: Boolean) {
+    val context = LocalContext.current
+    val isPersian = LocalHomePersian.current
+    val store = remember(context) { NetworkGuardStore.get(context) }
+    val settings by store.settings.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    var statusText by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    fun pick(en: String, fa: String) = if (isPersian) fa else en
+    fun refreshStatus() {
+        val st = runCatching { GeoAssets.status(context) }.getOrNull()
+        statusText = if (st == null) {
+            pick("Not ready yet", "هنوز آماده نیست")
+        } else {
+            val day = runCatching {
+                SimpleDateFormat("d MMM", if (isPersian) Locale("fa") else Locale.US)
+                    .format(Date(st.updatedAtMs))
+            }.getOrNull()
+            when {
+                st.tag.startsWith("latest@") && day != null ->
+                    pick("Updated · $day", "به‌روز · $day")
+                day != null ->
+                    pick("Ready · $day", "آماده · $day")
+                else ->
+                    pick("Ready", "آماده")
+            }
+        }
+    }
+    LaunchedEffect(Unit) { refreshStatus() }
+    SettingsToggleRow(
+        icon = Icons.AutoMirrored.Outlined.AltRoute,
+        title = homeText("Iranian sites direct", "سایت‌های ایرانی مستقیم"),
+        summary = if (settings.iranDirect) homeText("On", "روشن") else homeText("Off", "خاموش"),
+        enabled = settings.iranDirect,
+        help = homeText(
+            "Iranian sites open without the VPN, and load faster.",
+            "سایت‌های ایران بدون فیلترشکن و سریع‌تر باز می‌شن.",
+        ),
+        extra = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    statusText,
+                    color = UacColors.TextSecondary.copy(alpha = 0.9f),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        if (busy) return@TextButton
+                        busy = true
+                        notice = null
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    GeoAssets.updateFromNetwork(context)
+                                    DomesticDirect.reloadFromFiles(context)
+                                }
+                            }
+                            busy = false
+                            result.onSuccess {
+                                notice = pick("Updated", "به‌روز شد")
+                                refreshStatus()
+                            }.onFailure { err ->
+                                notice = pick(
+                                    "Failed",
+                                    "ناموفق",
+                                )
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Icon(
+                        Icons.Outlined.CloudDownload,
+                        contentDescription = null,
+                        tint = UacColors.ConnectedGreen,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        if (busy) {
+                            homeText("Updating…", "در حال به‌روزرسانی…")
+                        } else {
+                            homeText("Update", "به‌روزرسانی")
+                        },
+                        color = UacColors.ConnectedGreen,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+            notice?.let {
+                Text(it, color = UacColors.ConnectedGreen, fontSize = 11.sp)
+            }
+        },
+        showDivider = showDivider,
+        onCheckedChange = { checked ->
+            store.setIranDirect(checked)
+        },
+    )
+}
+
+@Composable
+private fun ManualDirectDomainsSettingsRow(showDivider: Boolean) {
+    val context = LocalContext.current
+    val store = remember(context) { DirectDomainWhitelist.get(context) }
+    val domains by store.domains.collectAsStateWithLifecycle()
+    var draft by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val focus = LocalFocusManager.current
+    val invalidHint = homeText(
+        "Type a site like ",
+        "آدرس سایت را مثل ",
+    ) + homeLtr("digikala.com")
+    fun tryAdd() {
+        val ok = store.add(draft)
+        if (ok) {
+            draft = ""
+            error = null
+            focus.clearFocus()
+            VpnController.applyDirectWhitelist(context)
+        } else {
+            error = invalidHint
+        }
+    }
+    val summary = when {
+        domains.isEmpty() -> homeText("Empty", "خالی")
+        else -> homeText(
+            "${domains.size} site${if (domains.size == 1) "" else "s"}",
+            "${domains.size} سایت",
+        )
+    }
+    SettingsToggleRow(
+        icon = Icons.Outlined.Link,
+        title = homeText("My direct domains", "دامنه‌های مستقیم من"),
+        summary = summary,
+        enabled = domains.isNotEmpty(),
+        help = homeText(
+            "Sites you add here open without the VPN.",
+            "سایت‌هایی که اینجا اضافه کنی، بدون فیلترشکن باز می‌شن.",
+        ),
+        extra = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                domains.forEach { host ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White.copy(alpha = 0.05f))
+                            .padding(start = 10.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            host,
+                            color = UacColors.TextPrimary,
+                            fontSize = 13.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = LocalTextStyle.current.copy(textDirection = TextDirection.Ltr),
+                        )
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = homeText("Remove", "حذف"),
+                            tint = UacColors.TextSecondary,
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    store.remove(host)
+                                    VpnController.applyDirectWhitelist(context)
+                                }
+                                .padding(6.dp),
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = {
+                            draft = it
+                            error = null
+                        },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = {
+                            Text(
+                                homeLtr("digikala.com"),
+                                color = UacColors.TextSecondary.copy(alpha = 0.55f),
+                                fontSize = 13.sp,
+                                style = LocalTextStyle.current.copy(textDirection = TextDirection.Ltr),
+                            )
+                        },
+                        textStyle = LocalTextStyle.current.copy(
+                            color = UacColors.TextPrimary,
+                            fontSize = 13.sp,
+                            textDirection = TextDirection.Ltr,
+                        ),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { tryAdd() }),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = UacColors.ConnectedGreen.copy(alpha = 0.55f),
+                            unfocusedBorderColor = Color.White.copy(alpha = 0.12f),
+                            cursorColor = UacColors.ConnectedGreen,
+                            focusedContainerColor = Color.Transparent,
+                            unfocusedContainerColor = Color.Transparent,
+                        ),
+                    )
+                    TextButton(
+                        onClick = { tryAdd() },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Add,
+                            contentDescription = null,
+                            tint = UacColors.ConnectedGreen,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Text(
+                            homeText("Add", "افزودن"),
+                            color = UacColors.ConnectedGreen,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+                error?.let {
+                    Text(it, color = Color(0xFFFF8A95), fontSize = 11.sp)
+                }
+            }
+        },
+        showDivider = showDivider,
+        onCheckedChange = null,
     )
 }
 

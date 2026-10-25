@@ -25,6 +25,10 @@ object AppLogRepository {
     @Volatile var torLogcatMirror: Boolean = true
     private const val TOR_LOGCAT_TAG = "UAC-TOR"
 
+    /** Mirror Auto/ECH (ADAPTIVE) lines to logcat (tag UAC-ADAPT). */
+    @Volatile var adaptLogcatMirror: Boolean = true
+    private const val ADAPT_LOGCAT_TAG = "UAC-ADAPT"
+
     init {
         info(LogSource.APP, "Live logging initialized")
     }
@@ -62,6 +66,7 @@ object AppLogRepository {
         if (message.isEmpty()) return
         if (source == LogSource.POW && powLogcatMirror) mirrorToLogcat(level, message)
         if (source == LogSource.TOR && torLogcatMirror) mirrorToLogcat(level, message, TOR_LOGCAT_TAG)
+        if (source == LogSource.ADAPTIVE && adaptLogcatMirror) mirrorToLogcat(level, message, ADAPT_LOGCAT_TAG)
 
         val entry = AppLogEntry(
             id = sequence.incrementAndGet(),

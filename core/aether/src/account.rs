@@ -368,12 +368,31 @@ async fn fallback_call_route(
     let request = camo_request(method, path, body, bearer, jwt);
     let response = match route {
         "fragment" => apifront::fetch_fragment(&request).await?,
+        "doh" => apifront::fetch_doh(&request).await?,
+        "relay" => {
+            note_key_route("using the relay route (Cloudflare Worker)");
+            crate::relay::fetch(&request).await?
+        }
+        "oob" => {
+            note_key_route(
+                "using the OOB route (Android: nottl first then ttl1 variants; desktop: disoob then insni then nottl; no relay)",
+            );
+            let (response, method) = crate::oob::fetch(&request).await?;
+            note_key_route(&format!(
+                "account key won via oob (OOB method {} won)",
+                method.name()
+            ));
+            response
+        }
         _ => apifront::fetch_ech(&request).await?,
     };
     decode_camo_account(label, response)
 }
 
-/// Handshake-first race across ECH, split ClientHello, and the current network.
+/// Auto key route. First the three proven OOB methods, strictly one after
+/// another (`crate::oob::fetch`); the first one that the API answers wins.
+/// Only when all three fail on the transport does the old race run: relay
+/// (after its head start), ECH, split ClientHello and the current network.
 ///
 /// Each racer opens TLS without sending the HTTP body. The first session that
 /// becomes ready claims an atomic gate and alone sends register/enroll. The
@@ -390,11 +409,66 @@ async fn race_auto_call(
     use std::sync::Arc;
     use tokio::task::JoinSet;
 
-    note_key_route("racing ECH, split ClientHello, and the current network");
     let request = camo_request(method, path, body, bearer, jwt);
+
+    // Phase 1: OOB methods one by one (never parallel against the API).
+    note_key_route(
+        "trying OOB first (one at a time; on Android: oob-byte0-nottl, disoob-byte0-ttl1-plain, -andr, -split, disoob-byte0-ttl1, oob-insni+5-ttl1)",
+    );
+    match crate::oob::fetch(&request).await {
+        Ok((response, oob_method)) => {
+            note_key_route(&format!(
+                "account key won via oob (OOB method {} won)",
+                oob_method.name()
+            ));
+            // The API itself answered: decode it as the race would (a refusal
+            // here would be the same on every other route).
+            let account = decode_camo_account(label, response)?;
+            note_key_route(&format!(
+                "account key saved via oob (OOB method {})",
+                oob_method.name()
+            ));
+            return Ok(account);
+        }
+        Err(error) => {
+            note_key_route(&format!(
+                "{error}; falling back to relay, ECH, split ClientHello and the current network"
+            ));
+        }
+    }
+
+    // Phase 2 (unchanged fallback chain, minus the OOB lane that just failed).
+    // ECH-DoH is no longer raced: its outer SNI cloudflare-ech.com is filtered
+    // on MCI, so it could only delay the others. It stays reachable manually.
+    note_key_route(&format!(
+        "racing relay (after {} ms), ECH, split ClientHello, and the current network",
+        relay_head_start().as_millis()
+    ));
     let host = request.host.clone();
     let claimed = Arc::new(AtomicBool::new(false));
     let mut set = JoinSet::new();
+    let edges_probe =
+        futures::FutureExt::shared(futures::FutureExt::boxed(apifront::probe_key_edges()));
+
+    // The relay follows after a short head start for OOB: it reaches the API
+    // through the user's Cloudflare Worker (no filtered name leaves this
+    // device) and stays the fallback where the desync does not pass. Holding
+    // it back keeps the Worker's daily request quota for those networks.
+    {
+        let claimed = claimed.clone();
+        let request = request.clone();
+        let label = label.to_string();
+        let wait = relay_head_start();
+        set.spawn(async move {
+            tokio::time::sleep(wait).await;
+            if claimed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(AetherError::Api(format!(
+                    "{label}: relay not started, another route already claimed the send"
+                )));
+            }
+            relay_claim_and_send(&label, request, &claimed).await
+        });
+    }
 
     {
         let claimed = claimed.clone();
@@ -407,7 +481,7 @@ async fn race_auto_call(
         });
     }
 
-    let edges = apifront::probe_key_edges().await;
+    let edges = edges_probe.await;
     if edges.is_empty() {
         note_key_route(
             "clean-edge probe returned nothing; camouflaged racers will still try the pinned list",
@@ -450,6 +524,85 @@ async fn race_auto_call(
             Err(error) if error.is_cancelled() => {}
             Err(error) => {
                 last_error = AetherError::Api(format!("{label}: race lane panicked: {error}"));
+            }
+        }
+    }
+    Err(last_error)
+}
+
+/// How long the auto race holds the relay back so the OOB lane can win first.
+/// `AETHER_RELAY_DELAY_MS` overrides it (0 = start together).
+fn relay_head_start() -> std::time::Duration {
+    let ms = std::env::var("AETHER_RELAY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(2500)
+        .min(30_000);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Relay lane of the auto race. Shuffled relay URLs are resolved, TCP-probed and
+/// TLS-handshaked (the relay's "handshake ready"); only then does the lane claim the send gate,
+/// so a second register POST never leaves the device. A relay that fails after
+/// the claim releases the gate and the next URL is tried.
+async fn relay_claim_and_send(
+    label: &str,
+    request: apifront::ApiRequest,
+    claimed: &std::sync::atomic::AtomicBool,
+) -> Result<AccountData> {
+    use std::sync::atomic::Ordering;
+
+    note_key_route("relay lane started");
+    let mut last_error = AetherError::Api(format!("{label}: no relay URL was configured"));
+    for url in crate::relay::relay_urls() {
+        let (target, session) = match crate::relay::connect(&url).await {
+            Ok(ready) => ready,
+            Err(error) => {
+                note_key_route(&format!("relay {url} unreachable: {error}"));
+                last_error = error;
+                continue;
+            }
+        };
+        if claimed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            note_key_route(&format!(
+                "relay ready at {} but another route already claimed the send",
+                session.address
+            ));
+            return Err(AetherError::Api(format!(
+                "{label}: relay lost the race after connect"
+            )));
+        }
+        note_key_route(&format!(
+            "account key won via relay (sending over {} / {})",
+            session.address, target.host
+        ));
+        let response = match crate::relay::send_on(&target, session, &request).await {
+            Ok(response) => response,
+            Err(error) => {
+                claimed.store(false, Ordering::SeqCst);
+                note_key_route(&format!("relay {url} failed: {error}"));
+                last_error = error;
+                continue;
+            }
+        };
+        match decode_camo_account(label, response) {
+            Ok(account) => {
+                note_key_route("account key saved via relay");
+                return Ok(account);
+            }
+            // The device is gone: final, no other relay or lane can change it.
+            Err(AetherError::IdentityRefused(reason)) => {
+                return Err(AetherError::IdentityRefused(reason));
+            }
+            // A refused or failed call created nothing upstream, so release the
+            // gate: the next relay URL (or a later-ready lane) may still send.
+            Err(error) => {
+                claimed.store(false, Ordering::SeqCst);
+                note_key_route(&format!("relay {url} answered but failed: {error}"));
+                last_error = error;
             }
         }
     }
@@ -678,6 +831,9 @@ fn api_camo() -> &'static str {
         .map(str::trim)
     {
         Some("ech") => "ech",
+        Some("doh") | Some("ech-doh") => "doh",
+        Some("relay") => "relay",
+        Some("oob") | Some("disoob") => "oob",
         Some("fragment") | Some("ff") => "fragment",
         Some("external") | Some("direct") => "external",
         Some("auto") | Some("") | None => "auto",
@@ -702,6 +858,9 @@ where
             .await
             .map_err(|error| AetherError::Api(format!("{label}: direct route -> {error}"))),
         "ech" => fallback_call_route(label, method, path, body, bearer, jwt, "ech").await,
+        "doh" => fallback_call_route(label, method, path, body, bearer, jwt, "doh").await,
+        "relay" => fallback_call_route(label, method, path, body, bearer, jwt, "relay").await,
+        "oob" => fallback_call_route(label, method, path, body, bearer, jwt, "oob").await,
         "fragment" => {
             fallback_call_route(label, method, path, body, bearer, jwt, "fragment").await
         }
@@ -883,6 +1042,24 @@ pub async fn fetch_device(device_id: &str, token: &str) -> Result<AccountData> {
     let path = format!("/{}/reg/{}", consts::API_VERSION, device_id);
     let url = format!("{}{}", consts::API_URL, path);
 
+    if api_camo() == "relay" {
+        return fallback_call_route("device refresh", "GET", &path, None, Some(token), None, "relay")
+            .await;
+    }
+    if api_camo() == "oob" {
+        return match fallback_call_route("device refresh", "GET", &path, None, Some(token), None, "oob")
+            .await
+        {
+            Err(AetherError::IdentityRefused(reason)) => Err(AetherError::IdentityRefused(reason)),
+            Err(oob_error) => {
+                log::debug!("[!] device refresh failed over OOB: {oob_error}");
+                fallback_call_route("device refresh", "GET", &path, None, Some(token), None, "relay")
+                    .await
+            }
+            ok => ok,
+        };
+    }
+
     let direct = send_with_retry("device refresh", || {
         Ok(http_client()?
             .get(&url)
@@ -895,7 +1072,31 @@ pub async fn fetch_device(device_id: &str, token: &str) -> Result<AccountData> {
         Ok(account) => Ok(account),
         Err(primary) => {
             log::debug!("[!] device refresh failed over the direct route: {primary}");
-            fallback_call("device refresh", "GET", &path, None, Some(token), None).await
+            match fallback_call_route("device refresh", "GET", &path, None, Some(token), None, "oob")
+                .await
+            {
+                Ok(account) => return Ok(account),
+                Err(AetherError::IdentityRefused(reason)) => {
+                    return Err(AetherError::IdentityRefused(reason))
+                }
+                Err(oob_error) => {
+                    log::debug!("[!] device refresh failed over OOB: {oob_error}");
+                }
+            }
+            match fallback_call_route("device refresh", "GET", &path, None, Some(token), None, "relay")
+                .await
+            {
+                Ok(account) => Ok(account),
+                // The relay reached Cloudflare and the device is gone: that
+                // answer is final, ECH would only repeat it.
+                Err(AetherError::IdentityRefused(reason)) => {
+                    Err(AetherError::IdentityRefused(reason))
+                }
+                Err(relay_error) => {
+                    log::debug!("[!] device refresh failed over the relay: {relay_error}");
+                    fallback_call("device refresh", "GET", &path, None, Some(token), None).await
+                }
+            }
         }
     }
 }

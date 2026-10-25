@@ -8,6 +8,9 @@ package com.uacspoofer.mobile.engine.pow
 internal object PowNetworkRestore {
     val BACKOFF_MS = longArrayOf(5_000L, 15_000L, 30_000L, 60_000L, 120_000L)
 
+    /** SIM / default-data subscription changes need a longer settle. */
+    const val SIM_SWITCH_DEBOUNCE_MS = 2_000L
+
     fun delayMs(attemptIndex: Int): Long {
         val index = attemptIndex.coerceAtLeast(0).coerceAtMost(BACKOFF_MS.lastIndex)
         return BACKOFF_MS[index]
@@ -25,7 +28,8 @@ internal object PowNetworkRestore {
         sessionLive: Boolean,
         retuning: Boolean,
         stopRequested: Boolean,
-    ): Boolean = sessionLive && !retuning && !stopRequested
+        paused: Boolean = false,
+    ): Boolean = sessionLive && !retuning && !stopRequested && !paused
 
     fun shouldRetryOnAvailable(
         waiting: Boolean,
@@ -35,6 +39,8 @@ internal object PowNetworkRestore {
 
     fun statusDetail(reason: String): String {
         val clean = reason.trim().ifBlank { "the connection dropped" }
-        return "Reconnecting after $clean…"
+        return "Reconnecting after $clean."
     }
+
+    fun simSwitchDetail(): String = "SIM changed - reconnecting."
 }

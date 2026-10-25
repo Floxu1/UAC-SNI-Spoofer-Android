@@ -1,4 +1,4 @@
-import java.util.Properties
+﻿import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -9,7 +9,7 @@ plugins {
 val signingPropertiesFile = providers.gradleProperty("uacSigningProperties").orNull
     ?.let(::file)
     ?: providers.environmentVariable("UAC_SIGNING_PROPERTIES").orNull?.let(::file)
-    ?: rootProject.file("../signing.properties")
+    ?: rootProject.file("signing.properties").let { if (it.isFile) it else rootProject.file("../signing.properties") }
 val signingProperties = Properties().apply {
     if (signingPropertiesFile.isFile) {
         signingPropertiesFile.inputStream().use { load(it) }
@@ -28,8 +28,8 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 451
-        versionName = "2.0.8"
+        versionCode = 503
+        versionName = "2.0.9"
 
         buildConfigField("boolean", "TV_MODE", "false")
 
@@ -126,6 +126,7 @@ android {
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/versions/**/OSGI-INF/MANIFEST.MF"
         }
     }
 }
@@ -154,29 +155,29 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
         dir.resolve("WHICH-APK.txt").writeText(
             """
             UAC SNI Spoofer $version
-            همه این فایل‌ها حداقل اندروید ۷ (Android 7.0) می‌خواهند.
+            Ù‡Ù…Ù‡ Ø§ÛŒÙ† ÙØ§ÛŒÙ„â€ŒÙ‡Ø§ Ø­Ø¯Ø§Ù‚Ù„ Ø§Ù†Ø¯Ø±ÙˆÛŒØ¯ Û· (Android 7.0) Ù…ÛŒâ€ŒØ®ÙˆØ§Ù‡Ù†Ø¯.
             All of these APKs require Android 7.0 or newer.
 
             UAC-$version-arm64-v8a.apk
-              گوشی‌های ۶۴ بیتی — تقریباً همه گوشی‌های ۲۰۱۷ به بعد. سبک‌تر است. پیشنهاد اصلی.
+              Ú¯ÙˆØ´ÛŒâ€ŒÙ‡Ø§ÛŒ Û¶Û´ Ø¨ÛŒØªÛŒ â€” ØªÙ‚Ø±ÛŒØ¨Ø§Ù‹ Ù‡Ù…Ù‡ Ú¯ÙˆØ´ÛŒâ€ŒÙ‡Ø§ÛŒ Û²Û°Û±Û· Ø¨Ù‡ Ø¨Ø¹Ø¯. Ø³Ø¨Ú©â€ŒØªØ± Ø§Ø³Øª. Ù¾ÛŒØ´Ù†Ù‡Ø§Ø¯ Ø§ØµÙ„ÛŒ.
               64-bit phones (most devices from 2017 on). Smaller. Recommended.
 
             UAC-$version-armeabi-v7a.apk
-              گوشی‌های ۳۲ بیتی قدیمی.
+              Ú¯ÙˆØ´ÛŒâ€ŒÙ‡Ø§ÛŒ Û³Û² Ø¨ÛŒØªÛŒ Ù‚Ø¯ÛŒÙ…ÛŒ.
               32-bit phones only.
 
             UAC-$version-universal.apk
-              روی همه معماری‌ها نصب می‌شود. حجم بیشتر.
+              Ø±ÙˆÛŒ Ù‡Ù…Ù‡ Ù…Ø¹Ù…Ø§Ø±ÛŒâ€ŒÙ‡Ø§ Ù†ØµØ¨ Ù…ÛŒâ€ŒØ´ÙˆØ¯. Ø­Ø¬Ù… Ø¨ÛŒØ´ØªØ±.
               Works on every CPU. Largest file.
-              app-release.apk همین فایل است.
+              app-release.apk Ù‡Ù…ÛŒÙ† ÙØ§ÛŒÙ„ Ø§Ø³Øª.
 
             UAC-$version-x86_64.apk
             UAC-$version-x86.apk
-              امولاتور / شبیه‌ساز. برای گوشی واقعی نیست.
+              Ø§Ù…ÙˆÙ„Ø§ØªÙˆØ± / Ø´Ø¨ÛŒÙ‡â€ŒØ³Ø§Ø². Ø¨Ø±Ø§ÛŒ Ú¯ÙˆØ´ÛŒ ÙˆØ§Ù‚Ø¹ÛŒ Ù†ÛŒØ³Øª.
               Emulators only, not real phones.
 
-            نسخه universal را می‌توان با arm64 روی همان گوشی ۶۴ بیتی آپدیت کرد
-            (همان امضا و versionCode بالاتر یا مساوی).
+            Ù†Ø³Ø®Ù‡ universal Ø±Ø§ Ù…ÛŒâ€ŒØªÙˆØ§Ù† Ø¨Ø§ arm64 Ø±ÙˆÛŒ Ù‡Ù…Ø§Ù† Ú¯ÙˆØ´ÛŒ Û¶Û´ Ø¨ÛŒØªÛŒ Ø¢Ù¾Ø¯ÛŒØª Ú©Ø±Ø¯
+            (Ù‡Ù…Ø§Ù† Ø§Ù…Ø¶Ø§ Ùˆ versionCode Ø¨Ø§Ù„Ø§ØªØ± ÛŒØ§ Ù…Ø³Ø§ÙˆÛŒ).
             """.trimIndent() + "\n",
             Charsets.UTF_8,
         )
@@ -238,6 +239,7 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     implementation("com.google.zxing:core:3.5.3")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

@@ -64,3 +64,7 @@ x86_64      494154A10429A43494D14AC1A78F44870206121D6E8AFBEE6ED94CF3CF68999A
 ## Engine 4 (UAC Direct) method
 
 The serverless direct-fragment approach of engine 4 (TLS ClientHello split 6/98/1 or 0/104/1, second-stage split, UDP noise, unfiltered DoH) is adapted from the public "Serverless-for-Iran" Xray configs by @patterniha (https://github.com/patterniha/Serverless-for-Iran). The config is generated in Kotlin; no file from that project is bundled.
+
+## Engine 4 MITM Domain Fronting
+
+Google / ECH MITM re-pack follows the public MITM-DomainFronting Xray pattern by @patterniha (https://github.com/patterniha/MITM-DomainFronting). The app generates its own per-install CA; no files from that repo are bundled.

@@ -1,4 +1,4 @@
-package com.uacspoofer.mobile.core
+﻿package com.uacspoofer.mobile.core
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +26,10 @@ class ConnectionStateMachine(initial: ConnectionState = ConnectionState.DISCONNE
 
     @Synchronized
     fun markConnected(): Boolean {
+        // Idempotent: PoW coordinator may publish Connected before the VPN service
+        // also calls markConnected. Returning false here used to trigger cleanupRoute()
+        // which stopped a live Psiphon while the UI stayed green.
+        if (mutableState.value == ConnectionState.CONNECTED) return true
         if (mutableState.value != ConnectionState.CONNECTING) return false
         mutableState.value = ConnectionState.CONNECTED
         return true

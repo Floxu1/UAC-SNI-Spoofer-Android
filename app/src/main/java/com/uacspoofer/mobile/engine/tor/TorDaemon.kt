@@ -581,7 +581,7 @@ class TorDaemon(context: Context) {
                                 },
                             )
                             if (percent >= 100) {
-                                waitForSocks(settings.socksPort)
+                                waitForSocks(settings.daemonSocksPort)
                                 return@withTimeout
                             }
                         }
@@ -610,7 +610,7 @@ class TorDaemon(context: Context) {
                             },
                         )
                         if (controlPercent >= 100) {
-                            waitForSocks(settings.socksPort)
+                            waitForSocks(settings.daemonSocksPort)
                             return@withTimeout
                         }
                     }

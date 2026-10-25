@@ -36,6 +36,7 @@ import com.uacspoofer.mobile.engine.tor.TorPhase
 import com.uacspoofer.mobile.engine.tor.TorTunRelayConfig
 import com.uacspoofer.mobile.engine.tor.TorStatusStore
 import com.uacspoofer.mobile.engine.pow.PowConnectionCoordinator
+import com.uacspoofer.mobile.engine.pow.PowSocksConnectOnly
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import com.uacspoofer.mobile.engine.pow.PowPhase
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
@@ -46,6 +47,7 @@ import com.uacspoofer.mobile.location.GpsSpoofRuntime
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciConfig
+import com.uacspoofer.mobile.mci.DomesticSocksSplit
 import com.uacspoofer.mobile.mci.MciEdge
 import com.uacspoofer.mobile.mci.MciXrayCore
 import com.uacspoofer.mobile.auto.AutoBootstrapStore
@@ -191,6 +193,7 @@ class UacVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_PAUSE_TOGGLE -> requestPauseToggle()
             ACTION_DISCONNECT -> requestDisconnect()
             ACTION_CLOSE -> requestDisconnect(closeAppTasks = true)
             ACTION_SWITCH_PROFILE -> requestSwitchProfile()
@@ -200,6 +203,7 @@ class UacVpnService : VpnService() {
             ACTION_ROUTE_MTU_PROBE -> requestRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
             ACTION_CANCEL_ROUTE_MTU_PROBE -> cancelRouteMtuProbe(intent.getStringExtra(EXTRA_ROUTE_PROBE_ID), startId)
             ACTION_APPLY_NETWORK_GUARD -> applyNetworkGuard()
+            ACTION_APPLY_DIRECT_WHITELIST -> requestApplyDirectWhitelist()
             ACTION_CONNECT, null -> requestConnect()
         }
         val guard = networkGuardStore.snapshot()
@@ -475,6 +479,9 @@ class UacVpnService : VpnService() {
     }
 
     private fun requestConnect() {
+        VpnPauseStore.clear()
+        PowSocksConnectOnly.setTrafficPaused(false)
+        DomesticSocksSplit.setTrafficPaused(false)
         activeRouteProbeId?.let {
             routeProbeJob?.cancel()
         }
@@ -564,7 +571,145 @@ class UacVpnService : VpnService() {
         job.invokeOnCompletion { if (connectJob === job) connectJob = null }
     }
 
+    
+    private fun requestPauseToggle() {
+        if (ConnectionStateStore.state.value != ConnectionState.CONNECTED || !resourcesActive) {
+            AppLogRepository.info(LogSource.SERVICE, "Pause ignored; not connected")
+            return
+        }
+        val nowPaused = VpnPauseStore.toggle()
+        AppLogRepository.info(LogSource.SERVICE, if (nowPaused) "Tunnel paused (direct)" else "Tunnel resumed")
+        serviceScope.launch {
+            runCatching { applyPauseRouting(nowPaused) }
+                .onFailure {
+                    AppLogRepository.error(LogSource.SERVICE, "Pause apply failed; reverting", it)
+                    VpnPauseStore.setPaused(!nowPaused)
+                    PowSocksConnectOnly.setTrafficPaused(!nowPaused)
+                    DomesticSocksSplit.setTrafficPaused(!nowPaused)
+                }
+            updateNotification(connected = true)
+        }
+    }
+
+    /**
+     * Apply / lift pause without tearing down the VPN session.
+     * PoW/Tor: SOCKS-layer direct. Xray/Direct: reload core config on the same TUN/process.
+     */
+    private suspend fun applyPauseRouting(paused: Boolean) {
+        PowSocksConnectOnly.setTrafficPaused(paused)
+        DomesticSocksSplit.setTrafficPaused(paused)
+        when {
+            activeEngine.isPow || activeEngine.isTor -> {
+                // SOCKS split already honors the flag; live sockets were dropped in setTrafficPaused.
+                AppLogRepository.info(
+                    LogSource.SERVICE,
+                    if (paused) "Pause applied (PoW/Tor SOCKS direct-only)" else "Resume applied (PoW/Tor tunnel restored)",
+                )
+            }
+            activeEngine.isDirect -> {
+                val settings = advancedSettingsStore.snapshot()
+                if (isProxyMode()) {
+                    // Rebuild process config on the same session path.
+                    directCoordinator.reloadForPause(settings, proxyMode = true)
+                } else {
+                    directCoordinator.reloadKeepingTun(settings)
+                }
+                AppLogRepository.info(
+                    LogSource.SERVICE,
+                    "Direct config reloaded pause=$paused (default route plain/direct)",
+                )
+            }
+            else -> {
+                val edge = activeEdge
+                val candidate = activeCandidate
+                if (edge == null || candidate == null) {
+                    // Do not leave the UI in "Paused" with the old proxy config still loaded.
+                    error("Pause: missing active edge/candidate while connected")
+                }
+                val profile = profileStore.activeProfile() ?: profileStore.selectedProfile()
+                if (isProxyMode()) {
+                    proxyCore.start(edge, candidate.settings, profile, candidate.runtimeOptions)
+                } else {
+                    nativeTunEngine.reloadKeepingTun(
+                        edge,
+                        candidate.settings,
+                        profile,
+                        candidate.runtimeOptions,
+                        aiRoute = aiRoutePlan,
+                    )
+                }
+                AppLogRepository.info(
+                    LogSource.SERVICE,
+                    if (paused) "Xray reloaded: all traffic -> direct (pause)" else "Xray reloaded: tunnel routing restored",
+                )
+            }
+        }
+    }
+
+    /** Live-apply manual direct domains without tearing the VPN down. */
+    private fun requestApplyDirectWhitelist() {
+        if (ConnectionStateStore.state.value != ConnectionState.CONNECTED || !resourcesActive) {
+            AppLogRepository.info(LogSource.SERVICE, "Direct whitelist apply skipped; not connected")
+            return
+        }
+        serviceScope.launch {
+            runCatching { applyDirectWhitelistRouting() }
+                .onFailure {
+                    AppLogRepository.error(LogSource.SERVICE, "Direct whitelist apply failed", it)
+                }
+        }
+    }
+
+    /**
+     * Rebuild Xray/Direct routing on the same TUN so whitelist adds/removes take effect now.
+     * PoW/Tor already read [DirectDomainWhitelist] / DomesticDirect live per CONNECT.
+     */
+    private suspend fun applyDirectWhitelistRouting() {
+        val hosts = com.uacspoofer.mobile.settings.DirectDomainWhitelist.snapshotOrEmpty()
+        AppLogRepository.info(
+            LogSource.SERVICE,
+            "Applying direct whitelist (${hosts.size}): ${hosts.take(8).joinToString()}",
+        )
+        when {
+            activeEngine.isPow || activeEngine.isTor -> {
+                // SOCKS match is live; nothing to rebuild.
+                AppLogRepository.info(LogSource.SERVICE, "Whitelist live for PoW/Tor SOCKS (no reload)")
+            }
+            activeEngine.isDirect -> {
+                val settings = advancedSettingsStore.snapshot()
+                if (isProxyMode()) {
+                    directCoordinator.reloadForPause(settings, proxyMode = true)
+                } else {
+                    directCoordinator.reloadKeepingTun(settings)
+                }
+            }
+            else -> {
+                val edge = activeEdge
+                val candidate = activeCandidate
+                if (edge == null || candidate == null) {
+                    AppLogRepository.warning(LogSource.SERVICE, "Whitelist apply: missing edge/candidate")
+                    return
+                }
+                val profile = profileStore.activeProfile() ?: profileStore.selectedProfile()
+                if (isProxyMode()) {
+                    proxyCore.start(edge, candidate.settings, profile, candidate.runtimeOptions)
+                } else {
+                    nativeTunEngine.reloadKeepingTun(
+                        edge,
+                        candidate.settings,
+                        profile,
+                        candidate.runtimeOptions,
+                        aiRoute = aiRoutePlan,
+                    )
+                }
+            }
+        }
+    }
+
     private fun requestDisconnect(closeAppTasks: Boolean = false) {
+        VpnPauseStore.clear()
+        PowSocksConnectOnly.setTrafficPaused(false)
+        DomesticSocksSplit.setTrafficPaused(false)
         AppLogRepository.info(LogSource.SERVICE, "Disconnect requested")
         NetworkGuardStore.markUserStopped()
         autoReconnectJob?.cancel()
@@ -1360,6 +1505,11 @@ class UacVpnService : VpnService() {
         coroutineContext.ensureActive()
         if (token != generation.get()) throw CancellationException("stale connect generation")
         activeEngine = EngineMode.UAC_DIRECT
+        // Drop any leftover Tor / PoW / Xray listeners before MITM decrypt ports bind.
+        runCatching { torCoordinator.stop() }
+        runCatching { powCoordinator.stop() }
+        runCatching { nativeTunEngine.stop() }
+        runCatching { proxyCore.stop() }
         directCoordinator.connect(settings, isProxyMode()) { establishTun(settings) }
         coroutineContext.ensureActive()
         if (token != generation.get()) throw CancellationException("stale connect generation")
@@ -1856,7 +2006,10 @@ class UacVpnService : VpnService() {
                     continue
                 }
                 if (activeEngine.isPow) {
-                    if (powCoordinator.isAwaitingNetworkRestore() || powCoordinator.isRetuning()) {
+                    if (
+                        powCoordinator.isAwaitingNetworkRestore() ||
+                        powCoordinator.isRetuning()
+                    ) {
                         nextDelayMs = 2_000L
                         continue
                     }
@@ -2125,7 +2278,7 @@ class UacVpnService : VpnService() {
             LanShareProxy.start(
                 upstreamHost = "127.0.0.1",
                 upstreamPort = lanShareUpstreamPort(),
-                protect = { socket -> protect(socket) },
+                protect = { socket -> protectOutbound(socket) },
             )
         }.onFailure { error ->
             AppLogRepository.warning(LogSource.SERVICE, "LAN share failed", error)
@@ -2203,6 +2356,8 @@ class UacVpnService : VpnService() {
     }
 
     private fun connectionNotificationText(connected: Boolean): Int = when {
+        connected && VpnPauseStore.isPaused() && isProxyMode() -> R.string.proxy_paused_notification
+        connected && VpnPauseStore.isPaused() -> R.string.vpn_paused_notification
         isProxyMode() && connected -> R.string.proxy_connected_notification
         isProxyMode() -> R.string.proxy_connecting_notification
         connected -> R.string.vpn_connected_notification
@@ -2235,6 +2390,12 @@ class UacVpnService : VpnService() {
             Intent(this, UacVpnService::class.java).setAction(ACTION_CLOSE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val pause = PendingIntent.getService(
+            this,
+            NOTIFICATION_PAUSE_REQUEST,
+            Intent(this, UacVpnService::class.java).setAction(ACTION_PAUSE_TOGGLE),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         val message = getString(textRes)
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_vpn)
@@ -2256,6 +2417,11 @@ class UacVpnService : VpnService() {
                 disconnect,
             )
             .addAction(
+                R.drawable.ic_notification_pause,
+                getString(if (VpnPauseStore.isPaused()) R.string.notification_resume else R.string.notification_pause),
+                pause,
+            )
+            .addAction(
                 R.drawable.ic_notification_close,
                 getString(R.string.notification_close),
                 close,
@@ -2263,7 +2429,18 @@ class UacVpnService : VpnService() {
             .build()
     }
 
-    fun protectSocket(fd: Int): Boolean = protect(fd)
+    fun protectSocket(fd: Int): Boolean = protectOutbound(fd)
+
+    /** Gated VpnService.protect — when socket protect is OFF, returns true without calling protect. */
+    fun protectOutbound(fd: Int): Boolean {
+        if (!SocketProtectGate.isEnabled(this)) return true
+        return protect(fd)
+    }
+
+    fun protectOutbound(socket: java.net.Socket): Boolean {
+        if (!SocketProtectGate.isEnabled(this)) return true
+        return protect(socket)
+    }
 
     fun onEvent(json: String) {
         powCoordinator.onNativeEvent(json)
@@ -2273,11 +2450,13 @@ class UacVpnService : VpnService() {
         private const val DISCONNECT_HARD_TIMEOUT_MS = 5_000L
         const val ACTION_CONNECT = "com.uacspoofer.mobile.CONNECT"
         const val ACTION_DISCONNECT = "com.uacspoofer.mobile.DISCONNECT"
+        const val ACTION_PAUSE_TOGGLE = "com.uacspoofer.mobile.PAUSE_TOGGLE"
         const val ACTION_CLOSE = "com.uacspoofer.mobile.CLOSE"
         const val ACTION_SWITCH_PROFILE = "com.uacspoofer.mobile.SWITCH_PROFILE"
         const val ACTION_APPLY_TOR_EXIT = "com.uacspoofer.mobile.APPLY_TOR_EXIT"
         const val ACTION_APPLY_POW_EXIT = "com.uacspoofer.mobile.APPLY_POW_EXIT"
         const val ACTION_APPLY_NETWORK_GUARD = "com.uacspoofer.mobile.APPLY_NETWORK_GUARD"
+        const val ACTION_APPLY_DIRECT_WHITELIST = "com.uacspoofer.mobile.APPLY_DIRECT_WHITELIST"
         const val ACTION_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.ROUTE_MTU_PROBE"
         const val ACTION_CANCEL_ROUTE_MTU_PROBE = "com.uacspoofer.mobile.CANCEL_ROUTE_MTU_PROBE"
         const val ACTION_REFRESH_LATENCY = "com.uacspoofer.mobile.REFRESH_LATENCY"
@@ -2291,6 +2470,7 @@ class UacVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL = "uac_mci_vpn"
         private const val NOTIFICATION_ID = 1001
         private const val NOTIFICATION_DISCONNECT_REQUEST = 1002
+        private const val NOTIFICATION_PAUSE_REQUEST = 1004
         private const val NOTIFICATION_CLOSE_REQUEST = 1003
         private const val STATS_INTERVAL_MS = 5_000L
         private const val STATS_INTERVAL_SCREEN_OFF_MS = 15_000L

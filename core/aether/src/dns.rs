@@ -227,9 +227,453 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Option<usize> {
     }
 }
 
+/// DoH JSON endpoints addressed by IP (no hostname to filter). On MCI these
+/// returned the ech param while plain UDP to public resolvers had it stripped.
+pub const DOH_JSON_IPS: &[&str] = &["8.8.8.8", "8.8.4.4"];
+/// Extra UDP resolvers for the parallel bootstrap (Shecan answers on MCI).
+pub const EXTRA_BOOTSTRAP_DNS: &[&str] = &["178.22.122.100:53", "185.51.200.2:53"];
+
+/// ECHConfigList the host app fetched for the key request (AETHER_API_ECH,
+/// base64). The MASQUE transport keeps using AETHER_ECH; this one only feeds
+/// the `doh` key route, so an unset variable changes nothing.
+pub fn supplied_api_ech() -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let raw = std::env::var("AETHER_API_ECH").ok()?;
+    let raw = raw.trim().trim_matches('"');
+    if raw.is_empty() {
+        return None;
+    }
+    match base64::engine::general_purpose::STANDARD.decode(raw) {
+        Ok(list) if plausible_ech_list(&list) => Some(list),
+        Ok(list) => {
+            log::warn!(
+                "[-] AETHER_API_ECH is not an ECHConfigList ({} bytes); ignoring it",
+                list.len()
+            );
+            None
+        }
+        Err(e) => {
+            log::warn!("[-] bad AETHER_API_ECH: {e}; ignoring it");
+            None
+        }
+    }
+}
+
+/// Race DoH-by-IP and several UDP resolvers for the ECHConfigList and keep the
+/// first plausible answer. Returns the list and a label naming its source.
+pub async fn fetch_ech_config_parallel(budget: Duration) -> Result<(Vec<u8>, String)> {
+    let mut set: tokio::task::JoinSet<Option<(Vec<u8>, String)>> = tokio::task::JoinSet::new();
+    for host in ECH_HOSTS.iter().copied() {
+        for ip in DOH_JSON_IPS.iter().copied() {
+            set.spawn(async move {
+                match query_doh_json(ip, host).await {
+                    Ok(list) => Some((list, format!("doh https://{ip}/resolve ({host})"))),
+                    Err(e) => {
+                        log::debug!("ech doh {host}@{ip} failed: {e}");
+                        None
+                    }
+                }
+            });
+        }
+        for server in EXTRA_BOOTSTRAP_DNS
+            .iter()
+            .chain(BOOTSTRAP_DNS.iter())
+            .copied()
+        {
+            set.spawn(async move {
+                let addr: SocketAddr = server.parse().ok()?;
+                match query_ech(addr, host).await {
+                    Ok(list) => Some((list, format!("udp {server} ({host})"))),
+                    Err(e) => {
+                        log::debug!("ech bootstrap {host}@{server} failed: {e}");
+                        None
+                    }
+                }
+            });
+        }
+    }
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        match timeout_at(deadline, set.join_next()).await {
+            Ok(Some(Ok(Some((list, source))))) if plausible_ech_list(&list) => {
+                set.abort_all();
+                return Ok((list, source));
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
+            Err(_) => {
+                set.abort_all();
+                break;
+            }
+        }
+    }
+    Err(AetherError::Ech(
+        "parallel ECH bootstrap found no ECHConfigList".into(),
+    ))
+}
+
+async fn query_doh_json(ip: &str, host: &str) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| AetherError::Ech(e.to_string()))?;
+    let url = format!("https://{ip}/resolve?name={host}&type=HTTPS");
+    let body: serde_json::Value = client
+        .get(&url)
+        .header("accept", "application/dns-json")
+        .send()
+        .await
+        .map_err(|e| AetherError::Ech(e.to_string()))?
+        .json()
+        .await
+        .map_err(|e| AetherError::Ech(e.to_string()))?;
+    let answers = body
+        .get("Answer")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for answer in answers {
+        let Some(data) = answer.get("data").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(b64) = ech_from_presentation(data) {
+            if let Ok(list) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                if plausible_ech_list(&list) {
+                    return Ok(list);
+                }
+            }
+        }
+    }
+    Err(AetherError::Ech("doh answer carried no ech param".into()))
+}
+
+/// Cloudflare's published IPv4/IPv6 ranges. A relay host is always proxied by
+/// Cloudflare (workers.dev or a custom domain on a Worker route), so an answer
+/// outside these ranges is a resolver bending the name (e.g. a proxy-DNS pool).
+const CLOUDFLARE_RANGES: &[&str] = &[
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
+    "2400:cb00::/32",
+    "2606:4700::/32",
+    "2803:f800::/32",
+    "2405:b500::/32",
+    "2405:8100::/32",
+    "2a06:98c0::/29",
+    "2c0f:f248::/32",
+];
+
+pub fn is_cloudflare_ip(ip: std::net::IpAddr) -> bool {
+    CLOUDFLARE_RANGES.iter().any(|cidr| {
+        cidr.parse::<ipnet::IpNet>()
+            .map(|net| net.contains(&ip))
+            .unwrap_or(false)
+    })
+}
+
+const RR_A: u16 = 1;
+
+async fn query_doh_json_a(ip: &str, host: &str) -> Result<Vec<std::net::IpAddr>> {
+    query_doh_json_addrs(ip, host, RR_A).await
+}
+
+const RR_AAAA: u16 = 28;
+
+/// System resolver (A and AAAA together), capped at `budget`.
+///
+/// `resolve_a_parallel` stops at the first source with a Cloudflare answer,
+/// and DoH-by-IP only asks for A records, so on a network where IPv4 TLS to
+/// Cloudflare stalls but IPv6 works (an MCI phone hotspot, 2026-10-22) the
+/// relay could end up with IPv4 candidates only. The relay races this too.
+pub async fn system_lookup(host: &str, budget: Duration) -> Vec<std::net::IpAddr> {
+    let mut out: Vec<std::net::IpAddr> = Vec::new();
+    if let Ok(Ok(addrs)) = tokio::time::timeout(budget, tokio::net::lookup_host((host, 443))).await {
+        for addr in addrs {
+            if !out.contains(&addr.ip()) {
+                out.push(addr.ip());
+            }
+        }
+    }
+    out
+}
+
+/// AAAA over DoH-by-IP (8.8.8.8 / 8.8.4.4); the first non-empty answer wins.
+pub async fn resolve_aaaa_doh(host: &str) -> Vec<std::net::IpAddr> {
+    let mut set: tokio::task::JoinSet<Vec<std::net::IpAddr>> = tokio::task::JoinSet::new();
+    for ip in DOH_JSON_IPS.iter().copied() {
+        let host = host.to_string();
+        set.spawn(async move { query_doh_json_addrs(ip, &host, RR_AAAA).await.unwrap_or_default() });
+    }
+    while let Some(joined) = set.join_next().await {
+        if let Ok(found) = joined {
+            if !found.is_empty() {
+                set.abort_all();
+                return found;
+            }
+        }
+    }
+    Vec::new()
+}
+
+async fn query_doh_json_addrs(ip: &str, host: &str, rtype: u16) -> Result<Vec<std::net::IpAddr>> {
+    let kind = if rtype == RR_AAAA { "AAAA" } else { "A" };
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| AetherError::Api(e.to_string()))?;
+    let url = format!("https://{ip}/resolve?name={host}&type={kind}");
+    let body: serde_json::Value = client
+        .get(&url)
+        .header("accept", "application/dns-json")
+        .send()
+        .await
+        .map_err(|e| AetherError::Api(e.to_string()))?
+        .json()
+        .await
+        .map_err(|e| AetherError::Api(e.to_string()))?;
+    let mut out = Vec::new();
+    for answer in body
+        .get("Answer")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        if answer.get("type").and_then(|v| v.as_u64()) != Some(rtype as u64) {
+            continue;
+        }
+        if let Some(ip) = answer
+            .get("data")
+            .and_then(|v| v.as_str())
+            .and_then(|d| d.trim().parse::<std::net::IpAddr>().ok())
+        {
+            out.push(ip);
+        }
+    }
+    if out.is_empty() {
+        return Err(AetherError::Api(format!("doh {kind} answer was empty")));
+    }
+    Ok(out)
+}
+
+fn parse_a_answers(msg: &[u8]) -> Vec<std::net::IpAddr> {
+    let mut out = Vec::new();
+    if msg.len() < 12 {
+        return out;
+    }
+    let qd = u16::from_be_bytes([msg[4], msg[5]]) as usize;
+    let an = u16::from_be_bytes([msg[6], msg[7]]) as usize;
+    let mut pos = 12;
+    for _ in 0..qd {
+        pos = match skip_name(msg, pos).and_then(|p| p.checked_add(4)) {
+            Some(p) => p,
+            None => return out,
+        };
+    }
+    for _ in 0..an {
+        pos = match skip_name(msg, pos) {
+            Some(p) => p,
+            None => return out,
+        };
+        if pos + 10 > msg.len() {
+            return out;
+        }
+        let rtype = u16::from_be_bytes([msg[pos], msg[pos + 1]]);
+        let rdlen = u16::from_be_bytes([msg[pos + 8], msg[pos + 9]]) as usize;
+        pos += 10;
+        if pos + rdlen > msg.len() {
+            return out;
+        }
+        if rtype == RR_A && rdlen == 4 {
+            out.push(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                msg[pos],
+                msg[pos + 1],
+                msg[pos + 2],
+                msg[pos + 3],
+            )));
+        }
+        pos += rdlen;
+    }
+    out
+}
+
+async fn query_a_udp(server: SocketAddr, host: &str) -> Result<Vec<std::net::IpAddr>> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    crate::platform::protect_socket(&sock).map_err(AetherError::Io)?;
+    sock.connect(server).await?;
+    let (query, id) = build_query(host, RR_A);
+    sock.send(&query).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut buf = [0u8; 2048];
+    loop {
+        let n = timeout_at(deadline, sock.recv(&mut buf))
+            .await
+            .map_err(|_| AetherError::Api("dns timeout".into()))??;
+        if !response_matches(&buf[..n], id, host, RR_A) {
+            continue;
+        }
+        let ips = parse_a_answers(&buf[..n]);
+        if ips.is_empty() {
+            return Err(AetherError::Api("udp A answer was empty".into()));
+        }
+        return Ok(ips);
+    }
+}
+
+/// Resolve `host` to addresses by racing DoH-by-IP (8.8.8.8 / 8.8.4.4),
+/// Shecan / extra UDP resolvers and the system resolver.
+///
+/// The system resolver is not trusted alone: a proxy DNS can hand back a pool
+/// address for a Cloudflare-proxied name. Answers inside Cloudflare's ranges
+/// win; the race returns as soon as one source yields such an answer. If no
+/// source does within `budget`, whatever arrived is returned (Cloudflare first).
+/// The second element names the source(s) for the log.
+pub async fn resolve_a_parallel(
+    host: &str,
+    budget: Duration,
+) -> (Vec<std::net::IpAddr>, String) {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return (vec![ip], "literal".to_string());
+    }
+    let mut set: tokio::task::JoinSet<(String, Vec<std::net::IpAddr>)> =
+        tokio::task::JoinSet::new();
+    for ip in DOH_JSON_IPS.iter().copied() {
+        let host = host.to_string();
+        set.spawn(async move {
+            let found = query_doh_json_a(ip, &host).await.unwrap_or_default();
+            (format!("doh https://{ip}/resolve"), found)
+        });
+    }
+    for server in EXTRA_BOOTSTRAP_DNS.iter().copied() {
+        let host = host.to_string();
+        set.spawn(async move {
+            let found = match server.parse::<SocketAddr>() {
+                Ok(addr) => query_a_udp(addr, &host).await.unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            (format!("udp {server}"), found)
+        });
+    }
+    {
+        let host = host.to_string();
+        set.spawn(async move {
+            let found = match tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::net::lookup_host((host.as_str(), 443)),
+            )
+            .await
+            {
+                Ok(Ok(addrs)) => addrs.map(|a| a.ip()).collect(),
+                _ => Vec::new(),
+            };
+            ("system resolver".to_string(), found)
+        });
+    }
+
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut cloudflare: Vec<std::net::IpAddr> = Vec::new();
+    let mut other: Vec<std::net::IpAddr> = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
+    loop {
+        match timeout_at(deadline, set.join_next()).await {
+            Ok(Some(Ok((source, found)))) => {
+                if found.is_empty() {
+                    continue;
+                }
+                let mut useful = false;
+                for ip in found {
+                    if is_cloudflare_ip(ip) {
+                        if !cloudflare.contains(&ip) {
+                            cloudflare.push(ip);
+                        }
+                        useful = true;
+                    } else {
+                        log::info!("[dns] {source} answered {host} with non-Cloudflare {ip}; ignored unless nothing else answers");
+                        if !other.contains(&ip) {
+                            other.push(ip);
+                        }
+                    }
+                }
+                if useful {
+                    sources.push(source);
+                    set.abort_all();
+                    break;
+                }
+            }
+            Ok(Some(Err(_))) => continue,
+            Ok(None) => break,
+            Err(_) => {
+                set.abort_all();
+                break;
+            }
+        }
+    }
+    // IPv4 first: many Iranian SIMs break AAAA paths.
+    cloudflare.sort_by_key(|ip| if ip.is_ipv4() { 0u8 } else { 1u8 });
+    if !cloudflare.is_empty() {
+        return (cloudflare, sources.join(", "));
+    }
+    (other, "non-Cloudflare answers only".to_string())
+}
+
+/// Pull the base64 `ech=` value out of an HTTPS record in presentation form.
+fn ech_from_presentation(data: &str) -> Option<String> {
+    let start = data.find("ech=")? + 4;
+    let value: String = data[start..]
+        .trim_start_matches('"')
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != '"')
+        .collect();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloudflare_ranges_are_recognised_and_proxy_pool_ips_are_not() {
+        assert!(is_cloudflare_ip("104.21.60.172".parse().unwrap()));
+        assert!(is_cloudflare_ip("172.67.198.113".parse().unwrap()));
+        assert!(is_cloudflare_ip("162.159.199.1".parse().unwrap()));
+        assert!(!is_cloudflare_ip("50.7.177.12".parse().unwrap()));
+        assert!(!is_cloudflare_ip("142.54.178.211".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_records_are_read_from_a_udp_answer() {
+        let (mut msg, _) = build_query("a.example", RR_A);
+        msg[2] |= 0x80;
+        msg[7] = 1; // ancount
+        msg.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 104, 21, 60, 172]);
+        let ips = parse_a_answers(&msg);
+        assert_eq!(ips, vec!["104.21.60.172".parse::<std::net::IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn ech_value_is_read_from_a_doh_presentation_answer() {
+        let data = "1 . alpn=\"h3,h2\" ipv4hint=104.18.10.118 ech=AEX+DQBB ipv6hint=2606:4700::1";
+        assert_eq!(ech_from_presentation(data).as_deref(), Some("AEX+DQBB"));
+        let quoted = "1 . ech=\"AEX+DQBB\"";
+        assert_eq!(ech_from_presentation(quoted).as_deref(), Some("AEX+DQBB"));
+        assert_eq!(ech_from_presentation("1 . alpn=h2"), None);
+    }
 
     fn reply(id: u16, name: &str, qtype: u16, qr: bool, qdcount: u16) -> Vec<u8> {
         let mut msg = Vec::new();

@@ -48,6 +48,11 @@ http = "1"
 bytes = "1"
 tokio-boring = "4.22"
 
+# Windows-only: OOB key route over the OS TLS stack (SChannel), same
+# ClientHello as the C# probe that got a key on AS48944.
+[target.'cfg(windows)'.dependencies]
+schannel = "0.1"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

@@ -13,12 +13,18 @@ data class NetworkGuardSettings(
     val webRtcBlock: Boolean = true,
     val quicBlock: Boolean = false,
     val ipv6Block: Boolean = true,
+    val iranDirect: Boolean = true,
 )
 
 class NetworkGuardStore private constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val mutableSettings = MutableStateFlow(read())
     val settings: StateFlow<NetworkGuardSettings> = mutableSettings.asStateFlow()
+
+    init {
+        com.uacspoofer.mobile.mci.DomesticDirect.applyEnabled(mutableSettings.value.iranDirect)
+        DirectDomainWhitelist.get(context.applicationContext)
+    }
 
     fun snapshot(): NetworkGuardSettings = mutableSettings.value
 
@@ -58,6 +64,12 @@ class NetworkGuardStore private constructor(context: Context) {
         persist(mutableSettings.value.copy(ipv6Block = enabled))
     }
 
+    @Synchronized
+    fun setIranDirect(enabled: Boolean) {
+        persist(mutableSettings.value.copy(iranDirect = enabled))
+        com.uacspoofer.mobile.mci.DomesticDirect.applyEnabled(enabled)
+    }
+
     private fun read(): NetworkGuardSettings = NetworkGuardSettings(
         killSwitch = prefs.getBoolean(KEY_KILL_SWITCH, false),
         autoConnect = prefs.getBoolean(KEY_AUTO_CONNECT, false),
@@ -66,6 +78,7 @@ class NetworkGuardStore private constructor(context: Context) {
         webRtcBlock = prefs.getBoolean(KEY_WEBRTC_BLOCK, true),
         quicBlock = prefs.getBoolean(KEY_QUIC_BLOCK, false),
         ipv6Block = prefs.getBoolean(KEY_IPV6_BLOCK, true),
+        iranDirect = prefs.getBoolean(KEY_IRAN_DIRECT, true),
     )
 
     private fun persist(value: NetworkGuardSettings) {
@@ -77,6 +90,7 @@ class NetworkGuardStore private constructor(context: Context) {
             .putBoolean(KEY_WEBRTC_BLOCK, value.webRtcBlock)
             .putBoolean(KEY_QUIC_BLOCK, value.quicBlock)
             .putBoolean(KEY_IPV6_BLOCK, value.ipv6Block)
+            .putBoolean(KEY_IRAN_DIRECT, value.iranDirect)
             .apply()
         mutableSettings.value = value
     }
@@ -90,6 +104,7 @@ class NetworkGuardStore private constructor(context: Context) {
         private const val KEY_WEBRTC_BLOCK = "webrtc_block"
         private const val KEY_QUIC_BLOCK = "quic_block_v2"
         private const val KEY_IPV6_BLOCK = "ipv6_block"
+        private const val KEY_IRAN_DIRECT = "iran_direct"
 
         private val mutableBlocking = MutableStateFlow(false)
         val blocking: StateFlow<Boolean> = mutableBlocking.asStateFlow()

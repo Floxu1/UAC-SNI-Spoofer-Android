@@ -65,6 +65,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.engine.Engine4UnlockStore
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeStore
 
@@ -131,13 +132,20 @@ internal fun EngineSwitchRail(
     onSelect: (EngineMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current.applicationContext
+    val unlockStore = remember(context) { Engine4UnlockStore.get(context) }
+    val engine4Unlocked by unlockStore.unlocked.collectAsStateWithLifecycle()
     val active = pending ?: selected
+    val visibleModes = remember(engine4Unlocked, active) {
+        val base = EngineMode.visible(engine4Unlocked)
+        if (active.isDirect && active !in base) base + active else base
+    }
     val width: Dp = if (compact) 42.dp else 46.dp
     val small: Dp = if (compact) 34.dp else 38.dp
     val big: Dp = if (compact) 50.dp else 56.dp
     val gap = 4.dp
     val pad = 4.dp
-    val activeIndex = EngineMode.entries.indexOf(active)
+    val activeIndex = visibleModes.indexOf(active).coerceAtLeast(0)
     val spring = spring<Dp>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
     val indicatorY by animateDpAsState((small + gap) * activeIndex, spring, label = "engine-indicator-y")
     val accent by animateColorAsState(active.identityAccent(), tween(320), label = "engine-indicator-color")
@@ -174,7 +182,7 @@ internal fun EngineSwitchRail(
                 .border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(percent = 50)),
         )
         Column(verticalArrangement = Arrangement.spacedBy(gap), horizontalAlignment = Alignment.CenterHorizontally) {
-            EngineMode.entries.forEach { mode ->
+            visibleModes.forEach { mode ->
                 EngineSwitchItem(
                     mode = mode,
                     selected = active == mode,

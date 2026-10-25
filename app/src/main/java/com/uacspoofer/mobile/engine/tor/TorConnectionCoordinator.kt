@@ -4,6 +4,9 @@ import android.content.Context
 import android.os.ParcelFileDescriptor
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.mci.DomesticDirect
+import com.uacspoofer.mobile.mci.DomesticSocksSplit
+import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.vpn.NetworkFingerprintResolver
@@ -83,6 +86,12 @@ class TorConnectionCoordinator(
                 "exit" to exitLabel(torSettings),
             ),
         )
+        DomesticDirect.ensure(appContext)
+        val iranDirect = NetworkGuardStore.get(appContext).snapshot().iranDirect
+        DomesticDirect.applyEnabled(iranDirect)
+        check(DomesticSocksSplit.start(torSettings.socksPort, torSettings.daemonSocksPort)) {
+            "DomesticSocksSplit failed on ${torSettings.socksPort} -> ${torSettings.daemonSocksPort}"
+        }
         if (settings.connectionMode != CONNECTION_MODE_PROXY) {
             TorStatusStore.update(TorPhase.BRIDGING, 100, "Routing device traffic through Tor")
             TorLiveFlow.start(TorFlowStageId.TUN)
@@ -372,6 +381,7 @@ class TorConnectionCoordinator(
     }
 
     fun stop() {
+        DomesticSocksSplit.stop()
         if (ownsTunRelay) {
             runCatching { tunRelay.stop() }
             ownsTunRelay = false

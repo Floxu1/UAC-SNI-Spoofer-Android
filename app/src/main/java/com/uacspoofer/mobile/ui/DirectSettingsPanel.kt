@@ -26,6 +26,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.engine.direct.DirectCa
 import com.uacspoofer.mobile.engine.direct.DirectEngineSettings
 import com.uacspoofer.mobile.engine.direct.DirectEngineStore
 import com.uacspoofer.mobile.engine.direct.DirectStatusStore
@@ -69,14 +70,62 @@ private fun DirectSettingsPanel() {
                 Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     PowHint(
                         homeText(
-                            "No server and no worker: traffic goes straight to each site and only the TLS ClientHello is split so SNI-based DPI cannot read it. Sites blocked by IP cannot be opened this way, and sites that sanction Iran still see your Iranian IP.",
-                            "بدون سرور و بدون ورکر: ترافیک مستقیم به خود سایت می‌ره و فقط ClientHello تیکه‌تیکه می‌شه تا DPI اسم سایت رو نخونه. سایت‌هایی که IPشون بسته‌ست با این روش باز نمی‌شن، و سایت‌هایی که ایران رو تحریم کردن هنوز IP ایرانی رو می‌بینن.",
+                            "No server/worker. Google sites use MITM domain fronting (SNI www.google.com). Cloudflare sites use ECH (outer SNI cloudflare-ech.com). Both need the app CA installed as a user certificate. Fragment is optional and usually fails on MCI. IP-blocked sites stay unreachable.",
+                            "بدون سرور/ورکر. سایت‌های گوگل با MITM و دامنهٔ گوگل (SNI=www.google.com) می‌رن. سایت‌های کلودفلر با ECH (SNI بیرونی cloudflare-ech.com). هر دو به نصب گواهی CA برنامه به‌عنوان گواهی کاربر نیاز دارن. تیکه‌کردن اختیاریه و روی همراه اول معمولاً fail می‌شه. سایت‌هایی که IPشون بسته‌ست باز نمی‌شن.",
                         ),
                         UacColors.TextPrimary,
                     )
                     if (status.detail.isNotBlank()) PowHint(status.detail)
                 }
             }
+            SectionLabel(homeText("Layers", "لایه‌ها"))
+            PowCard {
+                PowSwitchRow(
+                    icon = Icons.Outlined.Public,
+                    title = homeText("Google fronting (MITM)", "Fronting گوگل (MITM)"),
+                    subtitle = homeText("YouTube / Google via SNI www.google.com — needs CA", "یوتیوب/گوگل با SNI گوگل — نیاز به CA"),
+                    checked = s.googleFronting,
+                    accent = accent,
+                ) { save(s.copy(googleFronting = it)) }
+                PowRowDivider()
+                PowSwitchRow(
+                    icon = Icons.Outlined.Shield,
+                    title = homeText("Cloudflare ECH (MITM)", "ECH کلودفلر (MITM)"),
+                    subtitle = homeText("x.com / Discord via encrypted ClientHello — needs CA", "x.com و Discord با ClientHello رمز — نیاز به CA"),
+                    checked = s.echEnabled,
+                    accent = accent,
+                ) { save(s.copy(echEnabled = it)) }
+                PowRowDivider()
+                PowSwitchRow(
+                    icon = Icons.Outlined.Bolt,
+                    title = homeText("ClientHello fragment", "تیکه‌کردن ClientHello"),
+                    subtitle = homeText("Off by default: MCI drops fragmented hellos", "پیش‌فرض خاموش: همراه اول hello تیکه‌شده رو drop می‌کنه"),
+                    checked = s.fragmentEnabled,
+                    accent = accent,
+                ) { save(s.copy(fragmentEnabled = it)) }
+                PowRowDivider()
+                Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PowHint(homeText(
+                        "Export the CA, then on the phone: Settings → Security → Install a certificate → CA certificate. Only install on devices you control. MITM can read HTTPS for routed domains.",
+                        "CA رو Export کن، بعد روی گوشی: تنظیمات → امنیت → نصب گواهی → گواهی CA. فقط روی دستگاه خودت نصب کن. MITM می‌تونه HTTPS دامنه‌های مسیر رو بخونه.",
+                    ))
+                    PowButton(
+                        text = homeText("Export CA certificate", "خروجی گرفتن از گواهی CA"),
+                        enabled = true,
+                        accent = accent,
+                        filled = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        runCatching {
+                            val file = DirectCa.exportToDownloads(context)
+                            android.widget.Toast.makeText(context, file.absolutePath, android.widget.Toast.LENGTH_LONG).show()
+                        }.onFailure {
+                            android.widget.Toast.makeText(context, it.message ?: "CA export failed", android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
+            if (s.fragmentEnabled) {
             SectionLabel(homeText("TLS ClientHello", "ClientHello در TLS"))
             PowCard {
                 PowPickerRow(
@@ -115,6 +164,7 @@ private fun DirectSettingsPanel() {
                     }
                 }
             }
+            } // fragmentEnabled
             SectionLabel(homeText("Other TCP and UDP", "بقیه‌ی TCP و UDP"))
             PowCard {
                 PowSwitchRow(
@@ -156,14 +206,7 @@ private fun DirectSettingsPanel() {
                     accent = accent,
                 ) { save(s.copy(ipv6 = it)) }
                 PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Public,
-                    title = homeText("Iranian sites direct", "سایت‌های ایرانی مستقیم"),
-                    subtitle = homeText("No splitting, domestic DNS", "بدون تیکه‌کردن، با DNS داخلی"),
-                    checked = s.iranDirect,
-                    accent = accent,
-                ) { save(s.copy(iranDirect = it)) }
-            }
+}
             SectionLabel(homeText("DNS", "DNS"))
             PowCard {
                 Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {

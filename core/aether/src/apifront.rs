@@ -4,6 +4,8 @@ use std::time::Duration;
 use boring::ssl::{SslConnector, SslMethod, SslVersion};
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(target_os = "android")]
+use tokio::net::TcpSocket;
 use tokio::net::TcpStream;
 
 use crate::error::{AetherError, Result};
@@ -45,6 +47,17 @@ pub enum Fingerprint {
     SplitLegacy,
     Modern,
     ChromeLike,
+    /// OOB key route, C#-probe variant (SChannel SslProtocols.Tls12): TLS 1.2
+    /// only, no ALPN (`AETHER_OOB_ALPN=1` offers http/1.1), no GREASE.
+    Oob,
+}
+
+/// Whether the OOB route offers ALPN http/1.1. Default off (C# passes null).
+fn oob_alpn_enabled() -> bool {
+    matches!(
+        std::env::var("AETHER_OOB_ALPN").ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
 }
 
 impl Fingerprint {
@@ -53,6 +66,7 @@ impl Fingerprint {
             Fingerprint::SplitLegacy => "split-tls12",
             Fingerprint::Modern => "plain-tls13",
             Fingerprint::ChromeLike => "chrome",
+            Fingerprint::Oob => "oob-tls12",
         }
     }
 
@@ -82,6 +96,7 @@ impl Fingerprint {
             _ => FragmentConfig::disabled(),
         }
     }
+
 
     fn configure(self) -> Result<boring::ssl::ConnectConfiguration> {
         let mut builder =
@@ -126,6 +141,23 @@ impl Fingerprint {
                 builder.set_alpn_protos(ALPN_HTTP1).map_err(tls)?;
                 builder.enable_signed_cert_timestamps();
                 builder.enable_ocsp_stapling();
+            }
+            Fingerprint::Oob => {
+                // Match the C# SslStream probe: TLS 1.2 (default), SChannel's
+                // broad default cipher set (left untouched), modern curves, no
+                // GREASE, no ALPN unless asked. The ClientHello stays small and
+                // ordinary, like the probe that got a key on AS48944.
+                builder
+                    .set_min_proto_version(Some(SslVersion::TLS1_2))
+                    .map_err(tls)?;
+                builder
+                    .set_max_proto_version(Some(SslVersion::TLS1_2))
+                    .map_err(tls)?;
+                builder.set_grease_enabled(false);
+                builder.set_curves_list(MODERN_GROUPS).map_err(tls)?;
+                if oob_alpn_enabled() {
+                    builder.set_alpn_protos(ALPN_HTTP1).map_err(tls)?;
+                }
             }
         }
 
@@ -194,12 +226,37 @@ fn order_answered(live: Vec<SocketAddr>) -> Vec<SocketAddr> {
 }
 
 async fn tcp_answers(address: SocketAddr) -> Option<SocketAddr> {
-    match tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(address)).await {
-        Ok(Ok(stream)) => {
-            drop(stream);
-            Some(address)
+    #[cfg(target_os = "android")]
+    {
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4().ok()?
+        } else {
+            TcpSocket::new_v6().ok()?
+        };
+        crate::platform::protect_socket(&socket).ok()?;
+        let bind: SocketAddr = if address.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
+        socket.bind(bind).ok()?;
+        match tokio::time::timeout(PROBE_TIMEOUT, socket.connect(address)).await {
+            Ok(Ok(stream)) => {
+                drop(stream);
+                Some(address)
+            }
+            _ => None,
         }
-        _ => None,
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        match tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(address)).await {
+            Ok(Ok(stream)) => {
+                drop(stream);
+                Some(address)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -250,6 +307,13 @@ fn note_key(message: &str) {
 }
 
 fn render_request(request: &ApiRequest) -> Vec<u8> {
+    render_request_with(request, false)
+}
+
+/// HTTP/1.1 request bytes; `keep_alive` asks the server to keep the TLS
+/// connection open for the next request (OOB route: POST /reg and the
+/// following PATCH share one desynced connection).
+fn render_request_with(request: &ApiRequest, keep_alive: bool) -> Vec<u8> {
     let mut head = String::new();
     head.push_str(&format!("{} {} HTTP/1.1\r\n", request.method, request.path));
     head.push_str(&format!("Host: {}\r\n", request.host));
@@ -263,13 +327,104 @@ fn render_request(request: &ApiRequest) -> Vec<u8> {
         "Content-Length: {}\r\n",
         request.body.as_ref().map(Vec::len).unwrap_or(0)
     ));
-    head.push_str("Connection: close\r\n\r\n");
+    if keep_alive {
+        head.push_str("Connection: keep-alive\r\n\r\n");
+    } else {
+        head.push_str("Connection: close\r\n\r\n");
+    }
 
     let mut wire = head.into_bytes();
     if let Some(body) = &request.body {
         wire.extend_from_slice(body);
     }
     wire
+}
+
+/// True once `raw` holds a whole HTTP/1.1 response: the head plus
+/// Content-Length body bytes, or a chunked body with its 0-size terminator.
+/// Without either, the end is the connection close (returns false).
+fn response_complete(raw: &[u8]) -> bool {
+    matches!(framed_len(raw), Some(Some(len)) if raw.len() >= len)
+}
+
+/// Exact byte length of the first HTTP/1.1 response in `raw`:
+/// `None` = head not complete yet; `Some(None)` = the head is there but the
+/// body length is not known yet (chunked body still arriving) or the body
+/// ends only with the connection close (no framing); `Some(Some(n))` = the
+/// response is the first `n` bytes.
+fn framed_len(raw: &[u8]) -> Option<Option<usize>> {
+    let head_end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    let body_start = head_end + 4;
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    // 1xx / 204 / 304 carry no body.
+    if matches!(status, 100..=199 | 204 | 304) {
+        return Some(Some(body_start));
+    }
+    let mut chunked = false;
+    for line in head.split("\r\n").skip(1) {
+        if let Some(value) = line.strip_prefix("content-length:") {
+            if let Ok(len) = value.trim().parse::<usize>() {
+                return Some(Some(body_start + len));
+            }
+        }
+        if line.starts_with("transfer-encoding:") && line.contains("chunked") {
+            chunked = true;
+        }
+    }
+    if !chunked {
+        return Some(None);
+    }
+    Some(chunked_end(raw, body_start))
+}
+
+/// End offset of a complete chunked body that starts at `start`
+/// (after the 0-size chunk and the optional trailers), if it is all there.
+fn chunked_end(raw: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    loop {
+        let rest = raw.get(cursor..)?;
+        let line_len = rest.windows(2).position(|w| w == b"\r\n")?;
+        let token = String::from_utf8_lossy(&rest[..line_len]);
+        let size = usize::from_str_radix(token.split(';').next().unwrap_or("").trim(), 16).ok()?;
+        cursor += line_len + 2;
+        if size == 0 {
+            // Trailers (usually none), then the empty line.
+            loop {
+                let rest = raw.get(cursor..)?;
+                let line_len = rest.windows(2).position(|w| w == b"\r\n")?;
+                cursor += line_len + 2;
+                if line_len == 0 {
+                    return Some(cursor);
+                }
+            }
+        }
+        cursor += size + 2;
+        if cursor > raw.len() {
+            return None;
+        }
+    }
+}
+
+/// The response may be followed by another request on the same connection:
+/// exact framing and no `Connection: close` from the server.
+fn reusable_after(raw: &[u8]) -> bool {
+    let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    if !head.starts_with("http/1.1") {
+        return false;
+    }
+    let close = head
+        .split("\r\n")
+        .skip(1)
+        .any(|line| line.starts_with("connection:") && line.contains("close"));
+    !close && matches!(framed_len(raw), Some(Some(len)) if raw.len() == len)
 }
 
 fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
@@ -303,7 +458,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
     Ok((status, body))
 }
 
-fn dechunk(body: &str) -> String {
+pub(crate) fn dechunk(body: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0usize;
 
@@ -341,20 +496,98 @@ pub struct ReadySession {
     pub route: &'static str,
 }
 
+
+/// Connect to `address` with Android VPN socket protection applied BEFORE
+/// connect (mirrors `masque_h2::connect_tcp` / `dns.rs`). On Windows this is
+/// `TcpStream::connect` plus a no-op protect, so behaviour stays identical.
+async fn connect_protected(address: SocketAddr) -> Result<TcpStream> {
+    #[cfg(target_os = "android")]
+    {
+        let started = std::time::Instant::now();
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        }
+        .map_err(|e| AetherError::Api(format!("socket for {address}: {e}")))?;
+        {
+            use std::os::fd::AsRawFd;
+            let fd = socket.as_raw_fd();
+            match crate::platform::protect_socket(&socket) {
+                Ok(()) => note_key(&format!(
+                    "t={wall} socket fd={fd} protected for {address} ({} ms)",
+                    started.elapsed().as_millis()
+                )),
+                Err(e) => {
+                    note_key(&format!(
+                        "t={wall} socket fd={fd} protect FAILED for {address}: {e}"
+                    ));
+                    return Err(AetherError::Api(format!(
+                        "protect socket for {address}: {e}"
+                    )));
+                }
+            }
+        }
+        let bind: SocketAddr = if address.is_ipv4() {
+            "0.0.0.0:0".parse().unwrap()
+        } else {
+            "[::]:0".parse().unwrap()
+        };
+        socket
+            .bind(bind)
+            .map_err(|e| AetherError::Api(format!("bind for {address}: {e}")))?;
+        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(address))
+            .await
+            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
+            .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?;
+        tcp.set_nodelay(true).ok();
+        note_key(&format!(
+            "t={} tcp connected to {address} in {} ms (protected)",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            started.elapsed().as_millis()
+        ));
+        Ok(tcp)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
+            .await
+            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
+            .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?;
+        // No-op on Windows; on other non-Android unix protects after connect.
+        let _ = crate::platform::protect_socket(&tcp);
+        tcp.set_nodelay(true).ok();
+        Ok(tcp)
+    }
+}
+
 async fn handshake(
     host: &str,
     address: SocketAddr,
     fingerprint: Fingerprint,
     ech: Option<&[u8]>,
 ) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
+    handshake_with(host, address, fingerprint, ech, None).await
+}
+
+async fn handshake_with(
+    host: &str,
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    ech: Option<&[u8]>,
+    oob: Option<crate::oob::OobMethod>,
+) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
     let mut offered = ech.map(|list| list.to_vec());
     let mut retried = false;
     loop {
-        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address))
-            .await
-            .map_err(|_| AetherError::Api(format!("connect to {address} timed out")))?
-            .map_err(|e| AetherError::Api(format!("connect to {address}: {e}")))?;
-        tcp.set_nodelay(true).ok();
+        let tcp = connect_protected(address).await?;
 
         let mut config = fingerprint.configure()?;
         // The edge certificate is for whichever name ECH puts in the clear.
@@ -370,7 +603,11 @@ async fn handshake(
                 ))
             })?;
         }
-        let stream = FragmentingStream::new(tcp, fingerprint.fragments());
+        let stream = if let Some(method) = oob {
+            FragmentingStream::new(tcp, FragmentConfig::disabled()).with_oob(method, host)
+        } else {
+            FragmentingStream::new(tcp, fingerprint.fragments())
+        };
 
         match tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
@@ -436,29 +673,172 @@ async fn write_and_read(
     }
 
     let wire = render_request(request);
-    let collected = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
+    let exchange_started = std::time::Instant::now();
+    #[cfg(target_os = "android")]
+    {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        note_key(&format!(
+            "t={wall} HTTP exchange start {address} / {} / {route}: {} {} wire={} bytes Connection:close",
+            fingerprint.label(),
+            request.method,
+            request.path,
+            wire.len()
+        ));
+    }
+    // Stop as soon as the response is complete (Content-Length reached, or the
+    // chunked terminator seen), like the C# probe. Waiting for EOF instead hangs
+    // the full timeout when a middlebox drops or delays the server's FIN after
+    // the body already arrived. `AETHER_OOB_READ=eof` restores the old wait.
+    let read_eof = std::env::var("AETHER_OOB_READ")
+        .map(|v| v.trim().eq_ignore_ascii_case("eof"))
+        .unwrap_or(false);
+    let mut buffer = Vec::new();
+    let outcome = tokio::time::timeout(EXCHANGE_TIMEOUT, async {
+        let write_started = std::time::Instant::now();
         tls.write_all(&wire).await?;
         tls.flush().await?;
+        #[cfg(target_os = "android")]
+        {
+            let wall = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            note_key(&format!(
+                "t={wall} HTTP write flushed {address}: bytes_written={} flush_ms={}",
+                wire.len(),
+                write_started.elapsed().as_millis()
+            ));
+        }
 
-        let mut buffer = Vec::new();
         let mut chunk = [0u8; 8192];
+        let mut first_byte_ms: Option<u128> = None;
+        #[cfg(target_os = "android")]
+        let first_byte_deadline = std::time::Duration::from_secs(3);
+        #[cfg(not(target_os = "android"))]
+        let first_byte_deadline = EXCHANGE_TIMEOUT;
         loop {
-            let read = tls.read(&mut chunk).await?;
+            let read = if first_byte_ms.is_none() {
+                match tokio::time::timeout(first_byte_deadline, tls.read(&mut chunk)).await {
+                    Ok(r) => r?,
+                    Err(_) => {
+                        #[cfg(target_os = "android")]
+                        {
+                            let wall = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0);
+                            note_key(&format!(
+                                "t={wall} HTTP first_byte timeout {address}: no byte in {} ms after flush (0-byte risk)",
+                                first_byte_deadline.as_millis()
+                            ));
+                        }
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "first_byte timeout at {address} after {} ms",
+                                first_byte_deadline.as_millis()
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                tls.read(&mut chunk).await?
+            };
             if read == 0 {
+                #[cfg(target_os = "android")]
+                {
+                    let wall = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    note_key(&format!(
+                        "t={wall} HTTP read EOF {address}: total={} first_byte_ms={:?} elapsed_ms={}",
+                        buffer.len(),
+                        first_byte_ms,
+                        exchange_started.elapsed().as_millis()
+                    ));
+                }
                 break;
+            }
+            if first_byte_ms.is_none() {
+                let ms = exchange_started.elapsed().as_millis();
+                first_byte_ms = Some(ms);
+                #[cfg(target_os = "android")]
+                {
+                    let wall = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    note_key(&format!(
+                        "t={wall} HTTP first_byte {address}: n={read} first_byte_ms={ms}"
+                    ));
+                }
             }
             buffer.extend_from_slice(&chunk[..read]);
             if buffer.len() > MAX_BODY {
                 break;
             }
+            if !read_eof && response_complete(&buffer) {
+                break;
+            }
         }
-        Ok::<Vec<u8>, std::io::Error>(buffer)
+        Ok::<(), std::io::Error>(())
     })
-    .await
-    .map_err(|_| AetherError::Api(format!("exchange with {address} timed out")))?
-    .map_err(|e| AetherError::Api(format!("exchange with {address}: {e}")))?;
+    .await;
+    #[cfg(target_os = "android")]
+    {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let kind = match &outcome {
+            Ok(Ok(())) => "ok",
+            Ok(Err(_)) => "io_err",
+            Err(_) => "timeout",
+        };
+        // wrote_ok: if we timed out with 0 response bytes and never logged
+        // "HTTP write flushed", the write/flush hung before the server replied.
+        note_key(&format!(
+            "t={wall} HTTP exchange outcome {address}: kind={kind} resp_bytes={} elapsed_ms={}",
+            buffer.len(),
+            exchange_started.elapsed().as_millis()
+        ));
+    }
+    // A timeout or a late read error after a complete response still counts:
+    // the API already answered.
+    let collected = match outcome {
+        Ok(Ok(())) => buffer,
+        _ if response_complete(&buffer) => buffer,
+        Ok(Err(e)) => return Err(AetherError::Api(format!("exchange with {address}: {e}"))),
+        Err(_) => {
+            return Err(AetherError::Api(format!(
+                "exchange with {address} timed out ({} response bytes)",
+                buffer.len()
+            )))
+        }
+    };
 
-    let (status, body) = parse_response(&collected)?;
+    #[cfg(target_os = "android")]
+    {
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        note_key(&format!(
+            "t={wall} HTTP exchange done {address}: {} response bytes",
+            collected.len()
+        ));
+    }
+    let (status, body) = parse_response(&collected).map_err(|error| {
+        AetherError::Api(format!(
+            "{error} from {address} over {route} ({} bytes: {:?})",
+            collected.len(),
+            String::from_utf8_lossy(&collected[..collected.len().min(160)])
+        ))
+    })?;
     Ok(ApiResponse {
         status,
         body,
@@ -481,6 +861,99 @@ async fn exchange(
     write_and_read(tls, request, address, fingerprint, route).await
 }
 
+/// TLS stream type of the built-in sessions (OOB keep-alive reuse).
+pub type SessionTls = tokio_boring::SslStream<FragmentingStream<TcpStream>>;
+
+impl ReadySession {
+    /// The TLS stream and its variant, for a request/response loop on one
+    /// connection (`exchange_keep_alive`).
+    pub fn into_parts(self) -> (SessionTls, SocketAddr, Fingerprint, &'static str) {
+        (self.tls, self.address, self.fingerprint, self.route)
+    }
+}
+
+/// One HTTP/1.1 request on an open TLS connection that stays open:
+/// `Connection: keep-alive`, the response is read exactly by Content-Length
+/// or chunked framing (never to EOF), so the next request can be written on
+/// the same stream. Returns the response and whether the connection may be
+/// used again. No overall timeout here; the caller bounds it.
+pub async fn exchange_keep_alive(
+    tls: &mut SessionTls,
+    request: &ApiRequest,
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    route: &'static str,
+) -> Result<(ApiResponse, bool)> {
+    if tls.ssl().selected_alpn_protocol() == Some(b"h2") {
+        return Err(AetherError::Api(format!(
+            "{address} negotiated http/2 which this path does not speak"
+        )));
+    }
+    let wire = render_request_with(request, true);
+    tls.write_all(&wire)
+        .await
+        .map_err(|e| AetherError::Api(format!("exchange with {address}: write: {e}")))?;
+    tls.flush()
+        .await
+        .map_err(|e| AetherError::Api(format!("exchange with {address}: flush: {e}")))?;
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut eof = false;
+    loop {
+        if let Some(Some(len)) = framed_len(&buffer) {
+            if buffer.len() >= len {
+                break;
+            }
+        }
+        let read = match tls.read(&mut chunk).await {
+            Ok(read) => read,
+            Err(e) if response_complete(&buffer) => {
+                log::debug!("[apifront] late read error after a complete response: {e}");
+                break;
+            }
+            Err(e) => {
+                return Err(AetherError::Api(format!(
+                    "exchange with {address}: {e} ({} response bytes)",
+                    buffer.len()
+                )))
+            }
+        };
+        if read == 0 {
+            eof = true;
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > MAX_BODY {
+            break;
+        }
+    }
+    if buffer.is_empty() {
+        return Err(AetherError::Api(format!(
+            "exchange with {address}: connection closed before any response byte"
+        )));
+    }
+    let reusable = !eof && reusable_after(&buffer);
+    let collected = match framed_len(&buffer) {
+        Some(Some(len)) if buffer.len() >= len => &buffer[..len],
+        _ => &buffer[..],
+    };
+    let (status, body) = parse_response(collected).map_err(|error| {
+        AetherError::Api(format!(
+            "{error} from {address} over {route} ({} bytes: {:?})",
+            collected.len(),
+            String::from_utf8_lossy(&collected[..collected.len().min(160)])
+        ))
+    })?;
+    Ok((
+        ApiResponse {
+            status,
+            body,
+            route: format!("{address} / {} / {route}", fingerprint.label()),
+        },
+        reusable,
+    ))
+}
+
 pub async fn send_on_session(session: ReadySession, request: &ApiRequest) -> Result<ApiResponse> {
     write_and_read(
         session.tls,
@@ -490,6 +963,19 @@ pub async fn send_on_session(session: ReadySession, request: &ApiRequest) -> Res
         session.route,
     )
     .await
+}
+
+/// One HTTP/1.1 request with `Connection: close` (exact Content-Length read).
+/// Used on Android OOB key-fetch so each API call uses a fresh TLS connection
+/// (per-connection packet-cap theory: keep-alive reuse can return 0 bytes).
+pub async fn exchange_close(
+    tls: SessionTls,
+    request: &ApiRequest,
+    address: SocketAddr,
+    fingerprint: Fingerprint,
+    route: &'static str,
+) -> Result<ApiResponse> {
+    write_and_read(tls, request, address, fingerprint, route).await
 }
 
 async fn load_ech_config() -> Option<Vec<u8>> {
@@ -502,26 +988,87 @@ async fn load_ech_config() -> Option<Vec<u8>> {
 /// Open a TLS session with ECH on the first edge that finishes the handshake.
 pub async fn open_ech_session(host: &str, addresses: &[SocketAddr]) -> Result<ReadySession> {
     let ech = load_ech_config().await;
+    open_ech_with(host, addresses, ech.as_deref(), "ech", "ECH").await
+}
+
+async fn open_ech_with(
+    host: &str,
+    addresses: &[SocketAddr],
+    ech: Option<&[u8]>,
+    route: &'static str,
+    tag: &str,
+) -> Result<ReadySession> {
     let mut failure: Option<AetherError> = None;
     for address in addresses.iter().take(3) {
-        note_key(&format!("trying {address} with ECH (handshake only)"));
-        match handshake(host, *address, Fingerprint::ChromeLike, ech.as_deref()).await {
+        note_key(&format!("trying {address} with {tag} (handshake only)"));
+        match handshake(host, *address, Fingerprint::ChromeLike, ech).await {
             Ok(tls) => {
-                note_key(&format!("{address} ECH handshake ready"));
+                note_key(&format!("{address} {tag} handshake ready"));
                 return Ok(ReadySession {
                     tls,
                     address: *address,
                     fingerprint: Fingerprint::ChromeLike,
-                    route: "ech",
+                    route,
                 });
             }
             Err(error) => {
-                note_key(&format!("{address} ECH handshake failed: {error}"));
+                note_key(&format!("{address} {tag} handshake failed: {error}"));
                 failure = Some(error);
             }
         }
     }
-    Err(failure.unwrap_or_else(|| AetherError::Api("ECH handshake failed on every edge".into())))
+    Err(failure.unwrap_or_else(|| AetherError::Api(format!("{tag} handshake failed on every edge"))))
+}
+
+/// True when the auto race adds the ECH-DoH lane: the app supplied a list in
+/// AETHER_API_ECH or asked for the lane with AETHER_API_DOH=1. Callers that set
+/// neither (Android today) race exactly as before.
+pub fn doh_lane_enabled() -> bool {
+    crate::dns::supplied_api_ech().is_some()
+        || matches!(
+            std::env::var("AETHER_API_DOH")
+                .ok()
+                .as_deref()
+                .map(|v| v.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("1" | "true" | "on" | "yes")
+        )
+}
+
+/// ECHConfigList for the `doh` key route: the one the app supplied in
+/// AETHER_API_ECH, else a parallel DoH-by-IP / Shecan / UDP bootstrap capped
+/// at 3 s, else the built-in list.
+pub async fn resolve_doh_ech() -> (Vec<u8>, String) {
+    if let Some(list) = crate::dns::supplied_api_ech() {
+        return (list, "AETHER_API_ECH (app prefetch)".to_string());
+    }
+    note_key("ECH-DoH: no app-supplied ECHConfigList; racing DoH 8.8.8.8/8.8.4.4, Shecan and public UDP");
+    match crate::dns::fetch_ech_config_parallel(Duration::from_secs(3)).await {
+        Ok(found) => found,
+        Err(error) => {
+            note_key(&format!(
+                "ECH-DoH bootstrap failed ({error}); using the built-in ECHConfigList"
+            ));
+            (
+                crate::dns::ECH_CONFIG_FALLBACK.to_vec(),
+                "built-in fallback".to_string(),
+            )
+        }
+    }
+}
+
+/// Open an ECH session with the ECHConfigList from `resolve_doh_ech`.
+pub async fn open_doh_session(
+    host: &str,
+    addresses: &[SocketAddr],
+    ech: &[u8],
+    source: &str,
+) -> Result<ReadySession> {
+    note_key(&format!(
+        "ECH-DoH using ECHConfigList from {source} ({} bytes)",
+        ech.len()
+    ));
+    open_ech_with(host, addresses, Some(ech), "doh", "ECH-DoH").await
 }
 
 /// Open a TLS session with a split ClientHello (no ECH).
@@ -588,6 +1135,85 @@ pub async fn open_external_session(host: &str) -> Result<ReadySession> {
     }))
 }
 
+/// TLS hello for the relay. AETHER_RELAY_HELLO = modern | chrome | split.
+fn relay_fingerprint() -> Fingerprint {
+    match std::env::var("AETHER_RELAY_HELLO")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "chrome" => Fingerprint::ChromeLike,
+        "split" | "legacy" => Fingerprint::SplitLegacy,
+        _ => Fingerprint::Modern,
+    }
+}
+
+/// Open a TLS session to the WARP registration relay (a Cloudflare Worker).
+///
+/// Normal TLS with the relay host as SNI, plain TLS 1.3 hello by default (the
+/// Chrome-like hello finished the handshake on MCI but its data then stalled),
+/// no ECH, pinned to addresses the caller resolved itself (DoH-by-IP / Shecan /
+/// system race).
+/// Same handshake-only contract as the other lanes: nothing is sent yet.
+pub async fn open_relay_session(host: &str, addresses: &[SocketAddr]) -> Result<ReadySession> {
+    let fingerprint = relay_fingerprint();
+    let mut failure: Option<AetherError> = None;
+    for address in addresses.iter().take(3) {
+        note_key(&format!(
+            "trying {address} as relay {host} ({} hello, handshake only)",
+            fingerprint.label()
+        ));
+        match handshake(host, *address, fingerprint, None).await {
+            Ok(tls) => {
+                note_key(&format!("{address} relay handshake ready"));
+                return Ok(ReadySession {
+                    tls,
+                    address: *address,
+                    fingerprint,
+                    route: "relay",
+                });
+            }
+            Err(error) => {
+                note_key(&format!("{address} relay handshake failed: {error}"));
+                failure = Some(error);
+            }
+        }
+    }
+    Err(failure.unwrap_or_else(|| AetherError::Api(format!("relay {host}: no address to try"))))
+}
+
+/// Open a TLS session to the API host itself (real SNI, plain TLS 1.3 hello)
+/// whose ClientHello leaves with an OOB desync `method` (`crate::oob`).
+/// Same handshake-only contract as the other lanes: nothing is sent yet.
+pub async fn open_oob_session_at(
+    host: &str,
+    address: SocketAddr,
+    method: crate::oob::OobMethod,
+    fingerprint: Fingerprint,
+) -> Result<ReadySession> {
+    note_key(&format!(
+        "trying {address} as {host} with OOB {} / {} (handshake only)",
+        method.name(),
+        fingerprint.label()
+    ));
+    match handshake_with(host, address, fingerprint, None, Some(method)).await {
+        Ok(tls) => {
+            note_key(&format!("{address} OOB {} handshake ready", method.name()));
+            Ok(ReadySession {
+                tls,
+                address,
+                fingerprint,
+                route: "oob",
+            })
+        }
+        Err(error) => {
+            note_key(&format!("{address} OOB {} handshake failed: {error}", method.name()));
+            Err(error)
+        }
+    }
+}
+
 /// Probe clean key edges (TCP accept). Shared by ECH and split-hello.
 pub async fn probe_key_edges() -> Vec<SocketAddr> {
     reachable_key_edges().await
@@ -602,6 +1228,19 @@ pub async fn fetch_ech(request: &ApiRequest) -> Result<ApiResponse> {
         ));
     }
     let session = open_ech_session(&request.host, &addresses).await?;
+    send_on_session(session, request).await
+}
+
+/// ECH-DoH key request (manual `doh` setting): ECH with the app-supplied or
+/// parallel-bootstrapped ECHConfigList instead of the fixed UDP lookup.
+pub async fn fetch_doh(request: &ApiRequest) -> Result<ApiResponse> {
+    let ((ech, source), addresses) = tokio::join!(resolve_doh_ech(), reachable_key_edges());
+    if addresses.is_empty() {
+        return Err(AetherError::Api(
+            "no camouflaged route to the api was available".into(),
+        ));
+    }
+    let session = open_doh_session(&request.host, &addresses, &ech, &source).await?;
     send_on_session(session, request).await
 }
 
@@ -694,6 +1333,24 @@ mod tests {
         };
         let wire = String::from_utf8(render_request(&request)).expect("utf8");
         assert!(wire.contains("Content-Length: 0\r\n"));
+    }
+
+    #[test]
+    fn keep_alive_framing_is_exact() {
+        let cl = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        assert_eq!(framed_len(cl), Some(Some(cl.len())));
+        assert!(reusable_after(cl));
+        let close = b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}";
+        assert!(!reusable_after(close));
+        let chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n";
+        assert_eq!(framed_len(chunked), Some(Some(chunked.len())));
+        assert!(reusable_after(chunked));
+        let partial = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nab";
+        assert_eq!(framed_len(partial), Some(None));
+        assert!(!response_complete(partial));
+        let no_frame = b"HTTP/1.1 200 OK\r\n\r\nbody";
+        assert!(!reusable_after(no_frame));
+        assert!(response_complete(b"HTTP/1.1 204 No Content\r\n\r\n"));
     }
 
     #[test]

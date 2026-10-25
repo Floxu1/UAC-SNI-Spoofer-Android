@@ -43,6 +43,10 @@ object PowCoreConfig {
         masqueCachePath(context),
         lastconnPath(context),
         goolLastconnPath(context),
+        // Saved clean H2 peers are tried BEFORE any scan and each verify can
+        // burn 6-8s. Leaving them after MASQUE/SIM death makes turbo retune
+        // spend its whole budget on 400/timeout edges and never raise outer.
+        cleanH2File(context),
     )
 
     fun expireStalePathMemory(context: Context, nowMs: Long = System.currentTimeMillis()): Int =
@@ -199,7 +203,9 @@ object PowCoreConfig {
     const val KEY_ECH = "ech"
     const val KEY_FRAGMENT = "fragment"
     const val KEY_EXTERNAL = "external"
-    val KEY_FETCHES = setOf(KEY_AUTO, KEY_ECH, KEY_FRAGMENT, KEY_EXTERNAL)
+    /** OOB desync only (Android: nottl first; no relay / ECH / split). */
+    const val KEY_OOB = "oob"
+    val KEY_FETCHES = setOf(KEY_AUTO, KEY_OOB, KEY_ECH, KEY_FRAGMENT, KEY_EXTERNAL)
 
     fun keyProtocols(recipe: String): List<String> = when (recipe) {
         RECIPE_WOW_V6, RECIPE_WOW_ANY -> listOf("wireguard", "gool")

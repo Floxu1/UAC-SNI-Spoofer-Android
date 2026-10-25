@@ -51,4 +51,12 @@ object VpnController {
         val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_APPLY_NETWORK_GUARD)
         context.startService(intent)
     }
+
+    /** Rebuild routing so newly added/removed direct domains take effect without reconnect. */
+    fun applyDirectWhitelist(context: Context) {
+        if (ConnectionStateStore.state.value != ConnectionState.CONNECTED) return
+        val intent = Intent(context, UacVpnService::class.java)
+            .setAction(UacVpnService.ACTION_APPLY_DIRECT_WHITELIST)
+        context.startService(intent)
+    }
 }

@@ -58,6 +58,16 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.uacspoofer.mobile.BuildConfig
+import com.uacspoofer.mobile.engine.Engine4UnlockStore
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.update.AppRelease
 import com.uacspoofer.mobile.update.AppUpdateManager
@@ -246,12 +256,28 @@ private fun VersionAndUpdateCard(
         is UpdateUiState.Error -> UacColors.ErrorRed
         else -> UacColors.TextSecondary
     }
+    val context = LocalContext.current.applicationContext
+    val unlockStore = remember(context) { Engine4UnlockStore.get(context) }
     val shape = RoundedCornerShape(21.dp)
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(ToolCardBrush, shape)
             .border(1.dp, Color.White.copy(alpha = 0.08f), shape)
+            .pointerInput(Unit) {
+                // Secret: hold ~2s to show/hide engine 4 (Direct) on the home rail.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    val releasedEarly = withTimeoutOrNull(2_000L) {
+                        waitForUpOrCancellation()
+                    }
+                    if (releasedEarly == null) {
+                        unlockStore.toggle(showToast = true)
+                        waitForUpOrCancellation()
+                    }
+                }
+            }
+            .semantics { contentDescription = "engine4-version-longpress" }
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

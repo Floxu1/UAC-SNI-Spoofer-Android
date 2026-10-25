@@ -70,6 +70,48 @@ fn decode_fixed<const N: usize>(field: &str, value: &str) -> Result<[u8; N]> {
     Ok(out)
 }
 
+fn normalize_pem(pem: &str) -> String {
+    if pem.trim().is_empty() {
+        return pem.to_string();
+    }
+    let normalized = pem.replace("\r\n", "\n").replace('\r', '\n');
+    let lines: Vec<&str> = normalized
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let begin = match lines.iter().find(|l| l.starts_with("-----BEGIN")) {
+        Some(v) => *v,
+        None => return format!("{}\n", pem.trim_end()),
+    };
+    let end = match lines.iter().rev().find(|l| l.starts_with("-----END")) {
+        Some(v) => *v,
+        None => return format!("{}\n", pem.trim_end()),
+    };
+    let body: String = lines
+        .iter()
+        .filter(|l| !l.starts_with("-----"))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let mut out = String::new();
+    out.push_str(begin);
+    out.push('\n');
+    let mut i = 0;
+    while i < body.len() {
+        let end_idx = (i + 64).min(body.len());
+        out.push_str(&body[i..end_idx]);
+        out.push('\n');
+        i = end_idx;
+    }
+    out.push_str(end);
+    out.push('\n');
+    out
+}
+
 impl TryFrom<PersistedIdentity> for Identity {
     type Error = AetherError;
 
@@ -86,8 +128,8 @@ impl TryFrom<PersistedIdentity> for Identity {
         Ok(Identity {
             device_id: p.device_id,
             access_token: p.access_token,
-            cert_pem: p.cert_pem.into_bytes(),
-            key_pem: p.key_pem.into_bytes(),
+            cert_pem: normalize_pem(&p.cert_pem).into_bytes(),
+            key_pem: normalize_pem(&p.key_pem).into_bytes(),
             cert_issued_at: p.cert_issued_at,
             ipv4: p.ipv4,
             ipv6: p.ipv6,

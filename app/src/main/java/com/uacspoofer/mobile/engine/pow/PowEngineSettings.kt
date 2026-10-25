@@ -24,6 +24,8 @@ data class PowEngineSettings(
     val h2Obfuscation: String = H2_OBFS_UNCHANGED,
     val tunMtu: Int = TUN_MTU_DEFAULT,
     val h2FragmentMode: String = H2_FRAG_AUTO,
+    /** When true, sockets call VpnService.protect (bypass tunnel). Off for emulator testing. */
+    val socketProtectEnabled: Boolean = true,
 ) {
     fun validated(): PowEngineSettings = validatedRaw().let { it.copy(chainPsiphon = it.exitMode != EXIT_WARP) }
 
@@ -48,8 +50,17 @@ data class PowEngineSettings(
             keyFetch = if (fetch in PowCoreConfig.KEY_FETCHES) fetch else PowCoreConfig.KEY_AUTO,
             h2Obfuscation = h2Obfuscation.trim().lowercase().let { if (it in H2_OBFS_CHOICES) it else H2_OBFS_UNCHANGED },
             exitMode = exitMode.trim().lowercase().let { if (it in EXIT_MODES) it else EXIT_CHAIN },
-            tunMtu = if (tunMtu in TUN_MTU_CHOICES) tunMtu else TUN_MTU_DEFAULT,
+            tunMtu = when {
+                tunMtu == TUN_MTU_DEFAULT -> TUN_MTU_DEFAULT
+                tunMtu in TUN_MTU_MIN..TUN_MTU_MAX -> tunMtu
+                else -> TUN_MTU_DEFAULT
+            },
             h2FragmentMode = h2FragmentMode.trim().lowercase().let { if (it in H2_FRAG_CHOICES) it else H2_FRAG_AUTO },
+            // Always on — toggles removed from UI; ignore any old off prefs.
+            ghostHandover = true,
+            h2LargeWindows = true,
+            h2SocketTuning = true,
+            h2SpeedPick = true,
         )
     }
 
@@ -60,6 +71,8 @@ data class PowEngineSettings(
         val H2_OBFS_CHOICES = setOf(H2_OBFS_UNCHANGED, "light", "off")
         /** 0 = the app's own MTU (clamped to 1280 as before). */
         const val TUN_MTU_DEFAULT = 0
+        const val TUN_MTU_MIN = 1_000
+        const val TUN_MTU_MAX = 1_500
         const val EXIT_CHAIN = "chain"
         const val EXIT_WARP = "warp"
         const val EXIT_PSIPHON = "psiphon"

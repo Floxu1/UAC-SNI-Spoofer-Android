@@ -14,18 +14,26 @@ enum class EngineMode(val id: String) {
     val isPow: Boolean get() = this == UAC_POW
     val isDirect: Boolean get() = this == UAC_DIRECT
 
-    fun next(): EngineMode = when (this) {
+    fun next(engine4Unlocked: Boolean = true): EngineMode = when (this) {
         XRAY_CF -> TOR_WEBTUNNEL
         TOR_WEBTUNNEL -> UAC_POW
-        UAC_POW -> UAC_DIRECT
+        UAC_POW -> if (engine4Unlocked) UAC_DIRECT else XRAY_CF
         UAC_DIRECT -> XRAY_CF
     }
 
-    fun toggled(): EngineMode = next()
+    fun toggled(engine4Unlocked: Boolean = true): EngineMode = next(engine4Unlocked)
 
     companion object {
-        fun fromStored(raw: String?): EngineMode =
-            entries.firstOrNull { it.id.equals(raw?.trim(), ignoreCase = true) } ?: XRAY_CF
+        /** Engines shown in the home switch rail. Direct only when unlocked. */
+        fun visible(engine4Unlocked: Boolean): List<EngineMode> =
+            if (engine4Unlocked) entries.toList() else entries.filter { !it.isDirect }
+
+        fun fromStored(raw: String?): EngineMode {
+            val key = raw?.trim().orEmpty()
+            // Old uncommitted engine-4 id from the ACT WIP; keep the user's engine-4 selection.
+            if (key.equals("act_hitch", ignoreCase = true)) return UAC_DIRECT
+            return entries.firstOrNull { it.id.equals(key, ignoreCase = true) } ?: XRAY_CF
+        }
     }
 }
 

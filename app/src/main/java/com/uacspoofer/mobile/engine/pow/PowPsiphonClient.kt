@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.VpnService
+import com.uacspoofer.mobile.vpn.SocketProtectGate
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -197,7 +198,11 @@ internal class PowPsiphonClient(
         val replyTo = message.replyTo
         val pfd = parcelFd(message.data)
         val ok = try {
-            pfd != null && vpn.protect(pfd.fd)
+            when {
+                pfd == null -> false
+                !SocketProtectGate.isEnabled(vpn) -> true
+                else -> vpn.protect(pfd.fd)
+            }
         } catch (_: Throwable) {
             false
         } finally {

@@ -123,8 +123,7 @@ private fun XraySettingsPanel() {
     )
     val dohTitle = dohChoices.firstOrNull { it.id == s.dnsResolverUrl }?.title.orEmpty()
     val speedOn = listOfNotNull(
-        homeText("Iran direct", "ایرانی مستقیم").takeIf { s.iranDirect },
-        "Fast Open".takeIf { s.tcpFastOpen },
+"Fast Open".takeIf { s.tcpFastOpen },
         homeText("big buffer", "بافر بزرگ").takeIf { s.bigBuffers },
         "Mux".takeIf { s.muxEnabled },
     )
@@ -175,16 +174,7 @@ private fun XraySettingsPanel() {
                 summary = (if (speedOn.isEmpty()) homeText("All off", "همه خاموش") else speedOn.joinToString("، ")) + " · MTU ${s.tunMtu}",
                 accent = accent,
             ) {
-                PowSwitchRow(
-                    icon = Icons.AutoMirrored.Outlined.AltRoute,
-                    title = homeText("Iranian sites direct", "سایت‌های ایرانی مستقیم"),
-                    subtitle = homeText("Iranian sites open faster, without the VPN.", "سایت‌های ایرانی بدون VPN و سریع‌تر باز می‌شن."),
-                    checked = s.iranDirect,
-                    accent = accent,
-                    onCheckedChange = { v -> save { it.copy(iranDirect = v) } },
-                )
-                PowRowDivider()
-                PowSwitchRow(
+PowSwitchRow(
                     icon = Icons.Outlined.Bolt,
                     title = homeText("TCP Fast Open", "TCP Fast Open"),
                     subtitle = homeText("Sites open a little sooner.", "سایت‌ها یه کم زودتر باز می‌شن."),
