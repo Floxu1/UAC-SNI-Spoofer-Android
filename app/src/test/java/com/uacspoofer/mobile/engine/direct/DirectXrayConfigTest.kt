@@ -1,49 +1,46 @@
 package com.uacspoofer.mobile.engine.direct
 
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class DirectXrayConfigTest {
-    private fun build(s: DirectEngineSettings = DirectEngineSettings.DEFAULT, tun: Boolean = true) =
-        DirectXrayConfig.build(s, "127.0.0.1", 10808, 1280, nativeTun = tun)
+    private val ca = DirectCa.Material(
+        certificatePemLines = listOf("-----BEGIN CERTIFICATE-----", "MIIB", "-----END CERTIFICATE-----"),
+        keyPemLines = listOf("-----BEGIN PRIVATE KEY-----", "MIGH", "-----END PRIVATE KEY-----"),
+        crtFile = File("."),
+    )
 
-    @Test fun defaultsUseVariantAHelloSplit() {
-        val c = build()
-        assertTrue(c.contains("\"packets\":\"tlshello\",\"lengths\":[\"6\",\"98\",\"1\"]"))
-        assertTrue(c.contains("\"lengths\":[\"114\",\"1\"],\"delays\":[\"1\"],\"maxSplit\":\"11\""))
-        assertTrue(c.contains("\"maxSplit\":\"201\""))
+    private fun mitm(s: DirectEngineSettings = DirectEngineSettings.DEFAULT) =
+        DirectXrayConfig.build(s, "127.0.0.1", 10808, 1280, nativeTun = true, ca = ca, mitmH11Port = 18666, mitmH211Port = 18777)
+
+    private fun plain(s: DirectEngineSettings) =
+        DirectXrayConfig.build(s, "127.0.0.1", 10808, 1280, nativeTun = true, ca = null)
+
+    @Test fun defaultsUseMitmGoogleAndEch() {
+        val c = mitm()
+        assertTrue(c.contains("\"protocol\":\"tunnel\""))
+        assertTrue(c.contains("www.google.com"))
+        assertTrue(c.contains("echConfigList"))
+        assertTrue(c.contains(DirectEngineSettings.CLOUDFLARE_ECH_CONFIG_LIST))
+        assertFalse(c.contains("\"protocol\":\"vless\""))
     }
 
-    @Test fun variantBSwapsFirstStage() {
-        val c = build(DirectEngineSettings.DEFAULT.withVariant(DirectEngineSettings.VARIANT_B))
-        assertTrue(c.contains("\"lengths\":[\"0\",\"104\",\"1\"]"))
+    @Test fun fragmentOptionalAndOffByDefault() {
+        assertFalse(DirectEngineSettings.DEFAULT.fragmentEnabled)
+        val withFrag = plain(DirectEngineSettings.DEFAULT.copy(googleFronting = false, echEnabled = false, fragmentEnabled = true))
+        assertTrue(withFrag.contains("\"packets\":\"tlshello\""))
     }
 
-    @Test fun hasNoServerOutbound() {
-        val c = build()
-        listOf("vless", "vmess", "trojan", "shadowsocks", "wireguard", "\"servers\":[{\"address\":\"1").forEach {
-            assertFalse(it, c.contains("\"protocol\":\"$it\""))
-        }
-        assertTrue(c.contains("\"protocol\":\"freedom\""))
-    }
-
-    @Test fun noiseToggleAndNoGeoFiles() {
-        assertTrue(build().contains("\"type\":\"noise\""))
-        assertFalse(build(DirectEngineSettings.DEFAULT.copy(udpNoise = false)).contains("\"type\":\"noise\""))
-        assertFalse(build().contains("geoip:"))
-        assertFalse(build().contains("geosite:"))
-    }
-
-    @Test fun tunInboundOnlyInTunnelMode() {
-        assertTrue(build(tun = true).contains("\"protocol\":\"tun\""))
-        assertFalse(build(tun = false).contains("\"protocol\":\"tun\""))
-    }
-
-    @Test fun invalidListsFallBack() {
-        assertEquals("6,98,1", DirectEngineSettings.cleanList("abc", "6,98,1"))
-        assertEquals("6,98,1", DirectEngineSettings.cleanList("6 98 1", "x"))
-        assertEquals(DirectEngineSettings.DEFAULT_UNFILTERED_DNS, DirectEngineSettings.DEFAULT.copy(unfilteredDns = "junk").validated().unfilteredDns)
+    @Test fun iranDirectUsesGeoTags() {
+        val on = mitm(DirectEngineSettings.DEFAULT.copy(iranDirect = true))
+        assertTrue(on.contains("geosite:category-ir"))
+        assertTrue(on.contains("geoip:ir"))
+        assertTrue(on.contains("geoip:private"))
+        val off = mitm(DirectEngineSettings.DEFAULT.copy(iranDirect = false))
+        assertFalse(off.contains("geosite:category-ir"))
+        assertFalse(off.contains("geoip:ir"))
+        assertTrue(off.contains("geoip:private"))
     }
 }

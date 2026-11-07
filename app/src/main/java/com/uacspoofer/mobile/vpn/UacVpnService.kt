@@ -96,6 +96,12 @@ class UacVpnService : VpnService() {
     @Volatile private var connectJob: Job? = null
     @Volatile private var healthJob: Job? = null
     @Volatile private var statsJob: Job? = null
+    /** Live traffic line of the ongoing notification; see [startNotificationTraffic]. */
+    @Volatile private var notificationTrafficJob: Job? = null
+    @Volatile private var notificationTrafficToken = -1L
+    @Volatile private var notificationTrafficLive = false
+    private val notificationTrafficLock = Any()
+    private val notificationTrafficMeter = NotificationTrafficMeter()
     @Volatile private var latencyJob: Job? = null
     @Volatile private var adaptiveLearningJob: Job? = null
     @Volatile private var networkWatchJob: Job? = null
@@ -250,6 +256,7 @@ class UacVpnService : VpnService() {
         val interruptedRouteProbeId = activeRouteProbeId
         routeProbeJob?.cancel()
         runCatching { unregisterReceiver(screenOnReceiver) }
+        stopNotificationTraffic(resetCounters = true)
         serviceScope.cancel()
         if (ConnectionStateStore.state.value != ConnectionState.ERROR) {
             ConnectionStateStore.markDisconnected()
@@ -1691,6 +1698,7 @@ class UacVpnService : VpnService() {
         networkWatchJob = null
         statsJob?.cancel()
         statsJob = null
+        stopNotificationTraffic(resetCounters = true)
         latencyJob?.cancel()
         latencyJob = null
         runCatching { torCoordinator.stop() }
@@ -2312,6 +2320,7 @@ class UacVpnService : VpnService() {
     }
 
     private fun updateKillSwitchNotification() {
+        stopNotificationTraffic()
         getSystemService(NotificationManager::class.java).notify(
             NOTIFICATION_ID,
             buildNotification(R.string.vpn_kill_switch_notification),
@@ -2334,6 +2343,7 @@ class UacVpnService : VpnService() {
     private fun startForegroundNotification(connected: Boolean) {
         val notification = buildNotification(
             connectionNotificationText(connected),
+            trafficLineFor(connected),
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -2347,12 +2357,91 @@ class UacVpnService : VpnService() {
     }
 
     private fun updateNotification(connected: Boolean) {
+        val live = connected && !VpnPauseStore.isPaused()
+        if (!live) stopNotificationTraffic()
         getSystemService(NotificationManager::class.java).notify(
             NOTIFICATION_ID,
             buildNotification(
                 connectionNotificationText(connected),
+                trafficLineFor(connected),
             ),
         )
+        if (live) startNotificationTraffic()
+    }
+
+    /** The second line of a connected notification; frozen totals while paused. */
+    private fun trafficLineFor(connected: Boolean): String? {
+        if (!connected) return null
+        val traffic = notificationTrafficMeter.last
+        return if (VpnPauseStore.isPaused()) {
+            NotificationTrafficMeter.totalsLine(traffic)
+        } else {
+            NotificationTrafficMeter.liveLine(traffic)
+        }
+    }
+
+    /**
+     * Refreshes the ongoing notification with traffic totals and speeds about once a
+     * second while connected and not paused. Uses the engine's tunnel counters
+     * ([activeStats]); falls back to the app's own TrafficStats counters when the
+     * engine reports none (proxy mode). Skips work while the screen is off. Runs on
+     * [serviceScope] (no Handler), and stops on pause, disconnect, failure or destroy.
+     */
+    private fun startNotificationTraffic() {
+        synchronized(notificationTrafficLock) {
+            val token = generation.get()
+            notificationTrafficLive = true
+            if (notificationTrafficJob?.isActive == true && notificationTrafficToken == token) return
+            notificationTrafficJob?.cancel()
+            notificationTrafficToken = token
+            val uid = android.os.Process.myUid()
+            val job = serviceScope.launch {
+                while (true) {
+                    if (token != generation.get() || !resourcesActive || !notificationTrafficLive) return@launch
+                    if (
+                        ConnectionStateStore.state.value == ConnectionState.CONNECTED &&
+                        !VpnPauseStore.isPaused() &&
+                        isScreenInteractive()
+                    ) {
+                        val traffic = notificationTrafficMeter.sample(
+                            activeStats(),
+                            android.net.TrafficStats.getUidRxBytes(uid),
+                            android.net.TrafficStats.getUidTxBytes(uid),
+                            SystemClock.elapsedRealtime(),
+                        )
+                        val notification = buildNotification(
+                            connectionNotificationText(true),
+                            NotificationTrafficMeter.liveLine(traffic),
+                        )
+                        synchronized(notificationTrafficLock) {
+                            if (notificationTrafficLive && notificationTrafficToken == token) {
+                                runCatching {
+                                    getSystemService(NotificationManager::class.java)
+                                        .notify(NOTIFICATION_ID, notification)
+                                }
+                            }
+                        }
+                    }
+                    delay(NOTIFICATION_TRAFFIC_INTERVAL_MS)
+                }
+            }
+            notificationTrafficJob = job
+            job.invokeOnCompletion {
+                synchronized(notificationTrafficLock) {
+                    if (notificationTrafficJob === job) notificationTrafficJob = null
+                }
+            }
+        }
+    }
+
+    private fun stopNotificationTraffic(resetCounters: Boolean = false) {
+        synchronized(notificationTrafficLock) {
+            notificationTrafficLive = false
+            notificationTrafficToken = -1L
+            notificationTrafficJob?.cancel()
+            notificationTrafficJob = null
+        }
+        if (resetCounters) notificationTrafficMeter.reset()
     }
 
     private fun connectionNotificationText(connected: Boolean): Int = when {
@@ -2365,13 +2454,18 @@ class UacVpnService : VpnService() {
     }
 
     private fun updateFailureNotification() {
+        stopNotificationTraffic()
         getSystemService(NotificationManager::class.java).notify(
             NOTIFICATION_ID,
             buildNotification(R.string.vpn_failed_notification),
         )
     }
 
-    private fun buildNotification(textRes: Int): Notification {
+    /**
+     * The app name already shows in the system header, so the status is the title and
+     * [detail] (the traffic line when connected) is the text.
+     */
+    private fun buildNotification(textRes: Int, detail: String? = null): Notification {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -2397,11 +2491,15 @@ class UacVpnService : VpnService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val message = getString(textRes)
-        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
+        val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_vpn)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(message)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setContentTitle(message)
+        if (detail != null) {
+            builder
+                .setContentText(detail)
+                .setStyle(NotificationCompat.BigTextStyle().setBigContentTitle(message).bigText(detail))
+        }
+        return builder
             .setContentIntent(openApp)
             .setColor(ContextCompat.getColor(this, R.color.notification_accent))
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -2473,6 +2571,7 @@ class UacVpnService : VpnService() {
         private const val NOTIFICATION_PAUSE_REQUEST = 1004
         private const val NOTIFICATION_CLOSE_REQUEST = 1003
         private const val STATS_INTERVAL_MS = 5_000L
+        private const val NOTIFICATION_TRAFFIC_INTERVAL_MS = 1_000L
         private const val STATS_INTERVAL_SCREEN_OFF_MS = 15_000L
         private const val ADAPTIVE_STABILITY_WINDOW_MS = 60_000L
         private const val ADAPTIVE_PROBE_WARMUP_MS = 800L

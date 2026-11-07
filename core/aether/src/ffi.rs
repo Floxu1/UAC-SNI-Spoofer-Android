@@ -154,6 +154,12 @@ struct NativeStartOptions {
     h2_socket_tuning: bool,
     #[serde(default = "default_true")]
     h2_speed_pick: bool,
+    /// MASQUE HTTP/2 TLS fingerprint. Missing = "default" (the old hello).
+    #[serde(default)]
+    h2_fingerprint: Option<String>,
+    /// `ip_scan` is the user's IP setting rather than the recipe's choice.
+    #[serde(default)]
+    ip_scan_strict: bool,
 }
 
 impl Default for NativeStartOptions {
@@ -197,6 +203,8 @@ impl Default for NativeStartOptions {
             h2_large_windows: true,
             h2_socket_tuning: true,
             h2_speed_pick: true,
+            h2_fingerprint: None,
+            ip_scan_strict: false,
         }
     }
 }
@@ -262,6 +270,12 @@ impl TryFrom<NativeStartOptions> for StartOptions {
         options.h2_large_windows = value.h2_large_windows;
         options.h2_socket_tuning = value.h2_socket_tuning;
         options.h2_speed_pick = value.h2_speed_pick;
+        options.h2_tls_fingerprint = value
+            .h2_fingerprint
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "default".into());
+        options.ip_scan_strict = value.ip_scan_strict;
         options.http_proxy = match value.http_proxy.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(raw) => Some(parse_address("http_proxy", raw)?),

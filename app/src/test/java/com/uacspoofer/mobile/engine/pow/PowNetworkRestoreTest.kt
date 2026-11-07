@@ -45,6 +45,14 @@ class PowNetworkRestoreTest {
                 stopRequested = false,
             ),
         )
+        assertFalse(
+            PowNetworkRestore.shouldVerifyOnLost(
+                sessionLive = true,
+                retuning = false,
+                stopRequested = false,
+                paused = true,
+            ),
+        )
     }
 
     @Test
@@ -92,7 +100,7 @@ class PowNetworkRestoreTest {
     @Test
     fun reconnectCopyStaysUiSafe() {
         assertEquals(
-            "Reconnecting after the tunnel stopped passing traffic…",
+            "Reconnecting after the tunnel stopped passing traffic.",
             PowNetworkRestore.statusDetail("the tunnel stopped passing traffic"),
         )
     }

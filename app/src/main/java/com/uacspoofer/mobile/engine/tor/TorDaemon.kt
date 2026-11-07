@@ -1,4 +1,4 @@
-package com.uacspoofer.mobile.engine.tor
+﻿package com.uacspoofer.mobile.engine.tor
 
 import android.content.Context
 import android.os.Build
@@ -575,7 +575,7 @@ class TorDaemon(context: Context) {
                                 phase = if (percent >= 100) TorPhase.CONNECTED else TorPhase.BOOTSTRAPPING,
                                 bootstrapPercent = percent,
                                 detail = if (percent >= 100) {
-                                    "Tor circuit is ready · SOCKS 127.0.0.1:${settings.socksPort}"
+                                    "Tor circuit is ready Â· SOCKS 127.0.0.1:${settings.socksPort}"
                                 } else {
                                     "Bootstrapping Tor $percent%"
                                 },
@@ -604,7 +604,7 @@ class TorDaemon(context: Context) {
                             phase = if (controlPercent >= 100) TorPhase.CONNECTED else TorPhase.BOOTSTRAPPING,
                             bootstrapPercent = controlPercent,
                             detail = if (controlPercent >= 100) {
-                                "Tor circuit is ready · SOCKS 127.0.0.1:${settings.socksPort}"
+                                "Tor circuit is ready Â· SOCKS 127.0.0.1:${settings.socksPort}"
                             } else {
                                 "Bootstrapping Tor $controlPercent%"
                             },
@@ -731,18 +731,27 @@ class TorDaemon(context: Context) {
     }
 
     /**
-     * An arm/arm64 APK on an x86 emulator runs Java through native-bridge translation, but
+     * An arm/arm64 APK on an x86 emulator runs Java/JNI through native-bridge translation, but
      * a directly exec'd Go PT (libwebtunnel.so) dies with SIGILL there. Fail fast and clearly.
+     *
+     * Do not rely on os.arch alone: under libnb native-bridge it often reports aarch64 even
+     * though the host CPU (and Build.SUPPORTED_ABIS[0]) is x86_64 — that miss caused the
+     * TorPtCrashLoopException on LDPlayer when an arm64 split APK was installed.
      */
     private fun checkNativeBridgeAbi() {
         val libDir = appContext.applicationInfo.nativeLibraryDir.orEmpty()
-        val hostX86 = System.getProperty("os.arch").orEmpty().contains("x86") ||
-            System.getProperty("os.arch").orEmpty().contains("amd64")
-        val armLibs = libDir.endsWith("/arm64") || libDir.endsWith("/arm")
+        val osArch = System.getProperty("os.arch").orEmpty()
+        val primaryAbi = Build.SUPPORTED_ABIS.firstOrNull().orEmpty()
+        val hostX86 = primaryAbi.startsWith("x86") ||
+            osArch.contains("x86") ||
+            osArch.contains("amd64")
+        val armLibs = libDir.contains("/arm64") ||
+            libDir.endsWith("/arm") ||
+            libDir.contains("/lib/arm")
         if (hostX86 && armLibs) {
             error(
                 "This ARM build runs under x86 emulation; the WebTunnel plugin cannot start here. " +
-                    "Install the x86_64 APK on this emulator.",
+                    "Install the x86_64 (or universal) APK on this emulator — not the arm64 split.",
             )
         }
     }

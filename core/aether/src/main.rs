@@ -90,6 +90,11 @@ pub struct StartOptions {
     /// Kotlin can try the next transport instead of sleeping inside a rescan loop
     /// until the app kills the process.
     pub scan_once: bool,
+    /// MASQUE HTTP/2 TLS ClientHello profile ("default" = the old hello).
+    pub h2_tls_fingerprint: String,
+    /// `ip_scan` came from the user's IP setting (not the recipe): saved and
+    /// cached MASQUE peers of the other family are skipped too.
+    pub ip_scan_strict: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +203,8 @@ impl StartOptions {
             h2_large_windows: true,
             h2_socket_tuning: true,
             h2_speed_pick: true,
+            h2_tls_fingerprint: "default".into(),
+            ip_scan_strict: false,
         }
     }
 
@@ -276,6 +283,7 @@ pub async fn run_cli() -> Result<()> {
     options.h2_large_windows = h2_flag("AETHER_MASQUE_H2_LARGE_WINDOWS");
     options.h2_socket_tuning = h2_flag("AETHER_MASQUE_H2_SOCKET_TUNING");
     options.h2_speed_pick = h2_flag("AETHER_MASQUE_H2_SPEED_PICK");
+    options.h2_tls_fingerprint = std::env::var("AETHER_MASQUE_H2_FINGERPRINT").unwrap_or_else(|_| "default".into());
     options.endpoint_discovery =
         EndpointDiscovery::parse(&std::env::var("AETHER_DISCOVERY").unwrap_or_default());
     options.scan_once = std::env::var("AETHER_SCAN_ONCE").is_ok_and(|v| {
@@ -396,6 +404,7 @@ fn apply_runtime_options(options: &StartOptions) {
     ] {
         std::env::set_var(key, if on { "1" } else { "0" });
     }
+    masque_h2::set_tls_fingerprint(&options.h2_tls_fingerprint);
     match options.api_camo.trim() {
         "auto" | "ech" | "fragment" | "external" | "doh" | "relay" | "oob" => {
             std::env::set_var("AETHER_API_CAMO", options.api_camo.trim())
@@ -1134,6 +1143,32 @@ fn core_log_path(config_path: &str) -> String {
             dir.join("aether-core.log").to_string_lossy().into_owned()
         }
         _ => "aether-core.log".to_string(),
+    }
+}
+
+// ---- MASQUE IP version setting -----------------------------------------
+
+/// User's MASQUE IP setting for this connect: 0 = recipe decides (no peer
+/// filter), 1 = IPv4 only, 2 = IPv6 only, 3 = both.
+static MASQUE_IP_STRICT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// False when IPv6 was picked but this network has no IPv6 route.
+static MASQUE_V6_ROUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Saved / cached / known MASQUE peers allowed by the user's IP setting.
+fn masque_ip_ok(peer: &SocketAddr) -> bool {
+    use std::sync::atomic::Ordering;
+    match MASQUE_IP_STRICT.load(Ordering::Acquire) {
+        1 => peer.is_ipv4(),
+        2 => peer.is_ipv6() || !MASQUE_V6_ROUTE.load(Ordering::Acquire),
+        _ => true,
+    }
+}
+
+fn ip_scan_name(ip: prober::IpScan) -> &'static str {
+    match ip {
+        prober::IpScan::V4 => "v4",
+        prober::IpScan::V6 => "v6",
+        prober::IpScan::Both => "both",
     }
 }
 
@@ -1985,6 +2020,35 @@ async fn run_masque(
 ) -> Result<()> {
     let forced = options.forced_peer.map(|p| p.to_string());
 
+    // IP version: the user's setting (strict) or the recipe's choice.
+    {
+        use std::sync::atomic::Ordering;
+        let strict = if options.ip_scan_strict {
+            match options.ip_scan {
+                prober::IpScan::V4 => 1,
+                prober::IpScan::V6 => 2,
+                prober::IpScan::Both => 3,
+            }
+        } else {
+            0
+        };
+        MASQUE_IP_STRICT.store(strict, Ordering::Release);
+        MASQUE_V6_ROUTE.store(true, Ordering::Release);
+        crate::ffi::record_log(format!(
+            "MASQUE: IP version {} ({})",
+            ip_scan_name(options.ip_scan),
+            if options.ip_scan_strict { "setting" } else { "auto" }
+        ));
+        if options.ip_scan_strict && options.ip_scan.want_v6() && !prober::host_has_ipv6().await {
+            MASQUE_V6_ROUTE.store(false, Ordering::Release);
+            crate::ffi::record_log(if options.ip_scan.want_v4() {
+                "MASQUE: IPv6 fallback: this network has no IPv6 route; using IPv4 only"
+            } else {
+                "MASQUE: IPv6 fallback: IPv6 picked but this network has no IPv6 route; using IPv4 instead"
+            });
+        }
+    }
+
     let mut quick_peer: Option<SocketAddr> = None;
     let mut known: Vec<(SocketAddr, &'static str)> = Vec::new();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
@@ -2012,14 +2076,14 @@ async fn run_masque(
         if options.endpoint_discovery == EndpointDiscovery::Cache {
             if let Some(cached) = lastconn::load(&lastconn_path) {
                 if let Ok(peer) = cached.peer.parse::<SocketAddr>() {
-                    if want_quick_reconnect(&cached).await && seen.insert(peer) {
+                    if want_quick_reconnect(&cached).await && masque_ip_ok(&peer) && seen.insert(peer) {
                         known.push((peer, "last working"));
                     }
                 }
             }
         }
         if let Some(assigned) = assigned_masque_peer(&identity) {
-            if seen.insert(assigned) {
+            if masque_ip_ok(&assigned) && seen.insert(assigned) {
                 known.push((assigned, "account"));
             }
         }
@@ -2044,7 +2108,10 @@ async fn run_masque(
         if prefer_h2 {
             masque_h2::set_preferred(true);
             masque_h2::use_extended_connect(false);
-            let saved = load_clean_h2(&options.config_path);
+            let saved: Vec<SocketAddr> = load_clean_h2(&options.config_path)
+                .into_iter()
+                .filter(|peer| masque_ip_ok(peer))
+                .collect();
             if saved.is_empty() {
                 crate::ffi::record_log(
                     "Clean HTTP/2 list is empty. Starting the HTTP/2 scan.",

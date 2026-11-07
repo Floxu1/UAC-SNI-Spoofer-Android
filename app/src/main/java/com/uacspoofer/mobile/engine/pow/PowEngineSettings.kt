@@ -26,6 +26,10 @@ data class PowEngineSettings(
     val h2FragmentMode: String = H2_FRAG_AUTO,
     /** When true, sockets call VpnService.protect (bypass tunnel). Off for emulator testing. */
     val socketProtectEnabled: Boolean = true,
+    /** MASQUE HTTP/2 TLS ClientHello shape; "default" = the hello the core always sent. */
+    val h2Fingerprint: String = H2_FP_DEFAULT,
+    /** MASQUE IP family: "auto" = the recipe decides (old behaviour), else v4 / v6 / both. */
+    val masqueIpVersion: String = MASQUE_IP_AUTO,
 ) {
     fun validated(): PowEngineSettings = validatedRaw().let { it.copy(chainPsiphon = it.exitMode != EXIT_WARP) }
 
@@ -56,6 +60,8 @@ data class PowEngineSettings(
                 else -> TUN_MTU_DEFAULT
             },
             h2FragmentMode = h2FragmentMode.trim().lowercase().let { if (it in H2_FRAG_CHOICES) it else H2_FRAG_AUTO },
+            h2Fingerprint = h2Fingerprint.trim().lowercase().let { if (it in H2_FP_CHOICES) it else H2_FP_DEFAULT },
+            masqueIpVersion = masqueIpVersion.trim().lowercase().let { if (it in MASQUE_IP_CHOICES) it else MASQUE_IP_AUTO },
             // Always on — toggles removed from UI; ignore any old off prefs.
             ghostHandover = true,
             h2LargeWindows = true,
@@ -82,5 +88,9 @@ data class PowEngineSettings(
         const val H2_FRAG_OFF = "off"
         val H2_FRAG_CHOICES = setOf(H2_FRAG_AUTO, H2_FRAG_ON, H2_FRAG_OFF)
         val TUN_MTU_CHOICES = setOf(TUN_MTU_DEFAULT, 1280, 1350, 1400)
+        const val H2_FP_DEFAULT = "default"
+        val H2_FP_CHOICES = listOf(H2_FP_DEFAULT, "chrome", "firefox", "safari", "android", "random")
+        const val MASQUE_IP_AUTO = "auto"
+        val MASQUE_IP_CHOICES = listOf(MASQUE_IP_AUTO, "v4", "v6", "both")
     }
 }

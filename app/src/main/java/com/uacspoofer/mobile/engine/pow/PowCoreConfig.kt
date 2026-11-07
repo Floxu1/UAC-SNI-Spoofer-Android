@@ -80,7 +80,8 @@ object PowCoreConfig {
         put("listen", "127.0.0.1:$CHAIN_SOCKS_PORT")
         put("scan_mode", scanMode)
         val plan = outerPlan(settings, mci)
-        put("ip_scan", plan.ipFor(protocol))
+        put("ip_scan", ipScanFor(settings, plan, protocol))
+        put("ip_scan_strict", ipScanStrict(settings, protocol))
         put("endpoint_cache_path", masqueCachePath(context).absolutePath)
         put(
             "endpoint_discovery",
@@ -98,9 +99,17 @@ object PowCoreConfig {
         put("h2_large_windows", settings.h2LargeWindows)
         put("h2_socket_tuning", settings.h2SocketTuning)
         put("h2_speed_pick", settings.h2SpeedPick)
+        put("h2_fingerprint", settings.validated().h2Fingerprint)
         put("api_camo", settings.keyFetch)
         put("gateway", false)
     }.toString()
+
+    /** MASQUE uses the user's IP setting when it is not "auto"; other protocols keep the recipe's. */
+    fun ipScanFor(settings: PowEngineSettings, plan: PowOuterPlan, protocol: String): String =
+        if (ipScanStrict(settings, protocol)) settings.validated().masqueIpVersion else plan.ipFor(protocol)
+
+    fun ipScanStrict(settings: PowEngineSettings, protocol: String): Boolean =
+        protocol == "masque" && settings.validated().masqueIpVersion != PowEngineSettings.MASQUE_IP_AUTO
 
     /** H2 fragment: On/Off are the user's; Auto = recipe default OR the adaptive DPI flag. MASQUE h2 only. */
     fun h2FragmentEffective(context: Context, settings: PowEngineSettings, protocol: String, plan: PowOuterPlan): Boolean {

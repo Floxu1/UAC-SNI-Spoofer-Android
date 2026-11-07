@@ -247,9 +247,12 @@ internal object DomesticSocksSplit {
     }
 
     private fun pipe(a: Socket, b: Socket) {
-        val t1 = Thread({ copy(a.getInputStream(), b.getOutputStream()) }, "split-up").apply { isDaemon = true; start() }
+        // Peer resets are normal for SOCKS pipes; never let them crash the process.
+        val t1 = Thread({
+            runCatching { copy(a.getInputStream(), b.getOutputStream()) }
+        }, "split-up").apply { isDaemon = true; start() }
         try {
-            copy(b.getInputStream(), a.getOutputStream())
+            runCatching { copy(b.getInputStream(), a.getOutputStream()) }
         } finally {
             runCatching { a.shutdownInput() }
             runCatching { b.shutdownOutput() }
@@ -259,11 +262,15 @@ internal object DomesticSocksSplit {
 
     private fun copy(input: InputStream, output: OutputStream) {
         val buf = ByteArray(32 * 1024)
-        while (true) {
-            val n = input.read(buf)
-            if (n <= 0) break
-            output.write(buf, 0, n)
-            output.flush()
+        try {
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                output.write(buf, 0, n)
+                output.flush()
+            }
+        } catch (_: java.io.IOException) {
+            // Connection reset / broken pipe: end this direction quietly.
         }
     }
 

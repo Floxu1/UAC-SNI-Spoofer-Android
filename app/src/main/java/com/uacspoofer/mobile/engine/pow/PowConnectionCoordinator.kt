@@ -8,6 +8,8 @@ import android.net.NetworkRequest
 import android.net.VpnService
 import android.telephony.SubscriptionManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.SystemClock
@@ -23,6 +25,8 @@ import com.uacspoofer.mobile.vpn.TunStats
 import com.uacspoofer.mobile.vpn.VpnPauseStore
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -148,6 +152,8 @@ class PowConnectionCoordinator(
     private var watchdogRx = -1L
     private var watchdogProcessMisses = 0
     private var watchdogStallStrikes = 0
+    private val psiphonTunnelCount = AtomicInteger(0)
+    @Volatile private var zeroTunnelJob: Job? = null
 
     val tunAddress: PowTun2Socks.PrivateAddress
         get() = PowTun2Socks.privateAddress
@@ -159,6 +165,7 @@ class PowConnectionCoordinator(
     fun isHealthyPath(): Boolean =
         !stopRequested.get() &&
             innerReady &&
+            (warpOnly || psiphonTunnelCount.get() > 0) &&
             (proxyMode || PowTun2Socks.isRunning) &&
             (directPsiphon || (AetherNative.isRunning() && AetherNative.isReady()))
 
@@ -212,6 +219,8 @@ class PowConnectionCoordinator(
         rxPackets.set(0L)
         innerReady = false
         innerStarted = false
+        psiphonTunnelCount.set(0)
+        cancelZeroTunnelTimeout()
         routing = false
         outerCommitted = false
         warpOnly = false
@@ -380,6 +389,8 @@ class PowConnectionCoordinator(
      */
     fun signalStop() {
         stopRequested.set(true)
+        cancelZeroTunnelTimeout()
+        psiphonTunnelCount.set(0)
         ladderActive.set(false)
         connectedSignal?.cancel()
         retuneSignal?.cancel()
@@ -449,11 +460,11 @@ class PowConnectionCoordinator(
                 AppLogRepository.warning(LogSource.POW, "UAC PoW path refresh limit reached")
                 return@withLock false
             }
-            // Outer must accept SOCKS — isRunning alone can be a zombie after SIM switch.
+            // Outer must accept SOCKS and actually forward traffic — isRunning alone can be a zombie.
             val outerAlive = !psiphonOnly &&
                 AetherNative.isRunning() &&
                 AetherNative.isReady() &&
-                outerProxyAccepts()
+                outerProxyResponsive()
             val recovered = if (outerAlive) {
                 AppLogRepository.info(LogSource.POW, "Outer still healthy — inner-only rebuild")
                 retuneInnerOnly(reason)
@@ -508,6 +519,32 @@ class PowConnectionCoordinator(
     }
 
     private fun registerSubscriptionListener() {
+        if (subscriptionsCallback != null) return
+        // OnSubscriptionsChangedListener() constructs Handler(Looper.myLooper()).
+        // connect()/startSessionWatch run on DefaultDispatcher — must build on main.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            registerSubscriptionListenerOnMain()
+            return
+        }
+        val latch = CountDownLatch(1)
+        var failure: Throwable? = null
+        Handler(Looper.getMainLooper()).post {
+            try {
+                registerSubscriptionListenerOnMain()
+            } catch (error: Throwable) {
+                failure = error
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!latch.await(5, TimeUnit.SECONDS)) {
+            AppLogRepository.debug(LogSource.POW, "Subscription listener register timed out on main")
+            return
+        }
+        failure?.let { throw it }
+    }
+
+    private fun registerSubscriptionListenerOnMain() {
         if (subscriptionsCallback != null) return
         val sm = appContext.getSystemService(SubscriptionManager::class.java) ?: return
         val listener = object : SubscriptionManager.OnSubscriptionsChangedListener() {
@@ -761,7 +798,9 @@ class PowConnectionCoordinator(
             "log" -> {
                 val message = event.optString("message")
                 if (message.isNotBlank()) {
-                    if (message.startsWith("Key:")) {
+                    if (message.startsWith("Key:") ||
+                        message.startsWith("MASQUE H2: TLS fingerprint") || message.startsWith("MASQUE: IP")
+                    ) {
                         AppLogRepository.info(LogSource.POW, message.take(500))
                     } else {
                         AppLogRepository.debug(LogSource.POW, message.take(240))
@@ -906,7 +945,7 @@ class PowConnectionCoordinator(
                 store.saveOuterProtocol(protocol)
                 lastOuterProtocol = protocol
                 wonTransport = if (protocol == "masque") plan.masqueTransport else ""
-                wonIp = plan.ipFor(protocol)
+                wonIp = PowCoreConfig.ipScanFor(currentSettings, plan, protocol)
                 outerCommitted = true
                 AppLogRepository.success(LogSource.POW, "$label is carrying the outer leg")
                 return label
@@ -975,6 +1014,12 @@ class PowConnectionCoordinator(
             probe.connect(InetSocketAddress("127.0.0.1", port), 1_000)
         }
     }.isSuccess
+
+    private suspend fun outerProxyResponsive(port: Int = PowCoreConfig.CHAIN_SOCKS_PORT): Boolean {
+        if (!outerProxyAccepts(port)) return false
+        val sample = runCatching { PowPathProbe.measureMsLite(port, 2_000) }.getOrDefault(-1L)
+        return sample > 0L
+    }
 
     private suspend fun stopOuterLeg() {
         outerCommitted = false
@@ -1266,6 +1311,8 @@ class PowConnectionCoordinator(
 
     private suspend fun stopLocked() {
         stopRequested.set(true)
+        cancelZeroTunnelTimeout()
+        psiphonTunnelCount.set(0)
         cancelQualityWork()
         PowPageTurbo.cancel()
         PowDnsWarm.cancel()
@@ -1330,16 +1377,41 @@ class PowConnectionCoordinator(
         return psiphon ?: PowPsiphonClient(service, callbacks).also { psiphon = it }
     }
 
+    private fun scheduleZeroTunnelTimeout(reason: String) {
+        if (zeroTunnelJob?.isActive == true) return
+        zeroTunnelJob = qualityScope.launch {
+            delay(10_000L)
+            if (stopRequested.get() || retuning.get() || !innerReady || restoreWaiting.get()) return@launch
+            if (psiphonTunnelCount.get() <= 0) {
+                AppLogRepository.warning(
+                    LogSource.POW,
+                    "Psiphon tunnel dropped and failed to recover in 10s ($reason); recovering path",
+                )
+                notifyPathLost("psiphon tunnel dropped ($reason)")
+            }
+        }
+    }
+
+    private fun cancelZeroTunnelTimeout() {
+        zeroTunnelJob?.cancel()
+        zeroTunnelJob = null
+    }
+
     private inner class PsiphonCallbacks : PowPsiphonClient.Callbacks {
         override fun onConnecting() {
             if (psiphonGeneration.get() != sessionGeneration.get()) return
             if (!innerCallbacksArmed.get()) return
             AppLogRepository.info(LogSource.POW, "Psiphon connecting")
+            if (innerReady && !retuning.get() && !stopRequested.get() && !restoreWaiting.get()) {
+                scheduleZeroTunnelTimeout("psiphon reconnecting")
+            }
         }
 
         override fun onConnected() {
             if (psiphonGeneration.get() != sessionGeneration.get()) return
             if (!innerCallbacksArmed.get()) return
+            cancelZeroTunnelTimeout()
+            psiphonTunnelCount.set(1)
             ladderActive.set(false)
             ladderJob?.cancel()
             if (regionPhase) {
@@ -1363,6 +1435,8 @@ class PowConnectionCoordinator(
 
         override fun onExiting() {
             if (psiphonGeneration.get() != sessionGeneration.get()) return
+            cancelZeroTunnelTimeout()
+            psiphonTunnelCount.set(0)
             if (stopRequested.get() || retuning.get() || !innerCallbacksArmed.get()) return
             if (!innerReady && ladderActive.get()) {
                 AppLogRepository.warning(LogSource.POW, "Psiphon exited before connect; trying the next strategy")
@@ -1383,6 +1457,17 @@ class PowConnectionCoordinator(
 
         override fun onDiagnosticMessage(message: String) {
             val text = message.ifBlank { return }
+            if (text.startsWith("Tunnels:")) {
+                runCatching {
+                    val count = JSONObject(text.substringAfter("Tunnels:").trim()).optInt("count", 0)
+                    psiphonTunnelCount.set(count)
+                    if (count > 0) {
+                        cancelZeroTunnelTimeout()
+                    } else if (innerReady && !retuning.get() && !stopRequested.get() && !restoreWaiting.get()) {
+                        scheduleZeroTunnelTimeout("0 active tunnels")
+                    }
+                }
+            }
             if (text.startsWith("ActiveTunnel:")) {
                 runCatching {
                     activeTunnelProtocol = JSONObject(text.substringAfter("ActiveTunnel:").trim())

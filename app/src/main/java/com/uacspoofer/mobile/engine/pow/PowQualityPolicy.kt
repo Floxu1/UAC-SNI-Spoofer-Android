@@ -18,7 +18,7 @@ internal object PowQualityPolicy {
     const val BAD_STREAK_JITTER = 3
     const val JITTER_THRESHOLD_MS = 120L
     const val FAIL_FAST_MS = 1_200
-    const val INNER_RETUNE_TIMEOUT_MS = 42_000L
+    const val INNER_RETUNE_TIMEOUT_MS = 20_000L
     const val GHOST_HANDOVER_TIMEOUT_MS = 38_000L
     const val PROBE_TIMEOUT_MS = 1_800
     const val BASELINE_SAMPLES = 3
@@ -39,15 +39,18 @@ internal object PowQualityPolicy {
     // Busy gate. Latency measured while the tunnel is moving bulk data is
     // queueing delay behind that data, not a slow path, so the passive watch
     // does not judge the path at those times.
+    // Stalled / zero-byte streams must not be mistaken for a busy tunnel.
     const val BUSY_BYTES_PER_SEC = 200L * 1024L
     const val BUSY_ACTIVE_STREAMS = 16
+    const val BUSY_ACTIVE_STREAMS_MIN_BYTES = 32L * 1024L
     const val BUSY_SPOT_WINDOW_MS = 2_000L
 
     fun bytesPerSecond(deltaBytes: Long, elapsedMs: Long): Long =
         if (deltaBytes <= 0L || elapsedMs <= 0L) 0L else deltaBytes * 1000L / elapsedMs
 
     fun isBusy(bytesPerSec: Long, activeStreams: Int): Boolean =
-        bytesPerSec >= BUSY_BYTES_PER_SEC || activeStreams >= BUSY_ACTIVE_STREAMS
+        bytesPerSec >= BUSY_BYTES_PER_SEC ||
+            (activeStreams >= BUSY_ACTIVE_STREAMS && bytesPerSec >= BUSY_ACTIVE_STREAMS_MIN_BYTES)
 
     /** Nearest-rank percentile of the positive samples; 0 when there are none. */
     fun percentile(samples: List<Long>, pct: Int): Long {

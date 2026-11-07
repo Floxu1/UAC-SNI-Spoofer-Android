@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,6 +65,7 @@ internal fun LiveLogsScreen(onMenuClick: () -> Unit) {
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
     var autoScroll by remember { mutableStateOf(true) }
+    var exportVisible by remember { mutableStateOf(false) }
     var selectedSource by remember { mutableStateOf<LogSource?>(null) }
     val visibleLogs = remember(logs, selectedSource) {
         selectedSource?.let { source -> logs.filter { it.source == source } } ?: logs
@@ -115,6 +117,7 @@ internal fun LiveLogsScreen(onMenuClick: () -> Unit) {
                     AppLogRepository.info(LogSource.APP, "Log snapshot copied")
                 },
                 onClear = { AppLogRepository.clear() },
+                onExport = { exportVisible = true },
             )
             Spacer(Modifier.height(10.dp))
             SourceFilters(selectedSource = selectedSource, onSelect = { selectedSource = it })
@@ -162,6 +165,9 @@ internal fun LiveLogsScreen(onMenuClick: () -> Unit) {
             )
         }
     }
+    if (exportVisible) {
+        LogExportSheet(onDismiss = { exportVisible = false })
+    }
 }
 
 @Composable
@@ -198,6 +204,7 @@ private fun LogSummaryBar(
     onAutoScroll: () -> Unit,
     onCopy: () -> Unit,
     onClear: () -> Unit,
+    onExport: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -218,6 +225,7 @@ private fun LogSummaryBar(
             active = autoScroll,
             onClick = onAutoScroll,
         )
+        LogActionButton(Icons.Rounded.IosShare, "Export log file", onClick = onExport)
         LogActionButton(Icons.Rounded.ContentCopy, "Copy logs", onClick = onCopy)
         LogActionButton(Icons.Rounded.DeleteSweep, "Clear logs", onClick = onClear)
     }

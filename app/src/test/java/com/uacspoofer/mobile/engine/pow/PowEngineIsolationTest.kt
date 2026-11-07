@@ -97,6 +97,8 @@ class PowEngineIsolationTest {
         assertEquals(PowCoreConfig.FIREWALL_AUTO, PowEngineSettings(firewallProfile = "mtn").validated().firewallProfile)
         assertTrue(PowEngineSettings.DEFAULT.chainPsiphon)
         assertEquals(PowCoreConfig.KEY_AUTO, PowEngineSettings.DEFAULT.keyFetch)
+        assertEquals(PowCoreConfig.KEY_OOB, PowEngineSettings(keyFetch = " OOB ").validated().keyFetch)
+        assertEquals(PowCoreConfig.KEY_AUTO, PowEngineSettings(keyFetch = "schannel").validated().keyFetch)
         val parsed = PowIdentityStatus.parseTomlScalars(
             "device_id = \"abc\"\ncert_issued_at = 10\nwg_private_key = \"AAAA\"\n",
         )
@@ -367,7 +369,8 @@ class PowQualityPolicyTest {
     @Test
     fun busyTunnelIsNotJudged() {
         assertTrue(PowQualityPolicy.isBusy(250L * 1024L, 2))
-        assertTrue(PowQualityPolicy.isBusy(0L, PowQualityPolicy.BUSY_ACTIVE_STREAMS))
+        assertFalse(PowQualityPolicy.isBusy(0L, PowQualityPolicy.BUSY_ACTIVE_STREAMS))
+        assertTrue(PowQualityPolicy.isBusy(40L * 1024L, PowQualityPolicy.BUSY_ACTIVE_STREAMS))
         assertFalse(PowQualityPolicy.isBusy(50L * 1024L, 3))
         assertEquals(204_800L, PowQualityPolicy.bytesPerSecond(409_600L, 2_000L))
         assertEquals(0L, PowQualityPolicy.bytesPerSecond(-5L, 2_000L))

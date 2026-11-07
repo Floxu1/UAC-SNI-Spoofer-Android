@@ -128,6 +128,9 @@ class PowEngineStore private constructor(context: Context) {
             .putString(KEY_H2_OBFUSCATION, validated.h2Obfuscation)
             .putInt(KEY_TUN_MTU, validated.tunMtu)
             .putBoolean(KEY_SOCKET_PROTECT, validated.socketProtectEnabled)
+            .remove(KEY_H2_OOB_FALLBACK)
+            .putString(KEY_H2_FINGERPRINT, validated.h2Fingerprint)
+            .putString(KEY_MASQUE_IP_VERSION, validated.masqueIpVersion)
             .apply()
         AppLogRepository.powLogcatMirror = validated.logcatMirror
         mutableSettings.value = validated
@@ -244,6 +247,8 @@ class PowEngineStore private constructor(context: Context) {
         tunMtu = prefs.getInt(KEY_TUN_MTU, PowEngineSettings.TUN_MTU_DEFAULT),
         h2FragmentMode = prefs.getString(KEY_H2_FRAGMENT_MODE, PowEngineSettings.H2_FRAG_AUTO).orEmpty(),
         socketProtectEnabled = prefs.getBoolean(KEY_SOCKET_PROTECT, true),
+        h2Fingerprint = prefs.getString(KEY_H2_FINGERPRINT, PowEngineSettings.H2_FP_DEFAULT).orEmpty(),
+        masqueIpVersion = prefs.getString(KEY_MASQUE_IP_VERSION, PowEngineSettings.MASQUE_IP_AUTO).orEmpty(),
     ).validated()
 
     private fun readLastConnect(): PowLastConnect {
@@ -289,6 +294,10 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_TUN_MTU = "adv_tun_mtu"
         private const val KEY_H2_FRAGMENT_MODE = "adv_h2_fragment_mode"
         private const val KEY_SOCKET_PROTECT = "socket_protect_enabled"
+        /** Old MASQUE H2 OOB switch (builds 514-517); only removed from prefs now. */
+        private const val KEY_H2_OOB_FALLBACK = "adv_h2_oob_fallback"
+        private const val KEY_H2_FINGERPRINT = "adv_h2_fingerprint"
+        private const val KEY_MASQUE_IP_VERSION = "adv_masque_ip_version"
         private const val KEY_LAST_PROTOCOL = "last_connect_protocol"
         private const val KEY_LAST_TRANSPORT = "last_connect_transport"
         private const val KEY_LAST_IP = "last_connect_ip"

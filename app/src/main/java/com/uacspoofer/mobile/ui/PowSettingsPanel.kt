@@ -35,12 +35,12 @@ import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.SettingsEthernet
-import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.CellTower
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Key
@@ -486,6 +486,28 @@ private fun PowAdvancedCard(
             homeText("Never split. Fastest.", "هیچ‌وقت تکه نمی‌شه. سریع‌ترین."),
         ),
     )
+    val fingerprints = listOf(
+        PowMenuChoice(
+            PowEngineSettings.H2_FP_DEFAULT,
+            homeText("Default", "پیش‌فرض"),
+            homeText("The one it always used", "همونی که تا حالا بود"),
+        ),
+        PowMenuChoice("chrome", homeText("Chrome", "کروم"), homeText("Looks like Chrome", "شبیه مرورگر کروم")),
+        PowMenuChoice("firefox", homeText("Firefox", "فایرفاکس"), homeText("Looks like Firefox", "شبیه مرورگر فایرفاکس")),
+        PowMenuChoice("safari", homeText("Safari / iPhone", "سافاری / آیفون"), homeText("Looks like an iPhone", "شبیه گوشی آیفون")),
+        PowMenuChoice("android", homeText("Android", "اندروید"), homeText("Looks like an Android app", "شبیه برنامه‌های اندروید")),
+        PowMenuChoice("random", homeText("Random", "تصادفی"), homeText("Picks one each time", "هر بار خودش یکی رو برمی‌داره")),
+    )
+    val ipVersions = listOf(
+        PowMenuChoice(
+            PowEngineSettings.MASQUE_IP_AUTO,
+            homeText("Auto", "خودکار"),
+            homeText("Same as before; the app decides", "مثل قبل، خود برنامه انتخاب می‌کنه"),
+        ),
+        PowMenuChoice("v4", homeLtr("IPv4"), homeText("Regular addresses", "آدرس‌های معمولی")),
+        PowMenuChoice("v6", homeLtr("IPv6"), homeText("If your internet has no IPv6, it uses IPv4", "اگه اینترنتت IPv6 نداشت، با IPv4 وصل می‌شه")),
+        PowMenuChoice("both", homeText("Both", "هر دو"), homeText("Tries both", "هر دو رو امتحان می‌کنه")),
+    )
     val mtus = listOf(
         PowMenuChoice(
             PowEngineSettings.TUN_MTU_DEFAULT.toString(),
@@ -575,6 +597,28 @@ private fun PowAdvancedCard(
                 selectedId = settings.tunMtu.toString(),
                 accent = accent,
                 onSelect = { id -> store.save(settings.copy(tunMtu = id.toIntOrNull() ?: PowEngineSettings.TUN_MTU_DEFAULT)) },
+            )
+            PowRowDivider()
+            PowPickerRow(
+                icon = Icons.Outlined.Fingerprint,
+                label = homeText("Connection fingerprint", "فینگرپرینت اتصال"),
+                subtitle = homeText("If it won't connect, try another one", "اگه وصل نشدی، یکی دیگه رو امتحان کن"),
+                sheetTitle = homeText("Connection fingerprint", "فینگرپرینت اتصال"),
+                choices = fingerprints,
+                selectedId = settings.h2Fingerprint,
+                accent = accent,
+                onSelect = { store.save(settings.copy(h2Fingerprint = it)) },
+            )
+            PowRowDivider()
+            PowPickerRow(
+                icon = Icons.Outlined.Public,
+                label = homeText("IP address type", "نوع آدرس IP"),
+                subtitle = homeText("If it won't connect, try IPv6", "اگه وصل نشدی، IPv6 رو امتحان کن"),
+                sheetTitle = homeText("IP address type", "نوع آدرس IP"),
+                choices = ipVersions,
+                selectedId = settings.masqueIpVersion,
+                accent = accent,
+                onSelect = { store.save(settings.copy(masqueIpVersion = it)) },
             )
             PowRowDivider()
             PowSwitchRow(
@@ -876,6 +920,7 @@ internal fun PowPickerRow(
     accent: Color,
     onSelect: (String) -> Unit,
     tileTint: Color = accent,
+    subtitle: String? = null,
 ) {
     var open by remember { mutableStateOf(false) }
     val selected = choices.firstOrNull { it.id == selectedId } ?: choices.first()
@@ -889,15 +934,35 @@ internal fun PowPickerRow(
         horizontalArrangement = Arrangement.spacedBy(PowGap),
     ) {
         PowIconTile(icon, tileTint)
-        Text(
-            label,
-            color = UacColors.TextPrimary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        if (subtitle.isNullOrBlank()) {
+            Text(
+                label,
+                color = UacColors.TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    label,
+                    color = UacColors.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    subtitle,
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         PowPill(latinDigits(selected.title), accent, chevron = true)
     }
     if (open) {

@@ -777,7 +777,9 @@ where
             return Err(last_error);
         }
 
-        if let Some(wait) = cooldown {
+        // Only wait out a Retry-After when another attempt follows; after the
+        // last one it would only delay the error returned below.
+        if let Some(wait) = cooldown.filter(|_| attempt + 1 < API_ATTEMPTS) {
             log::warn!(
                 "[!] {label} asked us to wait {}s before retrying",
                 wait.as_secs()

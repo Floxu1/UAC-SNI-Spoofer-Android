@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use boring::pkey::PKey;
@@ -25,6 +25,232 @@ const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 static H2_FALLBACK: AtomicBool = AtomicBool::new(false);
 static H2_PREFERRED: AtomicBool = AtomicBool::new(false);
 static H2_EXTENDED: AtomicBool = AtomicBool::new(false);
+
+// ---- TLS ClientHello fingerprint for MASQUE over HTTP/2 -----------------
+//
+// App setting. `Default` is the hello this core always sent and runs the
+// exact old code path in `build_tls`. The other profiles only change the
+// ClientHello shape; every one keeps ALPN h2 and the MASQUE client cert.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TlsFingerprint {
+    Default = 0,
+    Chrome = 1,
+    Firefox = 2,
+    Safari = 3,
+    Android = 4,
+    Random = 5,
+}
+
+impl TlsFingerprint {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "chrome" => Self::Chrome,
+            "firefox" => Self::Firefox,
+            "safari" | "ios" | "iphone" => Self::Safari,
+            "android" | "okhttp" => Self::Android,
+            "random" => Self::Random,
+            _ => Self::Default,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Chrome => "chrome",
+            Self::Firefox => "firefox",
+            Self::Safari => "safari",
+            Self::Android => "android",
+            Self::Random => "random",
+        }
+    }
+
+    fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Chrome,
+            2 => Self::Firefox,
+            3 => Self::Safari,
+            4 => Self::Android,
+            5 => Self::Random,
+            _ => Self::Default,
+        }
+    }
+}
+
+const RANDOM_FINGERPRINTS: [TlsFingerprint; 4] = [
+    TlsFingerprint::Chrome,
+    TlsFingerprint::Firefox,
+    TlsFingerprint::Safari,
+    TlsFingerprint::Android,
+];
+static TLS_FINGERPRINT: AtomicU8 = AtomicU8::new(0);
+/// Profile named in the last fingerprint log line (255 = none yet).
+static TLS_FINGERPRINT_LOGGED: AtomicU8 = AtomicU8::new(255);
+
+pub fn set_tls_fingerprint(raw: &str) {
+    TLS_FINGERPRINT.store(TlsFingerprint::parse(raw) as u8, Ordering::Release);
+    TLS_FINGERPRINT_LOGGED.store(255, Ordering::Release);
+}
+
+pub fn tls_fingerprint() -> TlsFingerprint {
+    TlsFingerprint::from_index(TLS_FINGERPRINT.load(Ordering::Acquire))
+}
+
+fn pick_fingerprint(setting: TlsFingerprint) -> TlsFingerprint {
+    match setting {
+        TlsFingerprint::Random => {
+            use rand::Rng;
+            RANDOM_FINGERPRINTS[rand::thread_rng().gen_range(0..RANDOM_FINGERPRINTS.len())]
+        }
+        other => other,
+    }
+}
+
+/// One line per dial session: logged when the profile changes, and on every
+/// pick when the setting is random.
+fn note_fingerprint(setting: TlsFingerprint, used: TlsFingerprint, detail: &str) {
+    let random = setting == TlsFingerprint::Random;
+    let previous = TLS_FINGERPRINT_LOGGED.swap(used as u8, Ordering::AcqRel);
+    if random || previous != used as u8 {
+        let mut line = format!("MASQUE H2: TLS fingerprint {}", used.name());
+        if random {
+            line.push_str(" (random pick)");
+        }
+        if !detail.is_empty() {
+            line.push_str(" [");
+            line.push_str(detail);
+            line.push(']');
+        }
+        crate::ffi::record_log(line);
+    }
+}
+
+const CHROME_CIPHERS: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
+ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:\
+ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:\
+AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
+const FIREFOX_CIPHERS: &str = "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
+ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:\
+ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:\
+ECDHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA:AES256-SHA";
+const SAFARI_CIPHERS: &str = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:\
+ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:\
+ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA:\
+ECDHE-RSA-AES128-SHA:AES256-GCM-SHA384:AES128-GCM-SHA256:AES256-SHA:AES128-SHA";
+/// OkHttp MODERN_TLS order (Conscrypt / BoringSSL on Android).
+const ANDROID_CIPHERS: &str = CHROME_CIPHERS;
+
+use boring::ssl::SslSignatureAlgorithm as Sig;
+const CHROME_SIGALGS: [Sig; 8] = [
+    Sig::ECDSA_SECP256R1_SHA256,
+    Sig::RSA_PSS_RSAE_SHA256,
+    Sig::RSA_PKCS1_SHA256,
+    Sig::ECDSA_SECP384R1_SHA384,
+    Sig::RSA_PSS_RSAE_SHA384,
+    Sig::RSA_PKCS1_SHA384,
+    Sig::RSA_PSS_RSAE_SHA512,
+    Sig::RSA_PKCS1_SHA512,
+];
+const FIREFOX_SIGALGS: [Sig; 11] = [
+    Sig::ECDSA_SECP256R1_SHA256,
+    Sig::ECDSA_SECP384R1_SHA384,
+    Sig::ECDSA_SECP521R1_SHA512,
+    Sig::RSA_PSS_RSAE_SHA256,
+    Sig::RSA_PSS_RSAE_SHA384,
+    Sig::RSA_PSS_RSAE_SHA512,
+    Sig::RSA_PKCS1_SHA256,
+    Sig::RSA_PKCS1_SHA384,
+    Sig::RSA_PKCS1_SHA512,
+    Sig::ECDSA_SHA1,
+    Sig::RSA_PKCS1_SHA1,
+];
+const SAFARI_SIGALGS: [Sig; 10] = [
+    Sig::ECDSA_SECP256R1_SHA256,
+    Sig::RSA_PSS_RSAE_SHA256,
+    Sig::RSA_PKCS1_SHA256,
+    Sig::ECDSA_SECP384R1_SHA384,
+    Sig::ECDSA_SHA1,
+    Sig::RSA_PSS_RSAE_SHA384,
+    Sig::RSA_PKCS1_SHA384,
+    Sig::RSA_PSS_RSAE_SHA512,
+    Sig::RSA_PKCS1_SHA512,
+    Sig::RSA_PKCS1_SHA1,
+];
+
+fn tls_err(error: boring::error::ErrorStack) -> AetherError {
+    AetherError::Tls(error.to_string())
+}
+
+/// First group list this BoringSSL accepts (PQ lists are refused when the
+/// build has no ML-KEM).
+fn set_first_groups(
+    builder: &mut boring::ssl::SslContextBuilder,
+    lists: &[&'static str],
+) -> Result<&'static str> {
+    let mut last = String::new();
+    for list in lists {
+        match builder.set_curves_list(list) {
+            Ok(()) => return Ok(list),
+            Err(error) => last = error.to_string(),
+        }
+    }
+    Err(AetherError::Tls(format!("no TLS group list accepted: {last}")))
+}
+
+/// Non-default ClientHello profiles. Returns a short note for the log line.
+fn apply_fingerprint(
+    builder: &mut boring::ssl::SslContextBuilder,
+    profile: TlsFingerprint,
+) -> Result<String> {
+    match profile {
+        TlsFingerprint::Chrome => {
+            builder.set_grease_enabled(true);
+            builder.set_permute_extensions(true);
+            builder.set_cipher_list(CHROME_CIPHERS).map_err(tls_err)?;
+            let groups = set_first_groups(
+                builder,
+                &["X25519MLKEM768:X25519:P-256:P-384", "X25519:P-256:P-384"],
+            )?;
+            builder.set_verify_algorithm_prefs(&CHROME_SIGALGS).map_err(tls_err)?;
+            builder.enable_ocsp_stapling();
+            builder.enable_signed_cert_timestamps();
+            let pq = if groups.starts_with("X25519MLKEM768") {
+                ""
+            } else {
+                ", no ML-KEM in this build"
+            };
+            Ok(format!("groups {groups}{pq}"))
+        }
+        TlsFingerprint::Firefox => {
+            builder.set_grease_enabled(false);
+            builder.set_permute_extensions(false);
+            builder.set_cipher_list(FIREFOX_CIPHERS).map_err(tls_err)?;
+            let groups = set_first_groups(builder, &["X25519:P-256:P-384:P-521"])?;
+            builder.set_verify_algorithm_prefs(&FIREFOX_SIGALGS).map_err(tls_err)?;
+            builder.enable_ocsp_stapling();
+            Ok(format!("groups {groups}"))
+        }
+        TlsFingerprint::Safari => {
+            builder.set_grease_enabled(true);
+            builder.set_permute_extensions(false);
+            builder.set_cipher_list(SAFARI_CIPHERS).map_err(tls_err)?;
+            let groups = set_first_groups(builder, &["X25519:P-256:P-384:P-521"])?;
+            builder.set_verify_algorithm_prefs(&SAFARI_SIGALGS).map_err(tls_err)?;
+            builder.enable_ocsp_stapling();
+            builder.enable_signed_cert_timestamps();
+            Ok(format!("groups {groups}"))
+        }
+        TlsFingerprint::Android => {
+            builder.set_grease_enabled(false);
+            builder.set_permute_extensions(false);
+            builder.set_cipher_list(ANDROID_CIPHERS).map_err(tls_err)?;
+            let groups = set_first_groups(builder, &["X25519:P-256:P-384"])?;
+            Ok(format!("groups {groups}"))
+        }
+        TlsFingerprint::Default | TlsFingerprint::Random => Ok(String::new()),
+    }
+}
 
 // HTTP/2 flow-control windows for the single CONNECT-IP stream. The h2 crate
 // defaults to 65,535 bytes for both the stream and the connection, which caps
@@ -114,6 +340,7 @@ async fn connect_tcp(peer: SocketAddr) -> Result<TcpStream> {
         let _ = socket.set_send_buffer_size(H2_SOCKET_BUFFER);
         let _ = socket.set_recv_buffer_size(H2_SOCKET_BUFFER);
         let _ = socket.set_nodelay(true);
+        let _ = socket.set_keepalive(true);
     }
     // Bind unspecified so Android does not pick the VPN address (172.16.0.2)
     // as the source after the TUN interface is already up.
@@ -220,8 +447,13 @@ fn validation_timeout() -> Duration {
 }
 
 const DATA_PROBE_REQUIRED_SUCCESSES: u32 = 2;
+/// The scan check (verify_h2) re-sends its DNS probe this often while no answer
+/// came, so one lost probe does not hold a gateway for the whole verify timeout.
+const DATA_PROBE_RESEND: Duration = Duration::from_millis(700);
 
 fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> {
+    let setting = tls_fingerprint();
+    let profile = pick_fingerprint(setting);
     let mut builder =
         SslConnector::builder(SslMethod::tls()).map_err(|e| AetherError::Tls(e.to_string()))?;
 
@@ -232,21 +464,27 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
         .set_max_proto_version(Some(SslVersion::TLS1_3))
         .map_err(|e| AetherError::Tls(e.to_string()))?;
 
-    builder.set_grease_enabled(true);
-    // Chrome's TLS 1.2 selection, the fingerprint PattNG sends on MASQUE.
-    builder
-        .set_cipher_list("ALL:!aPSK:!ECDSA+SHA1:!3DES")
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
+    let fingerprint_detail = if profile == TlsFingerprint::Default {
+        // Unchanged default hello (the one this core always sent).
+        builder.set_grease_enabled(true);
+        // Chrome's TLS 1.2 selection, the fingerprint PattNG sends on MASQUE.
+        builder
+            .set_cipher_list("ALL:!aPSK:!ECDSA+SHA1:!3DES")
+            .map_err(|e| AetherError::Tls(e.to_string()))?;
 
-    let groups = std::env::var("AETHER_TLS_GROUPS").ok();
-    let groups = groups
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(CHROME_GROUPS);
-    builder
-        .set_curves_list(groups)
-        .map_err(|e| AetherError::Tls(e.to_string()))?;
+        let groups = std::env::var("AETHER_TLS_GROUPS").ok();
+        let groups = groups
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(CHROME_GROUPS);
+        builder
+            .set_curves_list(groups)
+            .map_err(|e| AetherError::Tls(e.to_string()))?;
+        format!("groups {groups}")
+    } else {
+        apply_fingerprint(&mut builder, profile)?
+    };
 
     builder
         .set_alpn_protos(H2_ALPN)
@@ -274,6 +512,7 @@ fn build_tls(cfg: &H2TunnelConfig) -> Result<boring::ssl::ConnectConfiguration> 
     config.set_verify_hostname(!use_pin_verification);
     config.set_use_server_name_indication(true);
 
+    note_fingerprint(setting, profile, &fingerprint_detail);
     Ok(config)
 }
 
@@ -478,41 +717,59 @@ async fn verify_h2_shape(
         }
 
         let mut probe_successes: u32 = 0;
+        let mut resend = tokio::time::interval(DATA_PROBE_RESEND);
+        resend.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        resend.tick().await;
 
         loop {
-            match futures::future::poll_fn(|cx| recv_body.poll_data(cx)).await {
-                Some(Ok(chunk)) => {
-                    let _ = recv_body.flow_control().release_capacity(chunk.len());
-                    capsules.push(&chunk);
-                    loop {
-                        match capsules.next() {
-                            Ok(Some(Capsule::Datagram(_))) => {
-                                probe_successes += 1;
-                                if probe_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
-                                    driver.abort();
-                                    return Ok(());
-                                }
-                                let framed = masque::encode_datagram_capsule(&probe);
-                                if let Err(e) =
-                                    send_capsule(&mut send_stream, Bytes::from(framed)).await
-                                {
-                                    driver.abort();
-                                    return Err(e);
+            tokio::select! {
+                biased;
+
+                data = futures::future::poll_fn(|cx| recv_body.poll_data(cx)) => {
+                    match data {
+                        Some(Ok(chunk)) => {
+                            let _ = recv_body.flow_control().release_capacity(chunk.len());
+                            capsules.push(&chunk);
+                            loop {
+                                match capsules.next() {
+                                    Ok(Some(Capsule::Datagram(_))) => {
+                                        probe_successes += 1;
+                                        if probe_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
+                                            driver.abort();
+                                            return Ok(());
+                                        }
+                                        let framed = masque::encode_datagram_capsule(&probe);
+                                        if let Err(e) =
+                                            send_capsule(&mut send_stream, Bytes::from(framed)).await
+                                        {
+                                            driver.abort();
+                                            return Err(e);
+                                        }
+                                        resend.reset();
+                                    }
+                                    Ok(Some(_)) => continue,
+                                    Ok(None) => break,
+                                    Err(_) => break,
                                 }
                             }
-                            Ok(Some(_)) => continue,
-                            Ok(None) => break,
-                            Err(_) => break,
+                        }
+                        Some(Err(e)) => {
+                            driver.abort();
+                            return Err(AetherError::Masque(format!("h2 body: {e}")));
+                        }
+                        None => {
+                            driver.abort();
+                            return Err(AetherError::Masque("h2 stream closed before data".into()));
                         }
                     }
                 }
-                Some(Err(e)) => {
-                    driver.abort();
-                    return Err(AetherError::Masque(format!("h2 body: {e}")));
-                }
-                None => {
-                    driver.abort();
-                    return Err(AetherError::Masque("h2 stream closed before data".into()));
+
+                _ = resend.tick() => {
+                    let framed = masque::encode_datagram_capsule(&probe);
+                    if let Err(e) = send_capsule(&mut send_stream, Bytes::from(framed)).await {
+                        driver.abort();
+                        return Err(e);
+                    }
                 }
             }
         }

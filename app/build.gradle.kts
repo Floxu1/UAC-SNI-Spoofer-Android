@@ -1,4 +1,4 @@
-﻿import java.util.Properties
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -28,7 +28,7 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 503
+        versionCode = 518
         versionName = "2.0.9"
 
         buildConfigField("boolean", "TV_MODE", "false")

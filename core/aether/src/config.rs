@@ -74,7 +74,7 @@ fn normalize_pem(pem: &str) -> String {
     if pem.trim().is_empty() {
         return pem.to_string();
     }
-    let normalized = pem.replace("\r\n", "\n").replace('\r', '\n');
+    let normalized = pem.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = normalized
         .lines()
         .map(str::trim)

@@ -157,6 +157,11 @@ pub const MASQUE_PORTS: &[u16] = &[443, 500, 1701, 4500, 4443, 8443, 8095];
 pub const MASQUE_ALT_PORTS: &[u16] = &[1701, 8095, 500, 4500];
 
 pub const MASQUE_CIDRS_V6: &[&str] = &[
+    // WARP's own IPv6 MASQUE range (the WARP client's log names
+    // [2606:4700:103::1]); upstream aether 3aae45d / 7c39a61 found regular
+    // WARP answers MASQUE over IPv6 here. Leads for non-team WARP; with a team,
+    // `prioritize` still moves 2606:4700:102::/48 first.
+    "2606:4700:103::/48",
     "2606:4700:d0::/48",
     "2606:4700:102::/48",
     "2606:4700:d1::/48",
@@ -200,10 +205,99 @@ pub fn masque_cidrs_v6() -> Vec<&'static str> {
 }
 
 pub const MASQUE_SEEDS_V6: &[&str] = &[
+    // WARP's own IPv6 MASQUE gateway. The range sampler puts an IPv4 tail in
+    // the last 32 bits, so ::1 is only ever reached as a seed.
+    "2606:4700:103::1",
     "2606:4700:d0::a29f:c602",
     "2606:4700:d1::a29f:c602",
     "2606:4700:d0::a29f:c601",
     "2606:4700:d0::a29f:c001",
+];
+
+/// Last-resort IPv4 MASQUE gateways from upstream aether (42be629, 8ced710):
+/// the addresses of 162.159.198.0/24 (75) and then 162.159.199.0/24 (222) that
+/// completed a TCP handshake on port 443 from upstream's network, each range
+/// fastest first as upstream measured it. They are queued only after this
+/// core's own seeds, port ladder and CIDR sweep, each on every MASQUE port,
+/// and only without a team. Nothing here replaces or reorders
+/// [`MASQUE_SEEDS`]; 162.159.199.2-.33, which upstream drops, stay reachable
+/// through the seeds and the sweep.
+pub const MASQUE_UPSTREAM_FALLBACK_V4: &[&str] = &[
+    "162.159.198.183", "162.159.198.206", "162.159.198.226", "162.159.198.125",
+    "162.159.198.72", "162.159.198.89", "162.159.198.198", "162.159.198.131",
+    "162.159.198.245", "162.159.198.114", "162.159.198.31", "162.159.198.60",
+    "162.159.198.4", "162.159.198.65", "162.159.198.33", "162.159.198.86",
+    "162.159.198.244", "162.159.198.123", "162.159.198.233", "162.159.198.69",
+    "162.159.198.255", "162.159.198.176", "162.159.198.186", "162.159.198.63",
+    "162.159.198.37", "162.159.198.169", "162.159.198.147", "162.159.198.120",
+    "162.159.198.135", "162.159.198.54", "162.159.198.234", "162.159.198.109",
+    "162.159.198.175", "162.159.198.231", "162.159.198.219", "162.159.198.216",
+    "162.159.198.64", "162.159.198.250", "162.159.198.184", "162.159.198.74",
+    "162.159.198.241", "162.159.198.213", "162.159.198.232", "162.159.198.75",
+    "162.159.198.77", "162.159.198.172", "162.159.198.145", "162.159.198.36",
+    "162.159.198.124", "162.159.198.80", "162.159.198.192", "162.159.198.82",
+    "162.159.198.137", "162.159.198.141", "162.159.198.48", "162.159.198.71",
+    "162.159.198.227", "162.159.198.207", "162.159.198.49", "162.159.198.178",
+    "162.159.198.197", "162.159.198.203", "162.159.198.204", "162.159.198.205",
+    "162.159.198.195", "162.159.198.230", "162.159.198.202", "162.159.198.53",
+    "162.159.198.79", "162.159.198.58", "162.159.198.35", "162.159.198.239",
+    "162.159.198.116", "162.159.198.127", "162.159.198.240", "162.159.199.87",
+    "162.159.199.117", "162.159.199.48", "162.159.199.217", "162.159.199.65",
+    "162.159.199.198", "162.159.199.47", "162.159.199.103", "162.159.199.133",
+    "162.159.199.151", "162.159.199.195", "162.159.199.73", "162.159.199.156",
+    "162.159.199.247", "162.159.199.127", "162.159.199.158", "162.159.199.208",
+    "162.159.199.82", "162.159.199.213", "162.159.199.70", "162.159.199.243",
+    "162.159.199.204", "162.159.199.154", "162.159.199.240", "162.159.199.236",
+    "162.159.199.126", "162.159.199.186", "162.159.199.188", "162.159.199.187",
+    "162.159.199.124", "162.159.199.43", "162.159.199.102", "162.159.199.60",
+    "162.159.199.219", "162.159.199.163", "162.159.199.193", "162.159.199.135",
+    "162.159.199.110", "162.159.199.94", "162.159.199.136", "162.159.199.233",
+    "162.159.199.77", "162.159.199.241", "162.159.199.223", "162.159.199.120",
+    "162.159.199.38", "162.159.199.75", "162.159.199.57", "162.159.199.118",
+    "162.159.199.50", "162.159.199.76", "162.159.199.58", "162.159.199.145",
+    "162.159.199.81", "162.159.199.54", "162.159.199.234", "162.159.199.157",
+    "162.159.199.121", "162.159.199.246", "162.159.199.182", "162.159.199.1",
+    "162.159.199.251", "162.159.199.35", "162.159.199.179", "162.159.199.147",
+    "162.159.199.137", "162.159.199.49", "162.159.199.138", "162.159.199.116",
+    "162.159.199.172", "162.159.199.42", "162.159.199.160", "162.159.199.88",
+    "162.159.199.212", "162.159.199.174", "162.159.199.79", "162.159.199.105",
+    "162.159.199.130", "162.159.199.252", "162.159.199.238", "162.159.199.248",
+    "162.159.199.125", "162.159.199.62", "162.159.199.34", "162.159.199.239",
+    "162.159.199.84", "162.159.199.104", "162.159.199.196", "162.159.199.72",
+    "162.159.199.97", "162.159.199.74", "162.159.199.229", "162.159.199.159",
+    "162.159.199.192", "162.159.199.201", "162.159.199.44", "162.159.199.222",
+    "162.159.199.142", "162.159.199.78", "162.159.199.235", "162.159.199.168",
+    "162.159.199.162", "162.159.199.39", "162.159.199.209", "162.159.199.111",
+    "162.159.199.139", "162.159.199.113", "162.159.199.215", "162.159.199.245",
+    "162.159.199.86", "162.159.199.46", "162.159.199.180", "162.159.199.66",
+    "162.159.199.173", "162.159.199.53", "162.159.199.216", "162.159.199.237",
+    "162.159.199.114", "162.159.199.109", "162.159.199.214", "162.159.199.190",
+    "162.159.199.106", "162.159.199.100", "162.159.199.92", "162.159.199.96",
+    "162.159.199.61", "162.159.199.108", "162.159.199.64", "162.159.199.101",
+    "162.159.199.140", "162.159.199.123", "162.159.199.112", "162.159.199.199",
+    "162.159.199.225", "162.159.199.83", "162.159.199.69", "162.159.199.90",
+    "162.159.199.153", "162.159.199.115", "162.159.199.149", "162.159.199.36",
+    "162.159.199.224", "162.159.199.155", "162.159.199.37", "162.159.199.52",
+    "162.159.199.63", "162.159.199.164", "162.159.199.253", "162.159.199.141",
+    "162.159.199.242", "162.159.199.89", "162.159.199.67", "162.159.199.185",
+    "162.159.199.98", "162.159.199.167", "162.159.199.0", "162.159.199.176",
+    "162.159.199.189", "162.159.199.218", "162.159.199.211", "162.159.199.221",
+    "162.159.199.220", "162.159.199.231", "162.159.199.230", "162.159.199.206",
+    "162.159.199.175", "162.159.199.184", "162.159.199.203", "162.159.199.255",
+    "162.159.199.171", "162.159.199.45", "162.159.199.228", "162.159.199.177",
+    "162.159.199.165", "162.159.199.122", "162.159.199.99", "162.159.199.183",
+    "162.159.199.161", "162.159.199.144", "162.159.199.119", "162.159.199.128",
+    "162.159.199.146", "162.159.199.148", "162.159.199.68", "162.159.199.56",
+    "162.159.199.95", "162.159.199.55", "162.159.199.197", "162.159.199.41",
+    "162.159.199.194", "162.159.199.226", "162.159.199.134", "162.159.199.249",
+    "162.159.199.232", "162.159.199.227", "162.159.199.191", "162.159.199.150",
+    "162.159.199.170", "162.159.199.202", "162.159.199.169", "162.159.199.207",
+    "162.159.199.166", "162.159.199.250", "162.159.199.210", "162.159.199.181",
+    "162.159.199.132", "162.159.199.129", "162.159.199.107", "162.159.199.71",
+    "162.159.199.152", "162.159.199.91", "162.159.199.131", "162.159.199.205",
+    "162.159.199.85", "162.159.199.59", "162.159.199.51", "162.159.199.143",
+    "162.159.199.244", "162.159.199.254", "162.159.199.178", "162.159.199.200",
+    "162.159.199.93",
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -403,11 +497,12 @@ pub async fn hunt_best_gateway(probe: &MasqueProbe, mode: ScanMode) -> Result<Pr
     if probe.ip.want_v6() && !host_has_ipv6().await {
         if probe.ip.want_v4() {
             log::warn!("[-] host has no IPv6 route; falling back to IPv4-only scan");
-            effective_ip = IpScan::V4;
+            crate::ffi::record_log("MASQUE: IPv6 fallback: no IPv6 route on this network; scanning IPv4 only");
         } else {
-            log::warn!("[-] host has no IPv6 route; IPv6 scan needs native IPv6 connectivity");
-            return Err(AetherError::NoCleanEndpoint);
+            log::warn!("[-] host has no IPv6 route; IPv6 picked, scanning IPv4 instead");
+            crate::ffi::record_log("MASQUE: IPv6 fallback: IPv6 picked but this network has no IPv6 route; scanning IPv4 instead");
         }
+        effective_ip = IpScan::V4;
     }
     let candidates = build_candidates(&st, &probe.ports, effective_ip);
 
@@ -757,6 +852,24 @@ fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u1
         }
     }
 
+    // Last fallback: upstream's measured gateways on every port, after
+    // everything above (seeds, port ladder, sweeps). The deadline usually ends
+    // the scan long before this, so a network where the own list works never
+    // pays for it. Pairs already queued are skipped.
+    if ip.want_v4() && !zero_trust_mode() {
+        let fallback: Vec<Ipv4Addr> = MASQUE_UPSTREAM_FALLBACK_V4
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        for a in &fallback {
+            for &port in ports {
+                if seen.insert((IpAddr::V4(*a), port)) {
+                    out.push((IpAddr::V4(*a), port));
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -946,11 +1059,57 @@ mod tests {
         let st = ScanMode::Balanced.strategy();
         let candidates = build_candidates(&st, MASQUE_PORTS, IpScan::V4);
         let seeds: Vec<Ipv4Addr> = MASQUE_SEEDS.iter().filter_map(|s| s.parse().ok()).collect();
-        for (ip, port) in &candidates {
+        let fallback: Vec<Ipv4Addr> = MASQUE_UPSTREAM_FALLBACK_V4
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        // The sweep itself ends where the upstream fallback tail begins.
+        let tail_start = candidates
+            .iter()
+            .position(|(ip, port)| {
+                matches!(ip, IpAddr::V4(v4) if fallback.contains(v4) && !seeds.contains(v4))
+                    && *port != 443
+            })
+            .unwrap_or(candidates.len());
+        for (ip, port) in &candidates[..tail_start] {
             let IpAddr::V4(v4) = ip else { continue };
             if !seeds.contains(v4) {
                 assert_eq!(*port, 443, "swept {ip} on {port}, which multiplies the scan");
             }
+        }
+    }
+
+    #[test]
+    fn the_upstream_fallback_comes_after_the_own_seeds_and_ladder() {
+        std::env::remove_var("AETHER_TEAM");
+        let st = ScanMode::Balanced.strategy();
+        let candidates = build_candidates(&st, MASQUE_PORTS, IpScan::V4);
+        let seeds: Vec<Ipv4Addr> = MASQUE_SEEDS.iter().filter_map(|s| s.parse().ok()).collect();
+        // The own seeds still lead, in their own order, on the primary port.
+        for (i, seed) in seeds.iter().enumerate() {
+            assert_eq!(candidates[i], (IpAddr::V4(*seed), 443));
+        }
+        // Every upstream gateway is there on every port, after the seed ladder.
+        let head = seeds.len() * MASQUE_PORTS.len();
+        for s in MASQUE_UPSTREAM_FALLBACK_V4 {
+            let a: Ipv4Addr = s.parse().unwrap();
+            for &port in MASQUE_PORTS {
+                let at = candidates.iter().position(|c| *c == (IpAddr::V4(a), port));
+                assert!(at.is_some(), "{a}:{port} missing");
+                if !seeds.contains(&a) {
+                    assert!(at.unwrap() >= head, "{a}:{port} jumped the seed ladder");
+                }
+            }
+        }
+        assert_eq!(MASQUE_UPSTREAM_FALLBACK_V4.len(), 297);
+    }
+
+    #[test]
+    fn warp_ipv6_gateway_and_range_lead_the_ipv6_lists() {
+        assert_eq!(MASQUE_SEEDS_V6.first(), Some(&"2606:4700:103::1"));
+        assert_eq!(MASQUE_CIDRS_V6.first(), Some(&"2606:4700:103::/48"));
+        for kept in ["2606:4700:d0::/48", "2606:4700:102::/48", "2606:4700:d1::/48"] {
+            assert!(MASQUE_CIDRS_V6.contains(&kept));
         }
     }
 

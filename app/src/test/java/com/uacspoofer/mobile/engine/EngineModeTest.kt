@@ -49,8 +49,20 @@ class EngineModeTest {
         assertEquals(EngineMode.UAC_DIRECT, EngineMode.UAC_POW.toggled())
         assertEquals(EngineMode.XRAY_CF, EngineMode.UAC_DIRECT.toggled())
         assertEquals(EngineMode.UAC_DIRECT, EngineMode.fromStored("uac_direct"))
+        assertEquals(EngineMode.UAC_DIRECT, EngineMode.fromStored("act_hitch"))
         assertTrue(EngineMode.UAC_DIRECT.isDirect)
         assertFalse(EngineMode.UAC_DIRECT.isXray)
+    }
+
+    @Test
+    fun engine4HiddenFromVisibleListUntilUnlocked() {
+        assertEquals(
+            listOf(EngineMode.XRAY_CF, EngineMode.TOR_WEBTUNNEL, EngineMode.UAC_POW),
+            EngineMode.visible(engine4Unlocked = false),
+        )
+        assertEquals(EngineMode.entries.toList(), EngineMode.visible(engine4Unlocked = true))
+        assertEquals(EngineMode.XRAY_CF, EngineMode.UAC_POW.next(engine4Unlocked = false))
+        assertEquals(EngineMode.UAC_DIRECT, EngineMode.UAC_POW.next(engine4Unlocked = true))
     }
 
     @Test

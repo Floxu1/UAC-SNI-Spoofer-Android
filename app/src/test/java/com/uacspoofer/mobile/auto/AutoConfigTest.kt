@@ -151,4 +151,14 @@ class AutoConfigTest {
         val merged = AutoRanking.merge(round, listOf(slow.copy(kbps = 0, delayMs = 250)), 2000)
         assertEquals(500L, merged.first { it.uri == slow.uri }.kbps)
     }
+
+    @Test
+    fun echFromDnsJsonReadsGoogleHttpsAnswer() {
+        val body = """{"Status":0,"Answer":[{"type":65,"data":"1 . alpn=h3,h2 ech=AEX+DQBBEAAgACC8Pj+HmS7QtM01/LLssahZYzqLh8LsFmJGbrIfNQl+EQAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="}]}"""
+        val key = EchDns.echFromDnsJson(body)
+        assertTrue(EchDns.isBase64List(key))
+        assertTrue(key.startsWith("AEX+"))
+        assertEquals("", EchDns.echFromDnsJson("""{"Status":0}"""))
+    }
+
 }
