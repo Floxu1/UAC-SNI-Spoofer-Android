@@ -2432,14 +2432,18 @@ async fn run_masque(
         crate::ffi::record_log(&reconnect_detail);
         let startup_failed = reconnect_detail.contains("startup timed out")
             || reconnect_detail.contains("before validation");
-        if startup_failed {
+        // A missed PONG is a dead session, not a clean close. scan_once would
+        // otherwise end the proxy here, and the connect path has no TUN yet
+        // so it cannot rebuild the outer leg itself.
+        let keepalive_dead = reconnect_detail.contains("keepalive PONG");
+        if startup_failed || keepalive_dead {
             forget_clean_h2(&options.config_path, peer);
             last_good_peer = None;
             crate::ffi::record_log(format!(
                 "Tunnel did not stay up on {peer}. That address is no longer first; scanning for another."
             ));
         }
-        if options.scan_once && !startup_failed {
+        if options.scan_once && !startup_failed && !keepalive_dead {
             return Err(AetherError::Other(reconnect_detail));
         }
 

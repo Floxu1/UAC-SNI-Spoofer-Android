@@ -5,6 +5,8 @@
     <string name="vpn_channel_description">Tunnel and proxy connection status</string>
     <string name="vpn_connecting_notification">Connecting with UAC SNI…</string>
 <string name="vpn_connected_notification">UAC SNI VPN connected</string>
+    <string name="notification_engine_connected">%1$s connected</string>
+    <string name="notification_engine_state">connected</string>
     <string name="proxy_connecting_notification">Starting local SOCKS5 proxy…</string>
     <string name="proxy_connected_notification">SOCKS5 proxy connected</string>
     <string name="vpn_failed_notification">UAC SNI connection failed</string>

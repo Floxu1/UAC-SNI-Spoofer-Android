@@ -1108,7 +1108,7 @@ class PowConnectionCoordinator(
                 (
                     when {
                         preferred == null -> " region=any"
-                        bias -> " region=$preferred (nearby, ${PowPsiphonProtocols.NEARBY_PHASE_TIMEOUT_SECONDS}s then any)"
+                        bias -> " region=$preferred (nearby, ${strategy.timeoutSeconds}s then any)"
                         else -> " region=$preferred"
                     }
                     ) +
@@ -1127,7 +1127,7 @@ class PowConnectionCoordinator(
             val strategy = activeLadder().getOrElse(ladderIndex) { return }
             val nearby = regionPhase && regionPhaseBias
             val seconds = if (nearby) {
-                PowPsiphonProtocols.NEARBY_PHASE_TIMEOUT_SECONDS
+                strategy.timeoutSeconds
             } else if (regionPhase && PowRegions.egressRegion(currentSettings.exitCountryCode) != null) {
                 PowPsiphonProtocols.REGION_PHASE_TIMEOUT_SECONDS
             } else if (directPsiphon && strategy.preferredProtocols.all { it.startsWith("FRONTED-") }) {
@@ -1301,7 +1301,7 @@ class PowConnectionCoordinator(
                     val remembered = store.rememberedRegion()?.equals(regionPhaseTried, ignoreCase = true) == true
                     "Psiphon region: Automatic -> nearby ${PowRegions.name(regionPhaseTried)} ($regionPhaseTried" +
                         (if (remembered) ", remembered" else "") +
-                        ") for ${PowPsiphonProtocols.NEARBY_PHASE_TIMEOUT_SECONDS}s, then any country"
+                        ") for ${ladder.getOrNull(ladderIndex)?.timeoutSeconds ?: PowPsiphonProtocols.CHAINED_LIGHT_TIMEOUT_SECONDS}s, then any country"
                 }
                 regionPhase -> "Psiphon region: user choice ${PowRegions.name(regionPhaseTried)}"
                 else -> "Psiphon region: any country"

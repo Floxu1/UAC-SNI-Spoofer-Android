@@ -19,9 +19,12 @@ import android.net.VpnService
 import android.os.SystemClock
 import android.system.OsConstants
 import android.util.Log
+import android.view.View
+import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.uacspoofer.mobile.R
+import com.uacspoofer.mobile.ui.CountryFlagResources
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.engine.EngineMode
@@ -36,6 +39,7 @@ import com.uacspoofer.mobile.engine.tor.TorPhase
 import com.uacspoofer.mobile.engine.tor.TorTunRelayConfig
 import com.uacspoofer.mobile.engine.tor.TorStatusStore
 import com.uacspoofer.mobile.engine.pow.PowConnectionCoordinator
+import com.uacspoofer.mobile.engine.pow.PowLiveExit
 import com.uacspoofer.mobile.engine.pow.PowSocksConnectOnly
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
 import com.uacspoofer.mobile.engine.pow.PowPhase
@@ -44,6 +48,7 @@ import com.uacspoofer.mobile.engine.pow.PowCoreConfig
 import com.uacspoofer.mobile.engine.pow.PowTun2Socks
 import com.uacspoofer.mobile.engine.pow.PowTunRelayConfig
 import com.uacspoofer.mobile.location.GpsSpoofRuntime
+import com.uacspoofer.mobile.location.GpsSpoofTarget
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.mci.MciConfig
@@ -55,6 +60,7 @@ import com.uacspoofer.mobile.auto.AutoConfigBootstrapper
 import com.uacspoofer.mobile.auto.AutoRankedEntry
 import com.uacspoofer.mobile.auto.AutoStage
 import com.uacspoofer.mobile.auto.AutoStageState
+import com.uacspoofer.mobile.profiles.CountryMetadata
 import com.uacspoofer.mobile.profiles.DirectCompatProfileParser
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.profiles.ProxyProfile
@@ -82,6 +88,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
@@ -97,6 +105,7 @@ class UacVpnService : VpnService() {
     @Volatile private var healthJob: Job? = null
     @Volatile private var statsJob: Job? = null
     /** Live traffic line of the ongoing notification; see [startNotificationTraffic]. */
+    @Volatile private var lastNotifiedCountry: String? = null
     @Volatile private var notificationTrafficJob: Job? = null
     @Volatile private var notificationTrafficToken = -1L
     @Volatile private var notificationTrafficLive = false
@@ -195,6 +204,25 @@ class UacVpnService : VpnService() {
         }
         MonthlyTrafficStore.get(this)
         AutoConnectCoordinator.ensureWatching(this)
+        serviceScope.launch {
+            combine(
+                ExitIpInfoRepository.get(this@UacVpnService).state,
+                PowStatusStore.status,
+                ConnectionStateStore.state,
+            ) { _, _, connection ->
+                if (connection == ConnectionState.CONNECTED) connectedCountry()?.countryCode else null
+            }
+                .distinctUntilChanged()
+                .collect { code ->
+                    if (ConnectionStateStore.state.value != ConnectionState.CONNECTED) {
+                        lastNotifiedCountry = null
+                        return@collect
+                    }
+                    if (code == lastNotifiedCountry) return@collect
+                    lastNotifiedCountry = code
+                    updateNotification(true)
+                }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -2273,7 +2301,8 @@ class UacVpnService : VpnService() {
     private fun lanShareUpstreamPort(): Int = when {
         activeEngine.isPow -> powCoordinator.socksPort().takeIf { it > 0 } ?: PowCoreConfig.SOCKS_PORT
         activeEngine.isDirect -> directCoordinator.socksPort()
-        activeEngine.isTor -> torEngineStore.snapshot().socksPort
+        activeEngine.isTor -> torCoordinator.publicSocksPort().takeIf { it > 0 }
+            ?: torEngineStore.snapshot().socksPort
         else -> advancedSettingsStore.snapshot().socksPort
     }
 
@@ -2343,7 +2372,7 @@ class UacVpnService : VpnService() {
     private fun startForegroundNotification(connected: Boolean) {
         val notification = buildNotification(
             connectionNotificationText(connected),
-            trafficLineFor(connected),
+            trafficParts(connected),
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -2363,21 +2392,18 @@ class UacVpnService : VpnService() {
             NOTIFICATION_ID,
             buildNotification(
                 connectionNotificationText(connected),
-                trafficLineFor(connected),
+                trafficParts(connected),
             ),
         )
         if (live) startNotificationTraffic()
     }
 
-    /** The second line of a connected notification; frozen totals while paused. */
-    private fun trafficLineFor(connected: Boolean): String? {
+    /** Download on the left, upload on the right. Totals only while paused. */
+    private fun trafficParts(connected: Boolean): Pair<String, String>? {
         if (!connected) return null
         val traffic = notificationTrafficMeter.last
-        return if (VpnPauseStore.isPaused()) {
-            NotificationTrafficMeter.totalsLine(traffic)
-        } else {
-            NotificationTrafficMeter.liveLine(traffic)
-        }
+        val live = !VpnPauseStore.isPaused()
+        return NotificationTrafficMeter.downText(traffic, live) to NotificationTrafficMeter.upText(traffic, live)
     }
 
     /**
@@ -2411,7 +2437,8 @@ class UacVpnService : VpnService() {
                         )
                         val notification = buildNotification(
                             connectionNotificationText(true),
-                            NotificationTrafficMeter.liveLine(traffic),
+                            NotificationTrafficMeter.downText(traffic, true) to
+                                NotificationTrafficMeter.upText(traffic, true),
                         )
                         synchronized(notificationTrafficLock) {
                             if (notificationTrafficLive && notificationTrafficToken == token) {
@@ -2465,7 +2492,7 @@ class UacVpnService : VpnService() {
      * The app name already shows in the system header, so the status is the title and
      * [detail] (the traffic line when connected) is the text.
      */
-    private fun buildNotification(textRes: Int, detail: String? = null): Notification {
+    private fun buildNotification(textRes: Int, traffic: Pair<String, String>? = null): Notification {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -2490,11 +2517,43 @@ class UacVpnService : VpnService() {
             Intent(this, UacVpnService::class.java).setAction(ACTION_PAUSE_TOGGLE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val message = getString(textRes)
+        val engineStatus = textRes == R.string.vpn_connected_notification ||
+            textRes == R.string.proxy_connected_notification
+        val message = if (engineStatus) engineConnectedLabel() else getString(textRes)
+        val country = connectedCountryFor(textRes)
         val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_stat_vpn)
             .setContentTitle(message)
-        if (detail != null) {
+        if (country != null) {
+            val label = countryLabel(country)
+            val views = RemoteViews(packageName, R.layout.notification_vpn_status)
+            val flag = CountryFlagResources.drawableFor(country.countryCode)
+            if (flag != null) {
+                views.setImageViewResource(R.id.notification_flag, flag)
+                views.setViewVisibility(R.id.notification_flag, View.VISIBLE)
+            } else {
+                views.setViewVisibility(R.id.notification_flag, View.GONE)
+            }
+            views.setTextViewText(R.id.notification_country, label)
+            views.setContentDescription(R.id.notification_flag, label)
+            views.setTextViewText(R.id.notification_status, message)
+            val detail = traffic?.let { (down, up) -> "$down   $up" }
+            if (traffic == null) {
+                views.setViewVisibility(R.id.notification_traffic, View.GONE)
+            } else {
+                views.setViewVisibility(R.id.notification_traffic, View.VISIBLE)
+                views.setTextViewText(R.id.notification_down, traffic.first)
+                views.setTextViewText(R.id.notification_up, traffic.second)
+            }
+            val marked = country.flagEmoji?.let { "$it  $label" } ?: label
+            builder
+                .setContentTitle("$marked  ·  $message")
+                .setContentText(detail ?: message)
+                .setCustomContentView(views)
+                .setCustomBigContentView(views)
+                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+        } else if (traffic != null) {
+            val detail = "${traffic.first}   ${traffic.second}"
             builder
                 .setContentText(detail)
                 .setStyle(NotificationCompat.BigTextStyle().setBigContentTitle(message).bigText(detail))
@@ -2525,6 +2584,69 @@ class UacVpnService : VpnService() {
                 close,
             )
             .build()
+    }
+
+    private fun engineShortName(): String {
+        val engine = engineModeStore.snapshot()
+        return when {
+            engine.isTor -> "Tor"
+            engine.isPow -> "PoW"
+            engine.isDirect -> "Direct"
+            else -> "Xray"
+        }
+    }
+
+    private fun engineConnectedLabel(): String =
+        getString(R.string.notification_engine_connected, engineShortName())
+
+    /** Country shown beside the connected title. Exit IP wins once the lookup matches this session. */
+    private fun connectedCountryFor(textRes: Int): CountryMetadata? {
+        if (textRes != R.string.vpn_connected_notification && textRes != R.string.proxy_connected_notification) {
+            return null
+        }
+        return connectedCountry()
+    }
+
+    private fun connectedCountry(): CountryMetadata? {
+        val exitState = ExitIpInfoRepository.get(this).state.value
+        if (exitState.profileId == currentExitLookupId()) {
+            val fromExit = exitState.info
+                ?.let { CountryMetadata.resolve(it.countryCode, it.country) }
+                ?.takeIf { it.isKnown }
+            if (fromExit != null) return fromExit
+        }
+        val engine = engineModeStore.snapshot()
+        val raw = when {
+            engine.isPow -> PowStatusStore.status.value.exitRegion.ifBlank {
+                powEngineStore.snapshot().exitCountryCode
+            }
+            engine.isTor -> torEngineStore.snapshot().exitCountryCode
+            else -> profileStore.selectedProfile().country.countryCode
+        }
+        return CountryMetadata.resolve(raw, null).takeIf { it.isKnown }
+    }
+
+    private fun currentExitLookupId(): String {
+        val engine = engineModeStore.snapshot()
+        val powWarpOnly = engine.isPow && PowLiveExit.warpOnly
+        val exitCountry = when {
+            engine.isTor -> torEngineStore.snapshot().exitCountryCode
+            powWarpOnly -> ""
+            engine.isPow -> powEngineStore.snapshot().exitCountryCode
+            else -> ""
+        }
+        return ExitIpInfoRepository.lookupId(
+            profileId = profileStore.selectedProfile().id,
+            torEngine = engine.isTor,
+            exitCountryCode = exitCountry,
+            powEngine = engine.isPow,
+            powWarpOnly = powWarpOnly,
+        )
+    }
+
+    private fun countryLabel(country: CountryMetadata): String {
+        val persian = resources.configuration.locales[0].language.equals("fa", ignoreCase = true)
+        return GpsSpoofTarget.displayName(country.countryCode, persian).ifBlank { country.countryName }
     }
 
     fun protectSocket(fd: Int): Boolean = protectOutbound(fd)

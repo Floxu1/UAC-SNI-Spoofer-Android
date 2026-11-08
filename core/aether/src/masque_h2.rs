@@ -912,15 +912,16 @@ pub async fn run(
         if let Some(dl) = pong_deadline {
             if Instant::now() >= dl {
                 let message = format!(
-                    "HTTP/2 keepalive PONG missed after {:?}; retaining active tunnel",
-                    keepalive_timeout
+                    "HTTP/2 keepalive PONG missed after {keepalive_timeout:?}"
                 );
                 log::warn!("[h2] {message}");
-                crate::ffi::record_log(message);
-                // Cloudflare edges can carry CONNECT-IP datagrams while silently dropping
-                // HTTP/2 PING frames.  Traffic and the app health check are authoritative.
-                awaiting_pong = false;
-                pong_deadline = None;
+                crate::ffi::record_log(&message);
+                // This edge accepted the session and then stopped answering.
+                // Drop it so the caller scans another outer leg.
+                close_sender(&send_cmd_tx, &mut sender_done).await;
+                return Err(AetherError::Masque(format!(
+                    "h2 keepalive PONG missed after {keepalive_timeout:?}"
+                )));
             }
         }
 
@@ -946,11 +947,13 @@ pub async fn run(
                         log::debug!("[h2] keepalive pong received");
                     }
                     Err(e) => {
-                        let message = format!("HTTP/2 keepalive PONG failed: {e}; retaining active tunnel");
+                        let message = format!("HTTP/2 keepalive PONG failed: {e}");
                         log::warn!("[h2] {message}");
-                        crate::ffi::record_log(message);
-                        awaiting_pong = false;
-                        pong_deadline = None;
+                        crate::ffi::record_log(&message);
+                        close_sender(&send_cmd_tx, &mut sender_done).await;
+                        return Err(AetherError::Masque(format!(
+                            "h2 keepalive PONG failed: {e}"
+                        )));
                     }
                 }
             }

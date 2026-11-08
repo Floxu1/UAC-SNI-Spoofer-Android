@@ -75,14 +75,46 @@ class NotificationTrafficMeter {
     }
 
     companion object {
-        /** "↓ 372.75 MB | 11.02 KB/s   ↑ 40.44 MB | 2.94 KB/s" */
-        fun liveLine(t: NotificationTraffic): String =
-            "\u2193 ${formatBytes(t.downloadBytes)} | ${formatSpeed(t.downloadBytesPerSecond)}" +
-                "   \u2191 ${formatBytes(t.uploadBytes)} | ${formatSpeed(t.uploadBytesPerSecond)}"
+        /** One line, download group then upload group. Units stay short so the row cannot wrap. */
+        fun liveLine(t: NotificationTraffic): String = "${downText(t, true)}   ${upText(t, true)}"
 
-        /** Totals only, for the paused state: "↓ 372.75 MB   ↑ 40.44 MB" */
-        fun totalsLine(t: NotificationTraffic): String =
-            "\u2193 ${formatBytes(t.downloadBytes)}   \u2191 ${formatBytes(t.uploadBytes)}"
+        /** Totals only, for the paused state. */
+        fun totalsLine(t: NotificationTraffic): String = "${downText(t, false)}   ${upText(t, false)}"
+
+        fun downText(t: NotificationTraffic, withSpeed: Boolean): String = sideText(
+            arrow = "\u2193",
+            bytes = t.downloadBytes,
+            bytesPerSecond = t.downloadBytesPerSecond,
+            withSpeed = withSpeed,
+        )
+
+        fun upText(t: NotificationTraffic, withSpeed: Boolean): String = sideText(
+            arrow = "\u2191",
+            bytes = t.uploadBytes,
+            bytesPerSecond = t.uploadBytesPerSecond,
+            withSpeed = withSpeed,
+        )
+
+        private fun sideText(arrow: String, bytes: Long, bytesPerSecond: Long, withSpeed: Boolean): String {
+            val total = compact(bytes.toDouble(), BYTE_UNITS)
+            if (!withSpeed) return "$arrow $total"
+            return "$arrow $total  ${compact(bytesPerSecond.toDouble(), SPEED_UNITS)}"
+        }
+
+        /** At most 4 digits: 45.5M, 194M, 11K/s, 1023B. Rolls to the next unit at 1000. */
+        private fun compact(value: Double, units: Array<String>): String {
+            var amount = value.coerceAtLeast(0.0)
+            var unit = 0
+            while (unit < units.lastIndex && amount >= 1000.0) {
+                amount /= 1024.0
+                unit++
+            }
+            val number = when {
+                unit == 0 || amount >= 100.0 -> String.format(Locale.US, "%.0f", amount)
+                else -> String.format(Locale.US, "%.1f", amount).removeSuffix(".0")
+            }
+            return number + units[unit]
+        }
 
         fun formatBytes(bytes: Long): String {
             val b = bytes.coerceAtLeast(0L).toDouble()
@@ -102,5 +134,8 @@ class NotificationTrafficMeter {
                 else -> String.format(Locale.US, "%.2f MB/s", b / (1024 * 1024))
             }
         }
+
+        private val BYTE_UNITS = arrayOf("B", "K", "M", "G")
+        private val SPEED_UNITS = arrayOf("B/s", "K/s", "M/s", "G/s")
     }
 }

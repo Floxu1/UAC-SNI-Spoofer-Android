@@ -67,6 +67,7 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.VideocamOff
+import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.Icon
@@ -94,6 +95,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
@@ -118,6 +120,7 @@ import com.uacspoofer.mobile.logging.CrashReportStore
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
+import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
 import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.vpn.AutoConnectCoordinator
@@ -180,6 +183,7 @@ internal fun SettingsScreen(
         ) {
             item {
                 SettingsGroup(homeText("Connection & Network Settings", "تنظیمات اتصال و شبکه")) {
+                    ConnectionModeSettingsRow(showDivider = true)
                     AutoConnectSettingsRow(showDivider = true)
                     LanShareSettingsRow(showDivider = true)
                     QuicBlockSettingsRow(showDivider = true)
@@ -240,8 +244,8 @@ internal fun SettingsScreen(
                             icon = Icons.Outlined.Tune,
                             title = homeText("Xray settings", "تنظیمات Xray"),
                             summary = homeText(
-                                "Connection mode, DNS, TUN and transport",
-                                "حالت اتصال، DNS، TUN و انتقال",
+                                "DNS, TUN and transport",
+                                "DNS، TUN و انتقال",
                             ),
                             isPersian = isPersian,
                             showDivider = true,
@@ -290,6 +294,127 @@ internal fun SettingsScreen(
             }
         }
     }
+}
+
+@Composable
+private fun ConnectionModeSettingsRow(showDivider: Boolean) {
+    val context = LocalContext.current
+    val store = remember(context) { AdvancedSettingsStore(context) }
+    val advanced by store.state.collectAsStateWithLifecycle()
+    val proxy = advanced.connectionMode == CONNECTION_MODE_PROXY
+    var open by remember { mutableStateOf(false) }
+    val modes = listOf(
+        PowMenuChoice(
+            CONNECTION_MODE_TUNNEL,
+            homeText("Tunnel (VPN)", "تونل (VPN)"),
+            homeText("Every app on the phone goes through the VPN.", "همه‌ی برنامه‌های گوشی از VPN رد می‌شن."),
+        ),
+        PowMenuChoice(
+            CONNECTION_MODE_PROXY,
+            homeText("Proxy only", "فقط پروکسی"),
+            homeText("Only apps you set up yourself use it.", "فقط برنامه‌هایی که خودت تنظیم کنی ازش رد می‌شن."),
+        ),
+    )
+    val current = modes.firstOrNull { it.id == advanced.connectionMode } ?: modes.first()
+    Column(modifier = Modifier.fillMaxWidth()) {
+        SettingsNavRow(
+            icon = Icons.Outlined.VpnKey,
+            title = homeText("Connection mode", "حالت اتصال"),
+            summary = if (proxy) {
+                homeText("Port ${advanced.socksPort} · Xray, Tor and PoW", "پورت ${advanced.socksPort} · Xray، Tor و PoW")
+            } else {
+                homeText("VPN for every app · Xray, Tor and PoW", "VPN برای همه‌ی برنامه‌ها · Xray، Tor و PoW")
+            },
+            isPersian = LocalHomePersian.current,
+            showDivider = false,
+            onClick = { open = true },
+        )
+        if (proxy) {
+            Column(
+                modifier = Modifier.padding(start = 50.dp, end = 12.dp, bottom = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    homeText(
+                        "Set apps to 127.0.0.1 and this port. Applies to the next connection.",
+                        "برنامه‌ها را روی 127.0.0.1 و این پورت تنظیم کن. از اتصال بعدی اعمال می‌شود.",
+                    ),
+                    color = UacColors.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                )
+                SocksPortField(advanced.socksPort) { port ->
+                    store.update { it.copy(socksPort = port) }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            homeText("UDP", "UDP"),
+                            color = UacColors.TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            homeText("Needed for voice calls and games.", "برای تماس صوتی و بازی‌ها لازمه."),
+                            color = UacColors.TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Switch(
+                        checked = advanced.socksUdp,
+                        onCheckedChange = { enabled -> store.update { it.copy(socksUdp = enabled) } },
+                        colors = SwitchDefaults.colors(
+                            checkedTrackColor = UacColors.DisconnectedBlue,
+                            checkedThumbColor = Color.White,
+                        ),
+                    )
+                }
+            }
+        }
+        if (showDivider) SettingsHairline()
+    }
+    if (open) {
+        PowChoiceSheet(
+            title = homeText("How apps use the connection", "برنامه‌ها چطور از اتصال استفاده کنن"),
+            choices = modes,
+            selectedId = current.id,
+            accent = UacColors.DisconnectedBlue,
+            onSelect = { id ->
+                if (id != advanced.connectionMode) store.update { it.copy(connectionMode = id) }
+            },
+            onDismiss = { open = false },
+        )
+    }
+}
+
+@Composable
+private fun SocksPortField(value: Int, onValid: (Int) -> Unit) {
+    var text by remember(value) { mutableStateOf(value.toString()) }
+        val valid = text.toIntOrNull()?.let { it in 1024..65535 } == true
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            text = raw.filter(Char::isDigit).take(5)
+            text.toIntOrNull()?.takeIf { it in 1024..65535 && it != value }?.let(onValid)
+        },
+        modifier = Modifier.fillMaxWidth(),
+        label = { Text(homeText("SOCKS port", "پورت SOCKS"), fontSize = 11.sp) },
+        singleLine = true,
+        isError = !valid,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = Color.White,
+            unfocusedTextColor = Color.White,
+            focusedBorderColor = UacColors.DisconnectedBlue,
+            unfocusedBorderColor = Color.White.copy(alpha = 0.14f),
+            focusedLabelColor = UacColors.TextSecondary,
+            unfocusedLabelColor = UacColors.TextSecondary,
+            cursorColor = UacColors.DisconnectedBlue,
+        ),
+    )
 }
 
 @Composable

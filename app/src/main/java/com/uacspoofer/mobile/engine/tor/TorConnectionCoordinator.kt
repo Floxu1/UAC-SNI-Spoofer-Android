@@ -43,6 +43,15 @@ class TorConnectionCoordinator(
     @Volatile private var slowTicks = 0
     @Volatile private var lastSlowSwapAt = 0L
     @Volatile private var connectedAt = 0L
+    @Volatile private var sessionSocksPort = 0
+
+    fun publicSocksPort(): Int = sessionSocksPort
+
+    private fun withSessionPort(settings: TorEngineSettings): TorEngineSettings {
+        val port = sessionSocksPort
+        if (port !in 1024..65535 || port == settings.socksPort) return settings
+        return settings.copy(socksPort = port).validated()
+    }
     @Volatile private var lastTunBytes = -1L
 
     suspend fun connect(
@@ -50,7 +59,13 @@ class TorConnectionCoordinator(
         establishTun: (AdvancedSettingsData) -> ParcelFileDescriptor?,
     ) {
         TorLiveFlow.reset()
-        val torSettings = engineStore.snapshot()
+        val stored = engineStore.snapshot()
+        sessionSocksPort = if (settings.connectionMode == CONNECTION_MODE_PROXY) {
+            settings.socksPort
+        } else {
+            stored.socksPort
+        }
+        val torSettings = withSessionPort(stored)
         val networkKey = currentNetworkKey()
         sessionNetworkKey = networkKey
         sessionFingerprint = runCatching { fingerprintResolver.captureAdaptive() }.getOrNull()
@@ -197,7 +212,7 @@ class TorConnectionCoordinator(
      * Returns false only after repeated failed SOCKS checks.
      */
     suspend fun watchdogTick(screenOn: Boolean): Boolean = withContext(Dispatchers.IO) {
-        val settings = engineStore.snapshot()
+        val settings = withSessionPort(engineStore.snapshot())
         if (!settings.watchdog || !screenOn || !daemon.isRunning()) return@withContext true
         checkNetworkChange()
         val inGrace = connectedAt == 0L || System.currentTimeMillis() - connectedAt < WATCHDOG_GRACE_MS
@@ -363,7 +378,7 @@ class TorConnectionCoordinator(
         settings.exitCountryCode.ifBlank { if (settings.fastExit) "fast:" + TorExitCountry.FAST_EXIT_CODES.joinToString(",") else "auto" }
 
     private fun liveExitSettings(settings: TorEngineSettings): TorEngineSettings {
-        val validated = settings.validated()
+        val validated = withSessionPort(settings).validated()
         return if (validated.exitCountryCode.isNotEmpty()) {
             validated.copy(exitStrict = true)
         } else {
@@ -389,6 +404,7 @@ class TorConnectionCoordinator(
         daemon.stop()
         stopFragmentProxy()
         connectedAt = 0L
+        sessionSocksPort = 0
         watchdogFailures = 0
         if (TorLiveFlow.snapshot.value.stage(TorFlowStageId.WATCHDOG).state == TorFlowState.RUNNING) {
             TorLiveFlow.done(TorFlowStageId.WATCHDOG, "stopped (disconnected)")

@@ -53,10 +53,11 @@ internal object PowPsiphonProtocols {
         "208.67.220.220:5353",
     )
 
-    const val REGION_PHASE_TIMEOUT_SECONDS = 25
+    // Cloudflare's front answers a ClientHello that names this host and
+    // ignores one with an empty server name. Signed entries clear SNI.
+    private const val MEEK_FRONT_HOST = "cdnjs.cloudflare.com"
 
-    // Automatic exit: a short first try in a nearby country, then any country.
-    const val NEARBY_PHASE_TIMEOUT_SECONDS = 12
+    const val REGION_PHASE_TIMEOUT_SECONDS = 25
 
     // The first light attempt behind WARP. TLS-OSSH/OSSH/SSH either finish
     // through the WARP SOCKS hop quickly or not at all.
@@ -102,6 +103,7 @@ internal object PowPsiphonProtocols {
             config.put("LimitTunnelProtocols", JSONArray(FRONTED))
             config.put("ConnectionWorkerPoolSize", 12)
             config.put("NetworkLatencyMultiplier", 1.5)
+            config.useCloudflareMeekFront()
         },
         PowPsiphonStrategy(
             name = "F",
@@ -109,9 +111,12 @@ internal object PowPsiphonProtocols {
             timeoutSeconds = 28,
             preferredProtocols = FAST_DIRECT,
         ) { config ->
+            // Hard cap, not only a head start. A wider limit shares one
+            // HTTP/2 session with meek and dozens of SSH handshakes.
+            config.put("LimitTunnelProtocols", JSONArray(FAST_DIRECT))
             config.put("InitialLimitTunnelProtocols", JSONArray(FAST_DIRECT))
             config.put("InitialLimitTunnelProtocolsCandidateCount", 16)
-            config.put("ConnectionWorkerPoolSize", 16)
+            config.put("ConnectionWorkerPoolSize", 6)
             config.put("NetworkLatencyMultiplier", 1.0)
         },
     )
@@ -200,11 +205,10 @@ internal object PowPsiphonProtocols {
         config.put("EstablishTunnelTimeoutSeconds", strategy.timeoutSeconds)
         if (!preferredRegion.isNullOrBlank()) {
             config.put("EgressRegion", preferredRegion)
-            if (regionBias) {
-                // Nearby-country head start for Automatic: keep the
-                // strategy's protocol preference, give it a short window.
-                config.put("EstablishTunnelTimeoutSeconds", NEARBY_PHASE_TIMEOUT_SECONDS)
-            } else {
+            // Nearby head start keeps the strategy timeout (20s for F behind
+            // WARP) and the protocol cap set above. An explicit country gets
+            // a longer window and may use any protocol that country serves.
+            if (!regionBias) {
                 config.put("EstablishTunnelTimeoutSeconds", REGION_PHASE_TIMEOUT_SECONDS)
                 config.remove("InitialLimitTunnelProtocols")
                 config.remove("InitialLimitTunnelProtocolsCandidateCount")
@@ -233,15 +237,8 @@ internal object PowPsiphonProtocols {
             config.put("DNSResolverPreferAlternateServerProbability", 0)
             config.remove("DNSResolverPreferredAlternateServers")
             if (meekOnly) {
-                // The Cloudflare front answers a normal ClientHello that names
-                // cdnjs.cloudflare.com and ignores one with no server name.
-                // The signed server entries disable SNI. Ask the tunnel core
-                // to put that name back on the handshake.
-                config.put("MeekTransformedHostName", "cdnjs.cloudflare.com")
-                config.put("MeekSNIServerName", "cdnjs.cloudflare.com")
+                config.useCloudflareMeekFront()
             }
-        } else {
-            config.put("LimitTunnelProtocols", JSONArray(CHAINABLE))
         }
         val preference = config.optJSONArray("InitialLimitTunnelProtocols")
         if (preference != null) {
@@ -256,5 +253,10 @@ internal object PowPsiphonProtocols {
             }
         }
         return config.toString()
+    }
+
+    private fun JSONObject.useCloudflareMeekFront() {
+        put("MeekTransformedHostName", MEEK_FRONT_HOST)
+        put("MeekSNIServerName", MEEK_FRONT_HOST)
     }
 }

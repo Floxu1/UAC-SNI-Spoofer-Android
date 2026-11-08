@@ -628,11 +628,19 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             } else {
                 homeText("Device VPN is routing through UAC PoW", "VPN دستگاه از UAC PoW می‌گذره")
             }
-            engineMode.isDirect -> homeText(
-                "Direct, no server · IP-blocked sites stay unreachable",
-                "مستقیم و بدون سرور · سایت‌هایی که IPشون بسته‌ست باز نمی‌شن",
-            )
-            else -> homeText("Your connection is secure", "اتصال شما امنه")
+            engineMode.isDirect -> if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
+                homeText("Local SOCKS only · no device VPN", "فقط SOCKS محلی · بدون VPN دستگاه")
+            } else {
+                homeText(
+                    "Direct, no server · IP-blocked sites stay unreachable",
+                    "مستقیم و بدون سرور · سایت‌هایی که IPشون بسته‌ست باز نمی‌شن",
+                )
+            }
+            else -> if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
+                homeText("Local SOCKS only · no device VPN", "فقط SOCKS محلی · بدون VPN دستگاه")
+            } else {
+                homeText("Your connection is secure", "اتصال شما امنه")
+            }
         }
         ConnectionState.DISCONNECTING -> homeText("Closing the secure tunnel", "در حال بستن اتصال امن")
         ConnectionState.ERROR -> when {

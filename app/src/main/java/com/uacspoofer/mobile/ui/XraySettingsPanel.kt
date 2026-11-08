@@ -27,7 +27,6 @@ import androidx.compose.material.icons.outlined.SettingsEthernet
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -55,8 +54,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
-import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
-import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
 import com.uacspoofer.mobile.ui.theme.UacColors
 
 /**
@@ -97,12 +94,6 @@ private fun XraySettingsPanel() {
     val onLabel = homeText("on", "روشن")
     val offLabel = homeText("off", "خاموش")
     val onOff = { on: Boolean -> if (on) onLabel else offLabel }
-    val proxy = s.connectionMode == CONNECTION_MODE_PROXY
-
-    val modes = listOf(
-        PowMenuChoice(CONNECTION_MODE_TUNNEL, homeText("Tunnel (VPN)", "تونل (VPN)"), homeText("Every app on the phone goes through the VPN.", "همه‌ی برنامه‌های گوشی از VPN رد می‌شن.")),
-        PowMenuChoice(CONNECTION_MODE_PROXY, homeText("Proxy only", "فقط پروکسی"), homeText("Only apps you set up yourself use it.", "فقط برنامه‌هایی که خودت تنظیم کنی ازش رد می‌شن.")),
-    )
     val mtus = listOf(
         PowMenuChoice("1280", homeLtr("1280"), homeText("Safest, works everywhere.", "مطمئن‌ترین؛ همه‌جا کار می‌کنه.")),
         PowMenuChoice("1350", homeLtr("1350"), homeText("A little faster.", "یه کم سریع‌تر.")),
@@ -132,41 +123,6 @@ private fun XraySettingsPanel() {
         Column(verticalArrangement = Arrangement.spacedBy(PowGap)) {
             XrayLiveFlowButton(accent = accent, onClick = { flowVisible = true })
             XrayLiveFlowDialog(visible = flowVisible, onDismissRequest = { flowVisible = false })
-
-            XraySection(
-                icon = Icons.Outlined.Public,
-                title = homeText("Connection", "اتصال"),
-                summary = (modes.firstOrNull { it.id == s.connectionMode }?.title ?: "") +
-                    if (proxy) homeText(" · port ", " · پورت ") + s.socksPort else "",
-                accent = accent,
-                initiallyExpanded = true,
-            ) {
-                PowPickerRow(
-                    icon = Icons.Outlined.VpnKey,
-                    label = homeText("Connection mode", "حالت اتصال"),
-                    sheetTitle = homeText("How apps use the connection", "برنامه‌ها چطور از اتصال استفاده کنن"),
-                    choices = modes,
-                    selectedId = s.connectionMode,
-                    accent = accent,
-                    onSelect = { id -> save { it.copy(connectionMode = id) } },
-                )
-                if (proxy) {
-                    PowRowDivider()
-                    Column(modifier = Modifier.padding(horizontal = PowPad, vertical = 8.dp)) {
-                        PowHint(homeText("Set apps to 127.0.0.1 and this port.", "برنامه‌ها رو روی 127.0.0.1 و این پورت تنظیم کن."))
-                        XrayIntField(homeText("SOCKS port", "پورت SOCKS"), s.socksPort, 1..65535, Modifier.fillMaxWidth().padding(top = 6.dp)) { v -> save { it.copy(socksPort = v) } }
-                    }
-                    PowRowDivider()
-                    PowSwitchRow(
-                        icon = Icons.Outlined.SettingsEthernet,
-                        title = homeText("UDP", "UDP"),
-                        subtitle = homeText("Needed for voice calls and games.", "برای تماس صوتی و بازی‌ها لازمه."),
-                        checked = s.socksUdp,
-                        accent = accent,
-                        onCheckedChange = { v -> save { it.copy(socksUdp = v) } },
-                    )
-                }
-            }
 
             XraySection(
                 icon = Icons.Outlined.Speed,
