@@ -1,17 +1,13 @@
 package com.uacspoofer.mobile.logging
 
 import android.content.ActivityNotFoundException
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import androidx.core.content.FileProvider
 import com.uacspoofer.mobile.BuildConfig
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeStore
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -22,25 +18,6 @@ import java.util.Locale
  */
 object LogExport {
     const val DEVELOPER_TELEGRAM = "Beh50roocentzuac"
-    private const val CACHE_DIR = "logs"
-
-    /** Telegram and its common forks, official app first. */
-    private val TELEGRAM_PACKAGES = listOf(
-        "org.telegram.messenger",
-        "org.telegram.messenger.web",
-        "org.telegram.messenger.beta",
-        "org.thunderdog.challegram",
-        "org.telegram.plus",
-        "tw.nekomimi.nekogram",
-        "xyz.nextalone.nagram",
-        "org.forkgram.messenger",
-        "it.belloworld.mercurygram",
-        "com.exteragram.messenger",
-        "app.nicegram",
-        "org.telegram.mdgram",
-        "ir.ilmili.telegraph",
-        "org.telegram.bgram",
-    )
 
     data class Snapshot(val text: String, val lineCount: Int, val bytes: Long, val fileName: String)
 
@@ -96,70 +73,31 @@ object LogExport {
         false
     }
 
-    private fun writeCache(context: Context, snapshot: Snapshot): File {
-        val dir = File(context.cacheDir, CACHE_DIR).apply { mkdirs() }
-        dir.listFiles()?.forEach { it.delete() }
-        return File(dir, snapshot.fileName).apply { writeText(snapshot.text, Charsets.UTF_8) }
-    }
-
-    enum class TelegramResult { TELEGRAM, CHOOSER, LINK, FAILED }
-
     /**
-     * Android cannot pre-pick a Telegram contact for a file, so the file goes to
-     * Telegram's own chat picker and the developer id is put on the clipboard.
+     * Opens https://t.me/ in the user's default browser. The browser category is
+     * resolved by the system, so this never names or looks up a Telegram package.
      */
-    fun sendToTelegram(context: Context, snapshot: Snapshot): TelegramResult {
-        copyDeveloperId(context)
-        val uri = runCatching {
-            val file = writeCache(context, snapshot)
-            FileProvider.getUriForFile(context, "${context.packageName}.logfiles", file)
-        }.getOrElse {
-            AppLogRepository.warning(LogSource.APP, "Log file for Telegram failed", it)
-            return if (openDeveloperChat(context)) TelegramResult.LINK else TelegramResult.FAILED
-        }
-        fun sendIntent(pkg: String?) = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, snapshot.fileName)
-            clipData = ClipData.newRawUri(snapshot.fileName, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (pkg != null) setPackage(pkg)
-        }
-        for (pkg in TELEGRAM_PACKAGES) {
-            if (!isInstalled(context, pkg)) continue
-            try {
-                context.startActivity(sendIntent(pkg))
-                return TelegramResult.TELEGRAM
-            } catch (_: ActivityNotFoundException) {
-            } catch (_: SecurityException) {
-            }
+    fun openDeveloperInBrowser(context: Context): Boolean {
+        val page = Uri.parse("https://t.me/$DEVELOPER_TELEGRAM")
+        val browser = Intent(Intent.ACTION_VIEW, page).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            selector = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_BROWSER)
         }
         return try {
-            val chooser = Intent.createChooser(sendIntent(null), "UAC log").apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(chooser)
-            TelegramResult.CHOOSER
-        } catch (_: Exception) {
-            if (openDeveloperChat(context)) TelegramResult.LINK else TelegramResult.FAILED
+            context.startActivity(browser)
+            true
+        } catch (_: ActivityNotFoundException) {
+            openPage(context, page)
+        } catch (_: SecurityException) {
+            openPage(context, page)
         }
     }
 
-    private fun isInstalled(context: Context, pkg: String): Boolean = runCatching {
-        context.packageManager.getPackageInfo(pkg, 0)
-        true
-    }.getOrDefault(false)
-
-    private fun copyDeveloperId(context: Context) {
-        runCatching {
-            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("Telegram", "@$DEVELOPER_TELEGRAM"))
-        }
-    }
-
-    private fun openDeveloperChat(context: Context): Boolean = try {
+    private fun openPage(context: Context, page: Uri): Boolean = try {
         context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/$DEVELOPER_TELEGRAM"))
+            Intent(Intent.ACTION_VIEW, page)
+                .addCategory(Intent.CATEGORY_BROWSABLE)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
         true

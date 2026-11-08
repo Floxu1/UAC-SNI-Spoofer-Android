@@ -21,21 +21,6 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
-        <!-- Telegram apps, for sending the log file to the developer. -->
-        <package android:name="org.telegram.messenger" />
-        <package android:name="org.telegram.messenger.web" />
-        <package android:name="org.telegram.messenger.beta" />
-        <package android:name="org.thunderdog.challegram" />
-        <package android:name="org.telegram.plus" />
-        <package android:name="tw.nekomimi.nekogram" />
-        <package android:name="xyz.nextalone.nagram" />
-        <package android:name="org.forkgram.messenger" />
-        <package android:name="it.belloworld.mercurygram" />
-        <package android:name="com.exteragram.messenger" />
-        <package android:name="app.nicegram" />
-        <package android:name="org.telegram.mdgram" />
-        <package android:name="ir.ilmili.telegraph" />
-        <package android:name="org.telegram.bgram" />
     </queries>
 
     <application
@@ -108,16 +93,6 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
-
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.logfiles"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/log_file_paths" />
-        </provider>
 
         <receiver
             android:name=".vpn.BootConnectReceiver"

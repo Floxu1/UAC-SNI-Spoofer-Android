@@ -65,15 +65,8 @@ internal fun LogExportSheet(onDismiss: () -> Unit) {
 
     val savedMsg = homeText("Log file saved", "فایل لاگ ذخیره شد")
     val saveFailedMsg = homeText("Couldn't save the file", "ذخیره نشد، دوباره امتحان کن")
-    val tgHint = homeText(
-        "Developer id copied. Search it in Telegram and send the file.",
-        "آیدی سازنده کپی شد. توی تلگرام جستجوش کن و فایل رو براش بفرست",
-    )
-    val tgLinkHint = homeText(
-        "Telegram not found. Developer id copied.",
-        "تلگرام پیدا نشد. آیدی سازنده کپی شد",
-    )
-    val tgFailMsg = homeText("Couldn't open Telegram", "تلگرام باز نشد")
+    val tgOpened = homeText("Opened in the browser", "در مرورگر باز شد")
+    val tgFailMsg = homeText("Couldn't open the browser", "مرورگر باز نشد")
 
     fun close() {
         scope.launch { sheetState.hide() }.invokeOnCompletion {
@@ -161,19 +154,13 @@ internal fun LogExportSheet(onDismiss: () -> Unit) {
                     LogExportOption(
                         icon = Icons.AutoMirrored.Outlined.Send,
                         tint = TelegramBlue,
-                        title = homeText("Send to developer on Telegram", "ارسال به تلگرام سازنده"),
+                        title = homeText("Open Telegram in the browser", "باز کردن تلگرام در مرورگر"),
                         hint = "@${LogExport.DEVELOPER_TELEGRAM}",
                         hintLtr = true,
                         onClick = {
-                            val result = LogExport.sendToTelegram(context, snapshot)
-                            val msg = when (result) {
-                                LogExport.TelegramResult.TELEGRAM,
-                                LogExport.TelegramResult.CHOOSER -> tgHint
-                                LogExport.TelegramResult.LINK -> tgLinkHint
-                                LogExport.TelegramResult.FAILED -> tgFailMsg
-                            }
-                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                            if (result != LogExport.TelegramResult.FAILED) close()
+                            val opened = LogExport.openDeveloperInBrowser(context)
+                            Toast.makeText(context, if (opened) tgOpened else tgFailMsg, Toast.LENGTH_LONG).show()
+                            if (opened) close()
                         },
                     )
                 }
