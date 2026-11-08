@@ -12,8 +12,10 @@ class NotificationTrafficMeterTest {
             downloadBytesPerSecond = (11.02 * 1024).toLong(),
             uploadBytesPerSecond = (2.94 * 1024).toLong(),
         )
-        assertEquals("\u2193 372.75 MB | 11.02 KB/s   \u2191 40.44 MB | 2.94 KB/s", NotificationTrafficMeter.liveLine(t))
-        assertEquals("\u2193 372.75 MB   \u2191 40.44 MB", NotificationTrafficMeter.totalsLine(t))
+        assertEquals("\u2193 373M  11K/s   \u2191 40.4M  2.9K/s", NotificationTrafficMeter.liveLine(t))
+        assertEquals("\u2193 373M   \u2191 40.4M", NotificationTrafficMeter.totalsLine(t))
+        assertEquals("\u2193 373M  11K/s", NotificationTrafficMeter.downText(t, true))
+        assertEquals("\u2191 40.4M  2.9K/s", NotificationTrafficMeter.upText(t, true))
     }
 
     @Test

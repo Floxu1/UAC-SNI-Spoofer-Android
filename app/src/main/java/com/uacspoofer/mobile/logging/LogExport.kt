@@ -1,8 +1,6 @@
 package com.uacspoofer.mobile.logging
 
-import android.content.ActivityNotFoundException
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import com.uacspoofer.mobile.BuildConfig
@@ -12,13 +10,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * Turns the in-memory live log into a plain .txt file the user can save
- * or hand to the developer on Telegram.
- */
+/** Turns the in-memory live log into a plain .txt file the user can save. */
 object LogExport {
-    const val DEVELOPER_TELEGRAM = "Beh50roocentzuac"
-
     data class Snapshot(val text: String, val lineCount: Int, val bytes: Long, val fileName: String)
 
     fun snapshot(context: Context): Snapshot {
@@ -70,38 +63,6 @@ object LogExport {
         true
     }.getOrElse {
         AppLogRepository.warning(LogSource.APP, "Log export failed", it)
-        false
-    }
-
-    /**
-     * Opens https://t.me/ in the user's default browser. The browser category is
-     * resolved by the system, so this never names or looks up a Telegram package.
-     */
-    fun openDeveloperInBrowser(context: Context): Boolean {
-        val page = Uri.parse("https://t.me/$DEVELOPER_TELEGRAM")
-        val browser = Intent(Intent.ACTION_VIEW, page).apply {
-            addCategory(Intent.CATEGORY_BROWSABLE)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            selector = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_BROWSER)
-        }
-        return try {
-            context.startActivity(browser)
-            true
-        } catch (_: ActivityNotFoundException) {
-            openPage(context, page)
-        } catch (_: SecurityException) {
-            openPage(context, page)
-        }
-    }
-
-    private fun openPage(context: Context, page: Uri): Boolean = try {
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW, page)
-                .addCategory(Intent.CATEGORY_BROWSABLE)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-        true
-    } catch (_: Exception) {
         false
     }
 }

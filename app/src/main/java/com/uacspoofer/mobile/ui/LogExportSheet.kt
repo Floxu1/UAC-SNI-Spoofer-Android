@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.ChevronLeft
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Description
@@ -51,9 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val TelegramBlue = Color(0xFF2AABEE)
-
-/** Small sheet on the log screen: save the log as .txt or send it to the developer. */
+/** Small sheet on the log screen: save the log as a .txt file. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun LogExportSheet(onDismiss: () -> Unit) {
@@ -65,8 +62,6 @@ internal fun LogExportSheet(onDismiss: () -> Unit) {
 
     val savedMsg = homeText("Log file saved", "فایل لاگ ذخیره شد")
     val saveFailedMsg = homeText("Couldn't save the file", "ذخیره نشد، دوباره امتحان کن")
-    val tgOpened = homeText("Opened in the browser", "در مرورگر باز شد")
-    val tgFailMsg = homeText("Couldn't open the browser", "مرورگر باز نشد")
 
     fun close() {
         scope.launch { sheetState.hide() }.invokeOnCompletion {
@@ -149,19 +144,6 @@ internal fun LogExportSheet(onDismiss: () -> Unit) {
                         title = homeText("Save file", "ذخیره فایل"),
                         hint = homeText("Pick where to keep it", "هر جا خواستی نگهش دار"),
                         onClick = { saver.launch(snapshot.fileName) },
-                    )
-                    PowRowDivider()
-                    LogExportOption(
-                        icon = Icons.AutoMirrored.Outlined.Send,
-                        tint = TelegramBlue,
-                        title = homeText("Open Telegram in the browser", "باز کردن تلگرام در مرورگر"),
-                        hint = "@${LogExport.DEVELOPER_TELEGRAM}",
-                        hintLtr = true,
-                        onClick = {
-                            val opened = LogExport.openDeveloperInBrowser(context)
-                            Toast.makeText(context, if (opened) tgOpened else tgFailMsg, Toast.LENGTH_LONG).show()
-                            if (opened) close()
-                        },
                     )
                 }
 
