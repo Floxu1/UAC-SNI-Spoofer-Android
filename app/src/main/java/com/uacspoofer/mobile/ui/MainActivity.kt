@@ -31,7 +31,6 @@ import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
-import com.uacspoofer.mobile.update.AppUpdateManager
 import com.uacspoofer.mobile.vpn.AutoConnectCoordinator
 import com.uacspoofer.mobile.vpn.AutoConnectOrigin
 import com.uacspoofer.mobile.vpn.ConnectionMetricsStore
@@ -131,11 +130,6 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleQuickTileIntent(intent)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        AppUpdateManager.resumePendingInstall(this)
     }
 
     private suspend fun runForegroundPingLoop() = coroutineScope {

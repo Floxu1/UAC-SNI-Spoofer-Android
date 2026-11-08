@@ -1,6 +1,5 @@
 package com.uacspoofer.mobile.ui
 
-import android.app.Activity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -105,7 +104,6 @@ import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
 import com.uacspoofer.mobile.ui.theme.colorsFor
 import com.uacspoofer.mobile.update.AppRelease
 import com.uacspoofer.mobile.update.AppUpdateManager
-import com.uacspoofer.mobile.update.InstallLaunchResult
 import com.uacspoofer.mobile.update.UpdateCheckResult
 import com.uacspoofer.mobile.update.UpdateUiState
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -137,7 +135,6 @@ fun MainScreen(
     val sniMakerController = remember(context.applicationContext) { SniMakerController(context) }
     val routeSpeedTestController = remember(context.applicationContext) { RouteSpeedTestController.get(context) }
     val updateManager = remember(context.applicationContext) { AppUpdateManager(context.applicationContext) }
-    val activity = context as? Activity
     var selectedDestination by rememberSaveable { mutableStateOf(DrawerDestination.HOME) }
     // Where Back from PoW settings returns: Settings when opened from there, else the dashboard.
     var powSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
@@ -208,27 +205,19 @@ fun MainScreen(
     }
     val beginUpdate: (AppRelease) -> Unit = { release ->
         if (updateState !is UpdateUiState.Downloading) {
-            if (activity == null) {
-                updateState = UpdateUiState.Error("Android installer is unavailable", release)
+            drawerScope.launch {
                 updateDialogVisible = true
-            } else {
-                drawerScope.launch {
-                    updateDialogVisible = true
-                    updateState = UpdateUiState.Downloading(release, 0)
-                    updateState = try {
-                        when (
-                            updateManager.downloadAndInstall(activity, release) { progress ->
-                                updateState = UpdateUiState.Downloading(release, progress)
-                            }
-                        ) {
-                            InstallLaunchResult.INSTALLER_OPENED ->
-                                UpdateUiState.Ready(release, "Android installer opened. Confirm the update to finish.")
-                            InstallLaunchResult.PERMISSION_REQUESTED ->
-                                UpdateUiState.Ready(release, "Allow installs from this app; the installer will open when you return.")
-                        }
-                    } catch (error: Throwable) {
-                        UpdateUiState.Error(error.message ?: "The update could not be downloaded", release)
+                updateState = UpdateUiState.Downloading(release, 0)
+                updateState = try {
+                    updateManager.downloadAndInstall(release) { progress ->
+                        updateState = UpdateUiState.Downloading(release, progress)
                     }
+                    UpdateUiState.Ready(
+                        release,
+                        "Download finished. Tap the download notification to install.",
+                    )
+                } catch (error: Throwable) {
+                    UpdateUiState.Error(error.message ?: "The update could not be downloaded", release)
                 }
             }
         }

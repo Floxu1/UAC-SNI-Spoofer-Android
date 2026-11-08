@@ -1,13 +1,10 @@
 package com.uacspoofer.mobile.update
 
-import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.Settings
 import com.uacspoofer.mobile.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -42,11 +39,6 @@ internal sealed interface UpdateUiState {
     data class Error(val message: String, val release: AppRelease? = null) : UpdateUiState
 }
 
-internal enum class InstallLaunchResult {
-    INSTALLER_OPENED,
-    PERMISSION_REQUESTED,
-}
-
 internal class AppUpdateManager(context: Context) {
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -79,10 +71,9 @@ internal class AppUpdateManager(context: Context) {
     }
 
     suspend fun downloadAndInstall(
-        activity: Activity,
         release: AppRelease,
         onProgress: (Int?) -> Unit,
-    ): InstallLaunchResult {
+    ) {
         require(Uri.parse(release.apkUrl).scheme.equals("https", ignoreCase = true)) {
             "The release APK does not use HTTPS"
         }
@@ -100,35 +91,25 @@ internal class AppUpdateManager(context: Context) {
             .setDestinationInExternalFilesDir(appContext, Environment.DIRECTORY_DOWNLOADS, fileName)
 
         val downloadId = downloadManager.enqueue(request)
-        preferences.edit().putLong(KEY_PENDING_DOWNLOAD_ID, downloadId).apply()
         withContext(Dispatchers.Main.immediate) { onProgress(0) }
 
-        return try {
-            var lastProgress: Int? = -1
-            while (true) {
-                val snapshot = queryDownload(downloadManager, downloadId)
-                when (snapshot.status) {
-                    DownloadManager.STATUS_SUCCESSFUL -> break
-                    DownloadManager.STATUS_FAILED -> error("Download failed (code ${snapshot.reason})")
-                    DownloadManager.STATUS_PENDING,
-                    DownloadManager.STATUS_PAUSED,
-                    DownloadManager.STATUS_RUNNING -> {
-                        if (snapshot.progress != lastProgress) {
-                            lastProgress = snapshot.progress
-                            withContext(Dispatchers.Main.immediate) { onProgress(snapshot.progress) }
-                        }
+        var lastProgress: Int? = -1
+        while (true) {
+            val snapshot = queryDownload(downloadManager, downloadId)
+            when (snapshot.status) {
+                DownloadManager.STATUS_SUCCESSFUL -> return
+                DownloadManager.STATUS_FAILED -> error("Download failed (code ${snapshot.reason})")
+                DownloadManager.STATUS_PENDING,
+                DownloadManager.STATUS_PAUSED,
+                DownloadManager.STATUS_RUNNING -> {
+                    if (snapshot.progress != lastProgress) {
+                        lastProgress = snapshot.progress
+                        withContext(Dispatchers.Main.immediate) { onProgress(snapshot.progress) }
                     }
-                    else -> error("Download stopped unexpectedly")
                 }
-                delay(DOWNLOAD_POLL_MS)
+                else -> error("Download stopped unexpectedly")
             }
-            withContext(Dispatchers.Main.immediate) {
-                openPendingInstaller(activity)
-                    ?: error("The downloaded APK could not be opened")
-            }
-        } catch (error: Throwable) {
-            preferences.edit().remove(KEY_PENDING_DOWNLOAD_ID).apply()
-            throw error
+            delay(DOWNLOAD_POLL_MS)
         }
     }
 
@@ -198,50 +179,10 @@ internal class AppUpdateManager(context: Context) {
         private const val LATEST_RELEASE_API = "https://api.github.com/repos/Floxu1/UAC-SNI-Spoofer-Android/releases/latest"
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val PREFERENCES_NAME = "app_update_state"
-        private const val KEY_PENDING_DOWNLOAD_ID = "pending_download_id"
         private const val KEY_INSTALLED_APK_VARIANT = "installed_apk_variant"
         private const val NETWORK_TIMEOUT_MS = 12_000
         private const val DOWNLOAD_POLL_MS = 450L
 
-        fun resumePendingInstall(activity: Activity) {
-            runCatching { openPendingInstaller(activity) }
-        }
-
-        private fun openPendingInstaller(activity: Activity): InstallLaunchResult? {
-            val preferences = activity.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
-            val downloadId = preferences.getLong(KEY_PENDING_DOWNLOAD_ID, -1L)
-            if (downloadId < 0L) return null
-            val downloadManager = activity.getSystemService(DownloadManager::class.java) ?: return null
-            val status = downloadManager.query(DownloadManager.Query().setFilterById(downloadId)).use { cursor ->
-                if (cursor == null || !cursor.moveToFirst()) return null
-                cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-            }
-            if (status != DownloadManager.STATUS_SUCCESSFUL) return null
-
-            if (
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                !activity.packageManager.canRequestPackageInstalls()
-            ) {
-                activity.startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:${activity.packageName}"),
-                    ),
-                )
-                return InstallLaunchResult.PERMISSION_REQUESTED
-            }
-
-            val apkUri = downloadManager.getUriForDownloadedFile(downloadId)
-                ?: error("Downloaded APK URI is unavailable")
-            val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(apkUri, APK_MIME_TYPE)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            }
-            activity.startActivity(installIntent)
-            preferences.edit().remove(KEY_PENDING_DOWNLOAD_ID).apply()
-            return InstallLaunchResult.INSTALLER_OPENED
-        }
     }
 }
 

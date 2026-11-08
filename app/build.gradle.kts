@@ -28,7 +28,7 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 528
+        versionCode = 530
         versionName = "2.1.1"
 
         buildConfigField("boolean", "TV_MODE", "false")
