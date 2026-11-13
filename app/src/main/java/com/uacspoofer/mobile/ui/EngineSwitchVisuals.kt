@@ -64,6 +64,8 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.uacspoofer.mobile.ui.theme.styleTokens
+import com.uacspoofer.mobile.ui.theme.neonDp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.engine.Engine4UnlockStore
 import com.uacspoofer.mobile.engine.EngineMode
@@ -140,24 +142,33 @@ internal fun EngineSwitchRail(
         val base = EngineMode.visible(engine4Unlocked)
         if (active.isDirect && active !in base) base + active else base
     }
-    val width: Dp = if (compact) 42.dp else 46.dp
-    val small: Dp = if (compact) 34.dp else 38.dp
-    val big: Dp = if (compact) 50.dp else 56.dp
-    val gap = 4.dp
-    val pad = 4.dp
+    val tuned = styleTokens()
+    val width: Dp = if (tuned != null) neonDp(compact, 46f, 42f, tuned.railWidth) else if (compact) 42.dp else 46.dp
+    val small: Dp = if (tuned != null) neonDp(compact, 38f, 34f, tuned.railItem) else if (compact) 34.dp else 38.dp
+    val big: Dp = if (tuned != null) neonDp(compact, 56f, 50f, tuned.railItemOn) else if (compact) 50.dp else 56.dp
+    val gap = tuned?.railGap?.dp ?: 4.dp
+    val pad = tuned?.railPad?.dp ?: 4.dp
     val activeIndex = visibleModes.indexOf(active).coerceAtLeast(0)
     val spring = spring<Dp>(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow)
     val indicatorY by animateDpAsState((small + gap) * activeIndex, spring, label = "engine-indicator-y")
-    val accent by animateColorAsState(active.identityAccent(), tween(320), label = "engine-indicator-color")
-    val railShape = RoundedCornerShape(percent = 50)
+    val accent by animateColorAsState(
+        tuned?.railSelected ?: active.identityAccent(),
+        tween(320),
+        label = "engine-indicator-color",
+    )
+    val railShape = RoundedCornerShape(percent = tuned?.railCorner ?: 50)
+    val railTop = tuned?.railFillTop ?: Color(0xE6182433)
+    val railBottom = tuned?.railFillBottom ?: Color(0xEB0B121B)
+    val railEdge = tuned?.railBorderColor ?: Color.White.copy(alpha = 0.24f)
     Box(
         modifier = modifier
-            .shadow(16.dp, railShape, ambientColor = accent.copy(alpha = 0.35f), spotColor = Color.Black.copy(alpha = 0.4f))
+            .then(if (tuned != null) Modifier.graphicsLayer { alpha = tuned.railAlpha } else Modifier)
+            .shadow(tuned?.railShadow?.dp ?: 16.dp, railShape, ambientColor = accent.copy(alpha = 0.35f), spotColor = Color.Black.copy(alpha = 0.4f))
             .clip(railShape)
-            .background(Brush.verticalGradient(listOf(Color(0xE6182433), Color(0xEB0B121B))))
+            .background(Brush.verticalGradient(listOf(railTop, railBottom)))
             .border(
-                1.dp,
-                Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.24f), accent.copy(alpha = 0.18f), Color.White.copy(alpha = 0.05f))),
+                tuned?.railBorder?.dp ?: 1.dp,
+                Brush.verticalGradient(listOf(railEdge, accent.copy(alpha = 0.18f), Color.White.copy(alpha = 0.05f))),
                 railShape,
             )
             .padding(pad),
@@ -209,7 +220,16 @@ private fun EngineSwitchItem(
 ) {
     val identity = mode.identityAccent()
     val h by animateDpAsState(height, spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow), label = "engine-item-h")
-    val tint by animateColorAsState(if (selected) Color.White else identity.copy(alpha = 0.55f), tween(260), label = "engine-item-tint")
+    val tint by animateColorAsState(
+        when {
+            selected -> Color.White
+            com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon ->
+                styleTokens()!!.railSelected.copy(alpha = styleTokens()!!.railIdleAlpha)
+            else -> identity.copy(alpha = 0.55f)
+        },
+        tween(260),
+        label = "engine-item-tint",
+    )
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -241,7 +261,15 @@ private fun EngineSwitchItem(
                 contentDescription = null,
                 tint = tint,
                 modifier = Modifier
-                    .size(if (sel) 22.dp else 20.dp)
+                    .size(
+                        if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                            neonDp(!sel, 22f, 20f, styleTokens()!!.railIcon)
+                        } else if (sel) {
+                            22.dp
+                        } else {
+                            20.dp
+                        },
+                    )
                     .graphicsLayer { rotationZ = if (spinning) spinDeg else 0f },
             )
         }
@@ -253,8 +281,12 @@ private fun EngineSwitchItem(
             Text(
                 text = mode.shortName(),
                 color = Color.White,
-                fontSize = 9.5.sp,
-                fontWeight = FontWeight.SemiBold,
+                fontSize = if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) styleTokens()!!.railLabelSize.sp else 9.5.sp,
+                fontWeight = if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                    FontWeight(styleTokens()!!.railLabelWeight)
+                } else {
+                    FontWeight.SemiBold
+                },
                 maxLines = 1,
                 modifier = Modifier.padding(top = 2.dp),
             )

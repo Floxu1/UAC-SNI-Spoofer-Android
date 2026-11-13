@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -60,7 +61,12 @@ import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogLevel
 import com.uacspoofer.mobile.profiles.CountryMetadata
 import com.uacspoofer.mobile.profiles.ProxyProfile
+import com.uacspoofer.mobile.ui.theme.AppTheme
+import com.uacspoofer.mobile.ui.theme.UacThemeState
+import com.uacspoofer.mobile.ui.theme.styleTokens
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.ui.theme.neonDp
+import com.uacspoofer.mobile.ui.theme.neonSp
 import com.uacspoofer.mobile.vpn.ConnectionMetricsStore
 import com.uacspoofer.mobile.vpn.ExitIpInfoRepository
 import com.uacspoofer.mobile.vpn.ExitIpInfoState
@@ -200,26 +206,37 @@ private fun ConnectedInsightsCard(
     onLogClick: () -> Unit,
 ) {
     val isPersian = LocalHomePersian.current
-    val shape = RoundedCornerShape(if (compact) 15.dp else 17.dp)
+    val tuned = styleTokens()
+    val solaris = UacThemeState.theme == AppTheme.SOLARIS
+    val shape = RoundedCornerShape(
+        if (tuned != null) neonDp(compact, 17f, 15f, tuned.insightCorner) else if (compact) 15.dp else 17.dp,
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(if (compact) 86.dp else 94.dp)
-            .background(UacColors.Surface.copy(alpha = 0.82f), shape)
-            .border(0.75.dp, UacColors.CardBorder, shape)
+            .height(if (tuned != null) neonDp(compact, 94f, 86f, tuned.insightHeight) else if (compact) 86.dp else 94.dp)
+            .then(if (tuned != null) Modifier.graphicsLayer { alpha = tuned.insightAlpha } else Modifier)
+            .background(tuned?.insightFill ?: UacColors.Surface.copy(alpha = 0.82f), shape)
+            .border(
+                tuned?.insightBorder?.dp ?: 0.75.dp,
+                if (solaris) UacColors.CardBorder else tuned?.insightBorderColor ?: UacColors.CardBorder,
+                shape,
+            )
             .padding(horizontal = 5.dp, vertical = if (compact) 7.dp else 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        val pingQuality = latencyColor(latencyMs)
         InsightItem(
             title = homeText("PING", "پینگ"),
             value = if (measuringLatency) "…" else latencyMs?.let { "$it ms" } ?: "—",
-            valueColor = latencyColor(latencyMs),
+            valueColor = if (solaris && latencyMs != null) UacColors.ConnectedGreen else pingQuality,
             detail = if (measuringLatency) {
                 homeText("Testing route", "در حال تست مسیر")
             } else {
                 latencyQuality(latencyMs, isPersian)
             },
-            detailColor = if (measuringLatency) UacColors.DisconnectedBlue else latencyColor(latencyMs),
+            detailColor = if (measuringLatency) UacColors.DisconnectedBlue else pingQuality,
+            iconTint = if (solaris) UacColors.NeonCyan else null,
             icon = Icons.Outlined.Speed,
             loading = measuringLatency,
             compact = compact,
@@ -234,6 +251,7 @@ private fun ConnectedInsightsCard(
             valueColor = Color.White,
             detail = country.countryCode ?: countryFallback,
             detailColor = UacColors.TextSecondary,
+            iconTint = if (solaris) UacColors.ConnectedGreen else null,
             icon = Icons.Outlined.Public,
             leadingValue = if (country.isKnown) ({ CountryFlagIcon(country, size = 14.dp) }) else null,
             compact = compact,
@@ -251,7 +269,14 @@ private fun ConnectedInsightsCard(
             } else {
                 if (isPersian) "$errorCount خطا" else "$errorCount errors"
             },
-            detailColor = if (errorCount == 0) UacColors.ConnectedGreen else Color(0xFFFF7483),
+            detailColor = if (errorCount == 0) {
+                UacColors.ConnectedGreen
+            } else if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                UacColors.ErrorRed
+            } else {
+                Color(0xFFFF7483)
+            },
+            iconTint = if (solaris) UacColors.ConnectedGreen else null,
             icon = Icons.Outlined.Description,
             compact = compact,
             onClick = onLogClick,
@@ -269,6 +294,7 @@ private fun InsightItem(
     detail: String,
     detailColor: Color,
     icon: ImageVector,
+    iconTint: Color? = null,
     loading: Boolean = false,
     compact: Boolean,
     onClick: () -> Unit,
@@ -277,6 +303,7 @@ private fun InsightItem(
     leadingValue: (@Composable () -> Unit)? = null,
 ) {
     val localizedFont = homeLocalizedFont()
+    val tuned = styleTokens()
     Column(
         modifier = modifier
             .fillMaxHeight()
@@ -295,15 +322,20 @@ private fun InsightItem(
                     strokeWidth = 2.dp,
                 )
             } else {
-                Icon(icon, null, tint = UacColors.DisconnectedBlue, modifier = Modifier.size(21.dp))
+                Icon(
+                    icon,
+                    null,
+                    tint = iconTint ?: tuned?.insightIconColor ?: UacColors.DisconnectedBlue,
+                    modifier = Modifier.size(tuned?.insightIcon?.dp ?: 21.dp),
+                )
             }
         }
         Spacer(Modifier.height(1.dp))
         Text(
             title,
-            color = Color.White,
-            fontSize = if (compact) 8.5.sp else 9.sp,
-            fontWeight = FontWeight.SemiBold,
+            color = if (UacThemeState.theme == AppTheme.SOLARIS) UacColors.NeonCyan else Color.White,
+            fontSize = if (tuned != null) neonSp(compact, 9f, 8.5f, tuned.insightLabelSize) else if (compact) 8.5.sp else 9.sp,
+            fontWeight = if (tuned != null) FontWeight(tuned.insightLabelWeight) else FontWeight.SemiBold,
             fontFamily = localizedFont,
         )
         Spacer(Modifier.height(2.dp))
@@ -319,8 +351,8 @@ private fun InsightItem(
             Text(
                 value,
                 color = valueColor,
-                fontSize = if (compact) 12.sp else 13.sp,
-                fontWeight = FontWeight.Bold,
+                fontSize = if (tuned != null) neonSp(compact, 13f, 12f, tuned.insightValueSize) else if (compact) 12.sp else 13.sp,
+                fontWeight = if (tuned != null) FontWeight(tuned.insightValueWeight) else FontWeight.Bold,
                 fontFamily = localizedFont,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -338,7 +370,7 @@ private fun InsightItem(
             Text(
                 detail,
                 color = detailColor,
-                fontSize = if (compact) 8.sp else 8.5.sp,
+                fontSize = if (tuned != null) neonSp(compact, 8.5f, 8f, tuned.insightDetailSize) else if (compact) 8.sp else 8.5.sp,
                 fontFamily = localizedFont,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -368,7 +400,7 @@ private fun latencyQuality(latencyMs: Long?, isPersian: Boolean): String = when 
 
 private fun latencyColor(latencyMs: Long?): Color = when {
     latencyMs == null -> UacColors.TextSecondary
-    latencyMs <= 250L -> UacColors.ConnectedGreen
-    latencyMs <= 500L -> Color(0xFFFFC857)
-    else -> Color(0xFFFF7483)
+    latencyMs <= 250L -> if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) styleTokens()!!.insightGood else UacColors.ConnectedGreen
+    latencyMs <= 500L -> if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) styleTokens()!!.insightMid else Color(0xFFFFC857)
+    else -> if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) styleTokens()!!.insightBad else Color(0xFFFF7483)
 }

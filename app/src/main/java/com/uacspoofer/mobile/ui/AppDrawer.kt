@@ -245,14 +245,30 @@ internal fun AppDrawer(
             .clip(panelShape)
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
+                    colors = if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                        listOf(
+                            com.uacspoofer.mobile.ui.theme.UacColors.BackgroundTop,
+                            com.uacspoofer.mobile.ui.theme.UacColors.BackgroundMiddle,
+                            com.uacspoofer.mobile.ui.theme.UacColors.BackgroundBottom,
+                        )
+                    } else {
+                        listOf(
                         Color(0xFF0A192C),
                         Color(0xFF071526),
                         Color(0xFF09182B),
-                    ),
+                        )
+                    },
                 ),
             )
-            .border(1.dp, Color(0x4A34516F), panelShape),
+            .border(
+                1.dp,
+                if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                    com.uacspoofer.mobile.ui.theme.UacColors.NeonMagenta.copy(alpha = 0.35f)
+                } else {
+                    Color(0x4A34516F)
+                },
+                panelShape,
+            ),
         ) {
             val compact = maxHeight < 720.dp
 
@@ -589,8 +605,22 @@ private fun DrawerLanguageRow(
                 .width(if (compact) 126.dp else 142.dp)
                 .height(if (compact) 31.dp else 36.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(Color(0xFF07111F))
-                .border(1.dp, Color(0x393B5875), RoundedCornerShape(12.dp))
+                .background(
+                    if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                        com.uacspoofer.mobile.ui.theme.UacColors.Surface
+                    } else {
+                        Color(0xFF07111F)
+                    },
+                )
+                .border(
+                    1.dp,
+                    if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                        com.uacspoofer.mobile.ui.theme.UacColors.CardBorder
+                    } else {
+                        Color(0x393B5875)
+                    },
+                    RoundedCornerShape(12.dp),
+                )
                 .padding(3.dp),
         ) {
             LanguageSegment(

@@ -28,7 +28,7 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 530
+        versionCode = 571
         versionName = "2.1.1"
 
         buildConfigField("boolean", "TV_MODE", "false")
@@ -39,6 +39,9 @@ android {
     signingConfigs {
         if (releaseSigningAvailable) {
             create("release") {
+                // AGP 8.7 has no lineage field. This pre-signs with the original key.
+                // signReleaseWithRotation re-signs with that key plus the new key:
+                // API 24-32 keep the original certificate, API 33+ use the new one.
                 storeFile = signingPropertiesFile.parentFile.resolve(signingProperties.getProperty("storeFile"))
                 storePassword = signingProperties.getProperty("storePassword")
                 keyAlias = signingProperties.getProperty("keyAlias")
@@ -46,20 +49,23 @@ android {
                 enableV1Signing = true
                 enableV2Signing = true
                 enableV3Signing = true
-                enableV4Signing = true
+                enableV4Signing = false
             }
         }
     }
 
     buildTypes {
         debug {
+            if (releaseSigningAvailable) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             ndk {
                 abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
             }
         }
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = signingConfigs.findByName("release")
             ndk {
                 abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
@@ -113,16 +119,6 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += setOf(
-                "**/libxray.so",
-                "**/libtor.so",
-                "**/libwebtunnel.so",
-                "**/libhev-socks5-tunnel.so",
-                "**/libaether.so",
-                "**/libaether_jni.so",
-                "**/libgojni.so",
-                "**/libgopsi.so",
-            )
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -140,6 +136,51 @@ android.applicationVariants.configureEach {
             apkOutput.outputFileName = "UAC-${version}-${abi}.apk"
         }
     }
+}
+
+tasks.register("signReleaseWithRotation") {
+    val apkDir = layout.buildDirectory.dir("outputs/apk/release")
+    val apksignerJar = android.sdkDirectory.resolve("build-tools/${android.buildToolsVersion}/lib/apksigner.jar")
+    val lineage = rootProject.file("signing/rotation-lineage")
+    val newSigningFile = rootProject.file("signing/new-signing.properties")
+    doLast {
+        check(lineage.isFile) { "Missing ${lineage.absolutePath}. Create it with apksigner rotate." }
+        check(newSigningFile.isFile) { "Missing ${newSigningFile.absolutePath}" }
+        val rotated = Properties().apply { newSigningFile.inputStream().use { load(it) } }
+        val oldStore = signingPropertiesFile.parentFile.resolve(signingProperties.getProperty("storeFile"))
+        val newStore = newSigningFile.parentFile.resolve(rotated.getProperty("storeFile"))
+        val apks = apkDir.get().asFile.listFiles { file ->
+            file.isFile && file.name.startsWith("UAC-") && file.extension.equals("apk", ignoreCase = true)
+        }.orEmpty()
+        check(apks.isNotEmpty()) { "No release APKs to rotate in ${apkDir.get().asFile}" }
+        apks.forEach { apk ->
+            project.exec {
+                environment("UAC_OLD_KS_PASS", signingProperties.getProperty("storePassword"))
+                environment("UAC_OLD_KEY_PASS", signingProperties.getProperty("keyPassword"))
+                environment("UAC_NEW_KS_PASS", rotated.getProperty("storePassword"))
+                environment("UAC_NEW_KEY_PASS", rotated.getProperty("keyPassword"))
+                commandLine(
+                    "java", "-jar", apksignerJar.absolutePath, "sign",
+                    "--ks", oldStore.absolutePath,
+                    "--ks-key-alias", signingProperties.getProperty("keyAlias"),
+                    "--ks-pass", "env:UAC_OLD_KS_PASS",
+                    "--key-pass", "env:UAC_OLD_KEY_PASS",
+                    "--next-signer",
+                    "--ks", newStore.absolutePath,
+                    "--ks-key-alias", rotated.getProperty("keyAlias"),
+                    "--ks-pass", "env:UAC_NEW_KS_PASS",
+                    "--key-pass", "env:UAC_NEW_KEY_PASS",
+                    "--lineage", lineage.absolutePath,
+                    apk.absolutePath,
+                )
+            }
+            apk.parentFile.resolve("${apk.name}.idsig").delete()
+        }
+    }
+}
+
+tasks.matching { it.name == "packageRelease" }.configureEach {
+    finalizedBy("signReleaseWithRotation")
 }
 
 tasks.matching { it.name == "assembleRelease" }.configureEach {

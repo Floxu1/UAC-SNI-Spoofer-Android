@@ -21,6 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -28,13 +29,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.uacspoofer.mobile.ui.theme.AppTheme
+import com.uacspoofer.mobile.ui.theme.UacThemeState
+import com.uacspoofer.mobile.ui.theme.styleTokens
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.ui.theme.neonDp
+import com.uacspoofer.mobile.ui.theme.neonSp
 import com.uacspoofer.mobile.vpn.MonthlyTrafficStore
 import com.uacspoofer.mobile.vpn.TrafficStatsStore
 import java.util.Locale
@@ -45,15 +52,13 @@ internal fun TrafficStatsRow(
     compact: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val stats by TrafficStatsStore.stats.collectAsState()
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(if (compact) 7.dp else 10.dp),
     ) {
         TrafficStatCard(
             title = homeText("Download", "دانلود"),
-            totalBytes = stats.downloadBytes,
-            bytesPerSecond = stats.downloadBytesPerSecond,
+            download = true,
             icon = Icons.Rounded.ArrowDownward,
             accent = accent,
             compact = compact,
@@ -61,8 +66,7 @@ internal fun TrafficStatsRow(
         )
         TrafficStatCard(
             title = homeText("Upload", "آپلود"),
-            totalBytes = stats.uploadBytes,
-            bytesPerSecond = stats.uploadBytesPerSecond,
+            download = false,
             icon = Icons.Rounded.ArrowUpward,
             accent = accent,
             compact = compact,
@@ -74,47 +78,139 @@ internal fun TrafficStatsRow(
 @Composable
 private fun TrafficStatCard(
     title: String,
-    totalBytes: Long,
-    bytesPerSecond: Long,
+    download: Boolean,
     icon: ImageVector,
     accent: Color,
     compact: Boolean,
     modifier: Modifier,
 ) {
+    val statsState = TrafficStatsStore.stats.collectAsState()
+    val totalBytes by remember(download) {
+        derivedStateOf {
+            if (download) statsState.value.downloadBytes else statsState.value.uploadBytes
+        }
+    }
+    val bytesPerSecond by remember(download) {
+        derivedStateOf {
+            if (download) statsState.value.downloadBytesPerSecond else statsState.value.uploadBytesPerSecond
+        }
+    }
     val localizedFont = homeLocalizedFont()
-    val shape = RoundedCornerShape(if (compact) 18.dp else 21.dp)
+    val neon = com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon
+    val tuned = styleTokens()
+    val shape = RoundedCornerShape(
+        if (tuned != null) neonDp(compact, 21f, 18f, tuned.cardCorner) else if (compact) 18.dp else 21.dp,
+    )
     val total = formatBytes(totalBytes)
     val rate = formatBytes(bytesPerSecond)
+    val cardFill = if (tuned != null) {
+        listOf(tuned.cardFillStart, tuned.cardFillEnd)
+    } else {
+        listOf(Color(0xE512202E), Color(0xB5091724))
+    }
+    val cardEdge = tuned?.cardBorderColor ?: accent.copy(alpha = 0.44f)
+    val iconTint = if (tuned != null && !tuned.cardIconFollowState) tuned.cardIconColor else accent
     Row(
         modifier = modifier
-            .height(if (compact) 76.dp else 88.dp)
-            .background(
-                Brush.linearGradient(listOf(Color(0xE512202E), Color(0xB5091724))),
-                shape,
+            .height(
+                if (tuned != null) {
+                    neonDp(compact, 104f, 92f, tuned.cardHeight)
+                } else if (compact) {
+                    76.dp
+                } else {
+                    88.dp
+                },
             )
-            .border(1.dp, accent.copy(alpha = 0.44f), shape)
-            .padding(horizontal = if (compact) 8.dp else 11.dp),
+            .then(if (tuned != null) Modifier.graphicsLayer { alpha = tuned.cardAlpha } else Modifier)
+            .background(Brush.linearGradient(cardFill), shape)
+            .border(if (tuned != null) tuned.cardBorder.dp else 1.dp, cardEdge, shape)
+            .padding(horizontal = if (tuned != null) neonDp(compact, 11f, 8f, tuned.cardPadH) else if (compact) 8.dp else 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .size(if (compact) 31.dp else 36.dp)
+                .size(if (tuned != null) neonDp(compact, 36f, 31f, tuned.cardIconBox) else if (compact) 31.dp else 36.dp)
                 .background(accent.copy(alpha = 0.11f), CircleShape)
                 .border(1.dp, accent.copy(alpha = 0.24f), CircleShape),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(icon, null, tint = accent, modifier = Modifier.size(if (compact) 18.dp else 21.dp))
+            Icon(
+                icon,
+                null,
+                tint = iconTint,
+                modifier = Modifier.size(if (tuned != null) neonDp(compact, 21f, 18f, tuned.cardIcon) else if (compact) 18.dp else 21.dp),
+            )
         }
         Spacer(Modifier.width(if (compact) 6.dp else 8.dp))
         Column(modifier = Modifier.weight(1f)) {
+            val solaris = UacThemeState.theme == AppTheme.SOLARIS
             Text(
                 title,
-                color = UacColors.TextSecondary,
-                fontSize = if (compact) 10.5.sp else 12.sp,
+                color = when {
+                    solaris -> UacColors.NeonCyan
+                    tuned != null -> tuned.cardLabelColor
+                    else -> UacColors.TextSecondary
+                },
+                fontSize = if (tuned != null) neonSp(compact, 12f, 10.5f, tuned.cardLabelSize) else if (compact) 10.5.sp else 12.sp,
                 fontFamily = localizedFont,
-                fontWeight = if (LocalHomePersian.current) FontWeight.Medium else null,
+                fontWeight = if (tuned != null) {
+                    FontWeight(if (LocalHomePersian.current) tuned.cardLabelWeightFa else tuned.cardLabelWeight)
+                } else if (LocalHomePersian.current) {
+                    FontWeight.Medium
+                } else {
+                    null
+                },
                 maxLines = 1,
             )
+            if (neon && tuned != null) {
+                Text(
+                    rate.amount,
+                    color = tuned.cardValueColor,
+                    fontSize = neonSp(compact, 26f, 22f, tuned.cardValueSize),
+                    fontWeight = FontWeight(tuned.cardValueWeight),
+                    maxLines = 1,
+                )
+                val fraction = (bytesPerSecond.toFloat() / 400_000f).coerceIn(0.08f, 1f)
+                Spacer(Modifier.height(4.dp))
+                val barStart = if (solaris) UacColors.NeonCyan else tuned.cardBarStart
+                val barEnd = if (solaris) UacColors.ConnectedGreen else tuned.cardBarEnd
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(tuned.cardBarHeight.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(tuned.cardBarHeight.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color.White.copy(alpha = 0.08f)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(fraction)
+                                .height(tuned.cardBarHeight.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Brush.horizontalGradient(listOf(barStart, barEnd))),
+                        )
+                    }
+                    if (solaris) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .size(6.dp)
+                                .background(barEnd, CircleShape),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "${total.amount} ${total.unit}",
+                    color = tuned.cardTotalColor,
+                    fontSize = neonSp(compact, 10f, 9f, tuned.cardTotalSize),
+                    maxLines = 1,
+                )
+            } else {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.Bottom,
@@ -144,6 +240,7 @@ private fun TrafficStatCard(
                 maxLines = 1,
                 overflow = TextOverflow.Clip,
             )
+            }
         }
     }
 }

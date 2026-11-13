@@ -58,11 +58,21 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
+import com.uacspoofer.mobile.ui.theme.styleTokens
+import com.uacspoofer.mobile.ui.theme.neonDp
+import com.uacspoofer.mobile.ui.theme.neonSp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -110,8 +120,11 @@ internal fun HomeHeader(
     val engineStore = remember(context) { EngineModeStore.get(context) }
     val engineMode by engineStore.mode.collectAsStateWithLifecycle()
     var pendingEngine by remember { mutableStateOf<EngineMode?>(null) }
-    val iconSize = if (compact) 22.dp else 24.dp
-    val buttonSize = if (compact) 38.dp else 42.dp
+    val neonMenu = styleTokens()
+    val iconSize = if (neonMenu != null) neonDp(compact, 24f, 22f, neonMenu.menuIcon) else if (compact) 22.dp else 24.dp
+    val buttonSize = if (neonMenu != null) neonDp(compact, 42f, 38f, neonMenu.menuButton) else if (compact) 38.dp else 42.dp
+    val menuTint = neonMenu?.menuColor ?: UacColors.TextPrimary
+    val menuAlpha = neonMenu?.menuAlpha ?: 1f
     val drawerOpen = LocalDrawerOpen.current
     val guideSession = LocalHomeGuideSession.current
 
@@ -152,6 +165,7 @@ internal fun HomeHeader(
                 onClick = onMenuClick,
                 modifier = Modifier
                     .size(buttonSize)
+                    .then(if (neonMenu != null) Modifier.graphicsLayer { alpha = menuAlpha } else Modifier)
                     .focusProperties { canFocus = !drawerOpen }
                     .trackHomeSlot(HomeRemoteSlot.Menu)
                     .openDrawerOnDpadLeft(onMenuClick),
@@ -159,7 +173,7 @@ internal fun HomeHeader(
                 Icon(
                     imageVector = Icons.Rounded.Menu,
                     contentDescription = "Open navigation menu",
-                    tint = UacColors.TextPrimary,
+                    tint = menuTint,
                     modifier = Modifier.size(iconSize),
                 )
             }
@@ -183,6 +197,7 @@ internal fun HomeHeader(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .size(buttonSize)
+                .then(if (neonMenu != null) Modifier.graphicsLayer { alpha = menuAlpha } else Modifier)
                 .focusProperties { canFocus = !drawerOpen }
                 .trackHomeSlot(HomeRemoteSlot.Menu)
                 .openDrawerOnDpadLeft(onMenuClick),
@@ -190,7 +205,7 @@ internal fun HomeHeader(
             Icon(
                 imageVector = Icons.Rounded.Menu,
                 contentDescription = "Open navigation menu",
-                tint = UacColors.TextPrimary,
+                tint = menuTint,
                 modifier = Modifier.size(iconSize),
             )
         }
@@ -231,9 +246,12 @@ internal fun HomeHeader(
 @Composable
 internal fun AppTitle(compact: Boolean, accent: Color) {
     val engineMode = rememberDisplayedEngineMode()
+    val neonTitle = styleTokens()
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.padding(horizontal = if (compact) 56.dp else 64.dp),
+        modifier = Modifier
+            .padding(horizontal = if (neonTitle != null) neonDp(compact, 64f, 56f, neonTitle.titlePad) else if (compact) 56.dp else 64.dp)
+            .then(if (neonTitle != null) Modifier.graphicsLayer { alpha = neonTitle.titleAlpha } else Modifier),
     ) {
         Text(
             text = when {
@@ -242,34 +260,48 @@ internal fun AppTitle(compact: Boolean, accent: Color) {
                 engineMode.isDirect -> "UAC DIRECT"
                 else -> "UAC SNI SPOOFER"
             },
-            fontSize = if (compact) 20.sp else 23.sp,
-            fontWeight = FontWeight.ExtraBold,
+            fontSize = if (neonTitle != null) neonSp(compact, 23f, 20f, neonTitle.titleSize) else if (compact) 20.sp else 23.sp,
+            fontWeight = if (neonTitle != null) FontWeight(neonTitle.titleWeight) else FontWeight.ExtraBold,
             letterSpacing = 0.55.sp,
             textAlign = TextAlign.Center,
             style = TextStyle(
-                brush = Brush.horizontalGradient(
-                    0f to accent,
-                    0.30f to Color(0xFFDFF8FF),
-                    0.58f to Color.White,
-                    0.82f to Color(0xFFB8DFFF),
-                    1f to accent,
-                ),
+                brush = if (neonTitle != null) {
+                    Brush.horizontalGradient(
+                        0f to neonTitle.titleStart,
+                        0.45f to neonTitle.titleMid,
+                        1f to neonTitle.titleEnd,
+                    )
+                } else {
+                    Brush.horizontalGradient(
+                        0f to accent,
+                        0.30f to Color(0xFFDFF8FF),
+                        0.58f to Color.White,
+                        0.82f to Color(0xFFB8DFFF),
+                        1f to accent,
+                    )
+                },
                 shadow = Shadow(
-                    color = accent.copy(alpha = 0.62f),
+                    color = (if (neonTitle != null) neonTitle.titleGlow else accent).copy(alpha = neonTitle?.titleGlowAlpha ?: 0.62f),
                     offset = Offset(0f, 1.5f),
-                    blurRadius = 16f,
+                    blurRadius = neonTitle?.titleGlowBlur ?: 16f,
                 ),
             ),
         )
         Spacer(Modifier.height(4.dp))
         Box(
             modifier = Modifier
-                .width(if (compact) 132.dp else 154.dp)
-                .height(2.dp)
+                .width(if (neonTitle != null) neonDp(compact, 154f, 132f, neonTitle.underlineWidth) else if (compact) 132.dp else 154.dp)
+                .height(if (neonTitle != null) neonTitle.underlineHeight.dp else 2.dp)
                 .background(
-                    Brush.horizontalGradient(
-                        listOf(Color.Transparent, accent.copy(alpha = 0.95f), Color.White, accent.copy(alpha = 0.95f), Color.Transparent),
-                    ),
+                    if (neonTitle != null) {
+                        Brush.horizontalGradient(
+                            listOf(Color.Transparent, neonTitle.underlineStart, neonTitle.underlineMid, neonTitle.underlineStart, Color.Transparent),
+                        )
+                    } else {
+                        Brush.horizontalGradient(
+                            listOf(Color.Transparent, accent.copy(alpha = 0.95f), Color.White, accent.copy(alpha = 0.95f), Color.Transparent),
+                        )
+                    },
                     RoundedCornerShape(50),
                 ),
         )
@@ -288,7 +320,7 @@ internal fun ConnectButton(
     val localizedFont = homeLocalizedFont()
     val interactionDisabled = state == ConnectionState.DISCONNECTING
     val transition = rememberInfiniteTransition(label = "connect-glow")
-    val animatedGlow by transition.animateFloat(
+    val animatedGlow = transition.animateFloat(
         initialValue = 0.72f,
         targetValue = 1.16f,
         animationSpec = infiniteRepeatable(
@@ -297,7 +329,7 @@ internal fun ConnectButton(
         ),
         label = "connect-glow-intensity",
     )
-    val loadingRotation by transition.animateFloat(
+    val loadingRotation = transition.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
@@ -306,7 +338,7 @@ internal fun ConnectButton(
         ),
         label = "connect-loading-rotation",
     )
-    val loadingSweep by transition.animateFloat(
+    val loadingSweep = transition.animateFloat(
         initialValue = 58f,
         targetValue = 292f,
         animationSpec = infiniteRepeatable(
@@ -315,7 +347,7 @@ internal fun ConnectButton(
         ),
         label = "connect-loading-sweep",
     )
-    val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow else 1f
+    val ringBrushes = remember { SweepRingBrushes() }
     val emphasizePersianLabel = isPersian
     val buttonLabel = when (state) {
         ConnectionState.DISCONNECTED -> homeText("CONNECT", "اتصال")
@@ -325,19 +357,98 @@ internal fun ConnectButton(
         ConnectionState.ERROR -> homeText("RETRY", "تلاش دوباره")
     }
 
+    val neonTokens = styleTokens()
+    val outerGlow = remember { NeonGlowBuffer() }
+    val innerGlow = remember { NeonGlowBuffer() }
+    val buttonAlpha = neonTokens?.buttonAlpha ?: 1f
+    val neonGlowBox = neonTokens?.let { tuned ->
+        val blurDp = maxOf(tuned.glowBlur, tuned.glowBlurConnected, 0f)
+        val outerReach = tuned.ringWidth / 2f +
+            tuned.hairlineStart +
+            tuned.hairlineGap * (tuned.hairlineCount - 1).coerceAtLeast(0) +
+            tuned.hairlineWidth / 2f
+        diameter + (outerReach * 2f).dp + (blurDp * 2f).dp + 24.dp
+    }
     Box(
         modifier = Modifier
-            .size(diameter + halo)
+            .size(neonGlowBox?.let { maxOf(diameter + halo, it) } ?: (diameter + halo))
+            .then(
+                if (neonTokens != null) {
+                    Modifier.graphicsLayer {
+                        alpha = buttonAlpha
+                        clip = false
+                    }
+                } else {
+                    Modifier
+                },
+            )
             .trackHomeSlot(HomeRemoteSlot.Connect)
             .clickable(enabled = !interactionDisabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.matchParentSize()) {
+            val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow.value else 1f
             val center = Offset(size.width / 2f, size.height / 2f)
             val surfaceRadius = diameter.toPx() / 2f
             val atmosphericRadius = size.minDimension / 2f
             val haloPx = halo.toPx()
+            val neon = com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon
+            fun ring(alpha: Float): Brush {
+                val tuned = neonTokens
+                if (!neon || tuned == null) return SolidColor(accent.copy(alpha = alpha))
+                return ringBrushes.sweep(alpha, center, tuned.gradientStart, tuned.gradientEnd)
+            }
+            val neonGain = when (state) {
+                ConnectionState.CONNECTED -> 1f
+                ConnectionState.CONNECTING -> glowIntensity
+                else -> neonTokens?.glowDisconnected ?: 0.55f
+            }
 
+            if (neon && neonTokens != null) {
+                val tuned = neonTokens
+                val tube = tuned.ringWidth.dp.toPx()
+                val tubeRadius = surfaceRadius + tube / 2f
+                rotate(tuned.gradientAngle, center) {
+                drawBlurredNeonRing(
+                    center = center,
+                        radius = tubeRadius + tuned.glowSpread.dp.toPx(),
+                    stroke = tube,
+                        blur = (if (state == ConnectionState.CONNECTED) tuned.glowBlurConnected else tuned.glowBlur).dp.toPx(),
+                        alpha = (tuned.glowAlpha * neonGain).toInt().coerceIn(0, 255),
+                    buffer = outerGlow,
+                        gradientStart = tuned.gradientStart,
+                        gradientEnd = tuned.gradientEnd,
+                )
+                drawCircle(
+                    brush = ring(1f),
+                    radius = tubeRadius,
+                    center = center,
+                    style = Stroke(width = tube),
+                )
+                drawCircle(
+                        color = tuned.ringCore.copy(alpha = tuned.ringCore.alpha * tuned.ringCoreAlpha),
+                    radius = tubeRadius,
+                    center = center,
+                        style = Stroke(width = tuned.ringCoreWidth.dp.toPx()),
+                    )
+                    val hairAlphas = floatArrayOf(
+                        tuned.hairlineAlpha1,
+                        tuned.hairlineAlpha2,
+                        tuned.hairlineAlpha3,
+                        tuned.hairlineAlpha4,
+                    )
+                    repeat(tuned.hairlineCount.coerceIn(0, hairAlphas.size)) { index ->
+                        val gap = (tuned.hairlineStart + tuned.hairlineGap * index).dp.toPx()
+                        drawCircle(
+                            brush = ring(hairAlphas[index] * neonGain),
+                            radius = tubeRadius + gap,
+                            center = center,
+                            style = Stroke(width = tuned.hairlineWidth.dp.toPx()),
+                            blendMode = BlendMode.Plus,
+                        )
+                    }
+                }
+            } else {
             drawCircle(
                 brush = Brush.radialGradient(
                     colorStops = arrayOf(
@@ -355,19 +466,19 @@ internal fun ConnectButton(
                 radius = atmosphericRadius,
             )
             drawCircle(
-                color = accent.copy(alpha = 0.075f * glowIntensity),
+                brush = ring(0.075f * glowIntensity),
                 radius = surfaceRadius + haloPx * 0.50f,
                 center = center,
                 style = Stroke(width = 1.dp.toPx()),
             )
             drawCircle(
-                color = accent.copy(alpha = 0.13f * glowIntensity),
+                brush = ring(0.13f * glowIntensity),
                 radius = surfaceRadius + haloPx * 0.33f,
                 center = center,
                 style = Stroke(width = 1.4.dp.toPx()),
             )
             drawCircle(
-                color = accent.copy(alpha = 0.29f * glowIntensity),
+                brush = ring(0.29f * glowIntensity),
                 radius = surfaceRadius + haloPx * 0.15f,
                 center = center,
                 style = Stroke(width = (7.dp.toPx() * (haloPx / 54.dp.toPx()).coerceIn(0.55f, 1f))),
@@ -378,12 +489,12 @@ internal fun ConnectButton(
                 center = center,
                 style = Stroke(width = 1.2.dp.toPx()),
             )
-            if (state == ConnectionState.CONNECTING) {
+            if (!neon && state == ConnectionState.CONNECTING) {
                 val progressRadius = surfaceRadius + haloPx * 0.15f
                 val progressTopLeft = Offset(center.x - progressRadius, center.y - progressRadius)
                 val progressSize = Size(progressRadius * 2f, progressRadius * 2f)
                 drawArc(
-                    color = accent.copy(alpha = 0.09f),
+                    brush = ring(0.09f),
                     startAngle = 0f,
                     sweepAngle = 360f,
                     useCenter = false,
@@ -392,9 +503,9 @@ internal fun ConnectButton(
                     style = Stroke(width = 11.dp.toPx()),
                 )
                 drawArc(
-                    color = accent.copy(alpha = 0.18f * animatedGlow),
-                    startAngle = loadingRotation,
-                    sweepAngle = loadingSweep,
+                    brush = ring(0.18f * glowIntensity),
+                    startAngle = loadingRotation.value,
+                    sweepAngle = loadingSweep.value,
                     useCenter = false,
                     topLeft = progressTopLeft,
                     size = progressSize,
@@ -402,16 +513,25 @@ internal fun ConnectButton(
                 )
                 drawArc(
                     brush = Brush.sweepGradient(
-                        colorStops = arrayOf(
-                            0f to accent.copy(alpha = 0.15f),
-                            0.55f to accent,
-                            0.82f to Color.White,
-                            1f to accent.copy(alpha = 0.20f),
-                        ),
+                        colorStops = if (neon) {
+                            arrayOf(
+                                0f to Color(0xFFFF2BD6).copy(alpha = 0.15f),
+                                0.55f to Color(0xFF22D3EE),
+                                0.82f to Color.White,
+                                1f to Color(0xFFFF2BD6).copy(alpha = 0.20f),
+                            )
+                        } else {
+                            arrayOf(
+                                0f to accent.copy(alpha = 0.15f),
+                                0.55f to accent,
+                                0.82f to Color.White,
+                                1f to accent.copy(alpha = 0.20f),
+                            )
+                        },
                         center = center,
                     ),
-                    startAngle = loadingRotation,
-                    sweepAngle = loadingSweep,
+                    startAngle = loadingRotation.value,
+                    sweepAngle = loadingSweep.value,
                     useCenter = false,
                     topLeft = progressTopLeft,
                     size = progressSize,
@@ -419,13 +539,14 @@ internal fun ConnectButton(
                 )
                 drawArc(
                     color = Color.White.copy(alpha = 0.96f),
-                    startAngle = loadingRotation + loadingSweep - 7f,
+                    startAngle = loadingRotation.value + loadingSweep.value - 7f,
                     sweepAngle = 7f,
                     useCenter = false,
                     topLeft = progressTopLeft,
                     size = progressSize,
                     style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round),
                 )
+            }
             }
         }
 
@@ -435,7 +556,10 @@ internal fun ConnectButton(
                 .clip(CircleShape)
                 .background(
                     brush = Brush.radialGradient(
-                        colors = listOf(UacColors.ButtonCenter, UacColors.ButtonEdge),
+                        listOf(
+                            neonTokens?.centerInner ?: UacColors.ButtonCenter,
+                            neonTokens?.centerOuter ?: UacColors.ButtonEdge,
+                        ),
                     ),
                     shape = CircleShape,
                 )
@@ -443,16 +567,79 @@ internal fun ConnectButton(
             contentAlignment = Alignment.Center,
         ) {
             Canvas(modifier = Modifier.matchParentSize()) {
+                val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow.value else 1f
                 val center = Offset(size.width / 2f, size.height / 2f)
                 val outerRadius = size.minDimension / 2f - 2.dp.toPx()
-                drawCircle(
-                    color = accent.copy(alpha = 0.34f * glowIntensity),
-                    radius = outerRadius,
-                    center = center,
-                    style = Stroke(width = 10.dp.toPx()),
-                )
-                drawCircle(
-                    brush = Brush.sweepGradient(
+                val neonDisc = com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon
+                if (neonDisc) {
+                    val tuned = neonTokens
+                    if (tuned != null) {
+                    val inward = when (state) {
+                        ConnectionState.CONNECTED -> 1f
+                        ConnectionState.CONNECTING -> glowIntensity
+                            else -> tuned.glowDisconnected
+                    }
+                        rotate(tuned.gradientAngle, center) {
+                    drawBlurredNeonRing(
+                        center = center,
+                                radius = outerRadius - tuned.innerGlowInset.dp.toPx(),
+                                stroke = tuned.ringWidth.dp.toPx(),
+                                blur = tuned.innerGlowBlur.dp.toPx(),
+                                alpha = (tuned.innerGlowAlpha * inward).toInt().coerceIn(0, 255),
+                        buffer = innerGlow,
+                                gradientStart = tuned.gradientStart,
+                                gradientEnd = tuned.gradientEnd,
+                    )
+                        }
+                    }
+                    return@Canvas
+                }
+                fun discRingBrush(alpha: Float): Brush {
+                    if (!neonDisc) return SolidColor(accent.copy(alpha = alpha))
+                    val magenta = Color(0xFFFF2BD6).copy(alpha = alpha)
+                    val cyan = Color(0xFF22D3EE).copy(alpha = alpha)
+                    return Brush.sweepGradient(
+                        colorStops = arrayOf(
+                            0.00f to magenta,
+                            0.22f to magenta,
+                            0.42f to cyan,
+                            0.72f to cyan,
+                            0.90f to magenta,
+                            1.00f to magenta,
+                        ),
+                        center = center,
+                    )
+                }
+                val inwardGain = when (state) {
+                    ConnectionState.CONNECTED -> 1.15f
+                    ConnectionState.CONNECTING -> glowIntensity
+                    else -> 0.62f
+                }
+                if (neonDisc) {
+                    listOf(
+                        40.dp to 0.08f,
+                        28.dp to 0.18f,
+                        16.dp to 0.30f,
+                        8.dp to 0.50f,
+                    ).forEach { (width, alpha) ->
+                        drawCircle(
+                            brush = discRingBrush(alpha * inwardGain),
+                            radius = outerRadius,
+                            center = center,
+                            style = Stroke(width = width.toPx()),
+                            blendMode = BlendMode.Plus,
+                        )
+                    }
+                }
+                val discGlow = if (neonDisc) {
+                    discRingBrush(0.34f * glowIntensity)
+                } else {
+                    SolidColor(accent.copy(alpha = 0.34f * glowIntensity))
+                }
+                val discRing = if (neonDisc) {
+                    discRingBrush(1f)
+                } else {
+                    Brush.sweepGradient(
                         listOf(
                             accent,
                             Color.White.copy(alpha = 0.90f),
@@ -461,49 +648,99 @@ internal fun ConnectButton(
                             accent,
                         ),
                         center = center,
-                    ),
+                    )
+                }
+                drawCircle(
+                    brush = discGlow,
+                    radius = outerRadius,
+                    center = center,
+                    style = Stroke(width = 10.dp.toPx()),
+                )
+                drawCircle(
+                    brush = discRing,
                     radius = outerRadius,
                     center = center,
                     style = Stroke(width = 3.2.dp.toPx()),
                 )
+                val arcBounds = androidx.compose.ui.geometry.Size(
+                    size.width - 4.dp.toPx(),
+                    size.height - 4.dp.toPx(),
+                )
+                val arcTopLeft = Offset(2.dp.toPx(), 2.dp.toPx())
+                if (neonDisc) {
+                    drawArc(
+                        brush = discRingBrush(0.20f * inwardGain),
+                        startAngle = 208f,
+                        sweepAngle = 104f,
+                        useCenter = false,
+                        topLeft = arcTopLeft,
+                        size = arcBounds,
+                        style = Stroke(width = 4.dp.toPx()),
+                        blendMode = BlendMode.Plus,
+                    )
+                }
                 drawArc(
-                    color = Color.White.copy(alpha = 0.34f),
+                    brush = if (neonDisc) discRingBrush(0.70f) else SolidColor(Color.White.copy(alpha = 0.34f)),
                     startAngle = 208f,
                     sweepAngle = 104f,
                     useCenter = false,
-                    topLeft = Offset(2.dp.toPx(), 2.dp.toPx()),
-                    size = androidx.compose.ui.geometry.Size(
-                        size.width - 4.dp.toPx(),
-                        size.height - 4.dp.toPx(),
-                    ),
+                    topLeft = arcTopLeft,
+                    size = arcBounds,
                     style = Stroke(width = 0.9.dp.toPx()),
                 )
+                if (neonDisc) {
+                    drawCircle(
+                        brush = discRingBrush(0.18f * inwardGain),
+                        radius = outerRadius - 6.dp.toPx(),
+                        center = center,
+                        style = Stroke(width = 4.dp.toPx()),
+                        blendMode = BlendMode.Plus,
+                    )
+                }
                 drawCircle(
-                    color = UacColors.ButtonInnerRing,
+                    brush = if (neonDisc) discRingBrush(0.95f) else SolidColor(UacColors.ButtonInnerRing),
                     radius = outerRadius - 6.dp.toPx(),
                     center = center,
                     style = Stroke(width = 1.1.dp.toPx()),
                 )
             }
 
+            val neonFace = neonTokens != null
+            val iconTint = when {
+                neonTokens == null -> accent
+                state == ConnectionState.CONNECTED || state == ConnectionState.DISCONNECTING -> neonTokens.iconActive
+                else -> neonTokens.iconIdle
+            }
+            val labelColor = when {
+                neonTokens == null -> accent
+                state == ConnectionState.CONNECTED || state == ConnectionState.DISCONNECTING -> neonTokens.labelActive
+                else -> neonTokens.labelIdle
+            }
+            val labelBase = when {
+                emphasizePersianLabel && diameter < 150.dp -> 14f
+                emphasizePersianLabel -> 18f
+                buttonLabel.length > 11 -> 10.5f
+                else -> 13f
+            }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     imageVector = Icons.Rounded.PowerSettingsNew,
                     contentDescription = null,
-                    tint = accent,
-                    modifier = Modifier.size(diameter * 0.21f),
+                    tint = iconTint,
+                    modifier = Modifier.size(diameter * (neonTokens?.iconScale ?: 0.21f)),
                 )
                 Spacer(Modifier.height(if (diameter < 150.dp) 4.dp else 8.dp))
                 Text(
                     text = buttonLabel,
-                    color = accent,
-                    fontSize = when {
-                        emphasizePersianLabel && diameter < 150.dp -> 14.sp
-                        emphasizePersianLabel -> 18.sp
-                        buttonLabel.length > 11 -> 10.5.sp
-                        else -> 13.sp
+                    color = labelColor,
+                    fontSize = (labelBase * ((neonTokens?.labelSize ?: 13f) / 13f)).sp,
+                    fontWeight = if (neonTokens != null) {
+                        FontWeight(if (emphasizePersianLabel) neonTokens.labelWeightFa else neonTokens.labelWeight)
+                    } else if (emphasizePersianLabel) {
+                        FontWeight.Bold
+                    } else {
+                        FontWeight.SemiBold
                     },
-                    fontWeight = if (emphasizePersianLabel) FontWeight.Bold else FontWeight.SemiBold,
                     fontFamily = localizedFont,
                     letterSpacing = if (isPersian) 0.sp else 0.55.sp,
                     textAlign = TextAlign.Center,
@@ -511,10 +748,18 @@ internal fun ConnectButton(
                     overflow = TextOverflow.Ellipsis,
                     style = TextStyle(
                         textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
-                        shadow = if (emphasizePersianLabel) {
-                            Shadow(color = accent.copy(alpha = 0.42f), offset = Offset.Zero, blurRadius = 9f)
-                        } else {
-                            null
+                        shadow = when {
+                            neonFace -> Shadow(
+                                color = labelColor.copy(alpha = neonTokens?.labelGlowAlpha ?: 0.55f),
+                                offset = Offset.Zero,
+                                blurRadius = neonTokens?.labelGlowBlur ?: 10f,
+                            )
+                            emphasizePersianLabel -> Shadow(
+                                color = accent.copy(alpha = 0.42f),
+                                offset = Offset.Zero,
+                                blurRadius = 9f,
+                            )
+                            else -> null
                         },
                     ),
                 )
@@ -661,33 +906,38 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
         }
     }
 
+    val neonStatus = styleTokens()
+    val statusColor = if (neonStatus != null && !neonStatus.statusUseAccent) neonStatus.statusColor else accent
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = status,
-            color = accent,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Medium,
+            color = statusColor,
+            fontSize = neonStatus?.statusSize?.sp ?: 15.sp,
+            fontWeight = if (neonStatus != null) FontWeight(neonStatus.statusWeight) else FontWeight.Medium,
             fontFamily = localizedFont,
             textAlign = TextAlign.Center,
             style = TextStyle(
                 textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
             ),
-            modifier = if (isPersian) Modifier.widthIn(min = 180.dp) else Modifier,
+            modifier = (if (isPersian) Modifier.widthIn(min = 180.dp) else Modifier)
+                .then(if (neonStatus != null) Modifier.graphicsLayer { alpha = neonStatus.statusAlpha } else Modifier),
             maxLines = 1,
             softWrap = false,
         )
         Spacer(Modifier.height(3.dp))
         Text(
             text = hint,
-            color = UacColors.TextSecondary,
-            fontSize = 11.5.sp,
-            fontWeight = FontWeight.Normal,
+            color = neonStatus?.hintColor ?: UacColors.TextSecondary,
+            fontSize = neonStatus?.hintSize?.sp ?: 11.5.sp,
+            fontWeight = if (neonStatus != null) FontWeight(neonStatus.hintWeight) else FontWeight.Normal,
             fontFamily = localizedFont,
             textAlign = TextAlign.Center,
             style = TextStyle(
                 textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
             ),
-            modifier = Modifier.padding(horizontal = 28.dp),
+            modifier = Modifier
+                .padding(horizontal = (neonStatus?.hintPad ?: 28f).dp)
+                .then(if (neonStatus != null) Modifier.graphicsLayer { alpha = neonStatus.hintAlpha } else Modifier),
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
@@ -1067,6 +1317,166 @@ private fun FeatureItem(
             fontWeight = FontWeight.Normal,
             fontFamily = localizedFont,
         )
+    }
+}
+
+private class NeonGlowBuffer {
+    var bitmap: android.graphics.Bitmap? = null
+    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+    }
+    private var maskBlur = Float.NaN
+    private var mask: android.graphics.BlurMaskFilter? = null
+    private var shaderCx = Float.NaN
+    private var shaderCy = Float.NaN
+    private var shaderStart = 0
+    private var shaderEnd = 0
+    private var keyWidth = -1
+    private var keyHeight = -1
+    private var keyRadius = Float.NaN
+    private var keyStroke = Float.NaN
+    private var keyBlur = Float.NaN
+    private var keyAlpha = -1
+
+    fun matches(
+        width: Int,
+        height: Int,
+        center: Offset,
+        radius: Float,
+        stroke: Float,
+        blur: Float,
+        alpha: Int,
+        start: Int,
+        end: Int,
+    ): Boolean = bitmap != null &&
+        keyWidth == width &&
+        keyHeight == height &&
+        shaderCx == center.x &&
+        shaderCy == center.y &&
+        keyRadius == radius &&
+        keyStroke == stroke &&
+        keyBlur == blur &&
+        keyAlpha == alpha &&
+        shaderStart == start &&
+        shaderEnd == end
+
+    fun prepare(
+        width: Int,
+        height: Int,
+        center: Offset,
+        radius: Float,
+        stroke: Float,
+        blur: Float,
+        alpha: Int,
+        start: Int,
+        end: Int,
+    ): android.graphics.Bitmap {
+        var current = this.bitmap
+        if (current == null || current.width != width || current.height != height) {
+            current?.recycle()
+            current = android.graphics.Bitmap.createBitmap(
+                width,
+                height,
+                android.graphics.Bitmap.Config.ARGB_8888,
+            )
+            this.bitmap = current
+        }
+        if (shaderCx != center.x || shaderCy != center.y || shaderStart != start || shaderEnd != end) {
+            paint.shader = android.graphics.SweepGradient(
+                center.x,
+                center.y,
+                intArrayOf(end, end, start, start, end),
+                floatArrayOf(0f, 0.22f, 0.42f, 0.78f, 1f),
+            )
+            shaderCx = center.x
+            shaderCy = center.y
+            shaderStart = start
+            shaderEnd = end
+        }
+        if (blur >= 1f) {
+            if (maskBlur != blur) {
+                mask = android.graphics.BlurMaskFilter(blur, android.graphics.BlurMaskFilter.Blur.NORMAL)
+                maskBlur = blur
+            }
+            paint.maskFilter = mask
+        } else {
+            paint.maskFilter = null
+            mask = null
+            maskBlur = Float.NaN
+        }
+        paint.strokeWidth = stroke
+        paint.alpha = alpha
+        current.eraseColor(android.graphics.Color.TRANSPARENT)
+        android.graphics.Canvas(current).drawCircle(center.x, center.y, radius, paint)
+        keyWidth = width
+        keyHeight = height
+        keyRadius = radius
+        keyStroke = stroke
+        keyBlur = blur
+        keyAlpha = alpha
+        return current
+    }
+}
+
+private class SweepRingBrushes {
+    private var cx = Float.NaN
+    private var cy = Float.NaN
+    private var start = 0
+    private var end = 0
+    private val brushes = HashMap<Float, Brush>(8)
+
+    fun sweep(alpha: Float, center: Offset, gradientStart: Color, gradientEnd: Color): Brush {
+        val startArgb = gradientStart.toArgb()
+        val endArgb = gradientEnd.toArgb()
+        if (cx != center.x || cy != center.y || start != startArgb || end != endArgb) {
+            brushes.clear()
+            cx = center.x
+            cy = center.y
+            start = startArgb
+            end = endArgb
+        }
+        if (brushes.size > 24) brushes.clear()
+        return brushes.getOrPut(alpha) {
+            val startColor = gradientStart.copy(alpha = gradientStart.alpha * alpha)
+            val endColor = gradientEnd.copy(alpha = gradientEnd.alpha * alpha)
+            Brush.sweepGradient(
+                colorStops = arrayOf(
+                    0.00f to endColor,
+                    0.22f to endColor,
+                    0.42f to startColor,
+                    0.78f to startColor,
+                    1.00f to endColor,
+                ),
+                center = center,
+            )
+        }
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBlurredNeonRing(
+    center: Offset,
+    radius: Float,
+    stroke: Float,
+    blur: Float,
+    alpha: Int,
+    buffer: NeonGlowBuffer,
+    gradientStart: Color,
+    gradientEnd: Color,
+) {
+    val width = size.width.toInt().coerceAtLeast(1)
+    val height = size.height.toInt().coerceAtLeast(1)
+    val start = gradientStart.toArgb()
+    val end = gradientEnd.toArgb()
+    val bitmap = if (
+        buffer.matches(width, height, center, radius, stroke, blur, alpha, start, end)
+    ) {
+        buffer.bitmap!!
+    } else {
+        buffer.prepare(width, height, center, radius, stroke, blur, alpha, start, end)
+    }
+    drawIntoCanvas { canvas ->
+        canvas.nativeCanvas.drawBitmap(bitmap, 0f, 0f, null)
     }
 }
 

@@ -23,4 +23,6 @@
     <string name="quick_settings_tile_disconnecting">Disconnecting</string>
     <string name="quick_settings_tile_disconnected">Disconnected</string>
     <string name="quick_settings_tile_error">Connection failed</string>
+    <string name="home_widget_label">UAC</string>
+    <string name="home_widget_description">اتصال، قطع و انتخاب موتور</string>
 </resources>

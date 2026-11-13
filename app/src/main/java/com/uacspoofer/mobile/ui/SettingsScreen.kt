@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.SystemClock
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
@@ -132,7 +133,12 @@ import com.uacspoofer.mobile.vpn.MonthlyTrafficStore
 import com.uacspoofer.mobile.vpn.UacQuickSettingsTileService
 
 private val SettingsGroupShape = RoundedCornerShape(14.dp)
-private val SettingsGroupColor = Color(0xE6121C28)
+private val SettingsGroupColor: Color
+    get() = when (com.uacspoofer.mobile.ui.theme.UacThemeState.theme) {
+        com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS -> Color(0xE610142E)
+        com.uacspoofer.mobile.ui.theme.AppTheme.NEON -> Color(0xE6140824)
+        com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC -> Color(0xE6121C28)
+    }
 private val SettingsHairlineColor = Color.White.copy(alpha = 0.07f)
 
 @Composable
@@ -181,6 +187,11 @@ internal fun SettingsScreen(
                 )
             },
         ) {
+            item {
+                SettingsGroup(homeText("App theme", "تم برنامه")) {
+                    AppThemeSettingsRow()
+                }
+            }
             item {
                 SettingsGroup(homeText("Connection & Network Settings", "تنظیمات اتصال و شبکه")) {
                     ConnectionModeSettingsRow(showDivider = true)
@@ -1105,6 +1116,76 @@ private fun LanShareValueRow(
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AppThemeSettingsRow() {
+    val context = LocalContext.current
+    val store = remember(context) { com.uacspoofer.mobile.ui.theme.AppThemeStore.get(context) }
+    val theme by store.theme.collectAsStateWithLifecycle()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        AppThemeChoice(
+            label = "Classic",
+            selected = theme == com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC,
+            onClick = { store.set(com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC) },
+            modifier = Modifier.weight(1f),
+        )
+        AppThemeChoice(
+            label = "Neon",
+            selected = theme == com.uacspoofer.mobile.ui.theme.AppTheme.NEON,
+            onClick = { store.set(com.uacspoofer.mobile.ui.theme.AppTheme.NEON) },
+            modifier = Modifier.weight(1f),
+        )
+        AppThemeChoice(
+            label = "Solaris",
+            selected = theme == com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS,
+            onClick = { store.set(com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS) },
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun AppThemeChoice(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val neon = com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon
+    val shape = RoundedCornerShape(12.dp)
+    val border = when {
+        selected && neon -> UacColors.NeonMagenta
+        selected -> UacColors.DisconnectedBlue
+        else -> UacColors.CardBorder
+    }
+    val fill = when {
+        selected && neon -> UacColors.NeonMagenta.copy(alpha = 0.18f)
+        selected -> UacColors.DisconnectedBlue.copy(alpha = 0.16f)
+        else -> Color.Transparent
+    }
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .clip(shape)
+            .background(fill, shape)
+            .border(1.dp, border, shape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = if (selected) UacColors.TextPrimary else UacColors.TextSecondary,
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            maxLines = 1,
         )
     }
 }

@@ -15,7 +15,6 @@ import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -77,6 +76,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material3.Text
@@ -99,9 +99,13 @@ import com.uacspoofer.mobile.profiles.ProfileCountryRepository
 import com.uacspoofer.mobile.profiles.ProfileEndpoint
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.ui.debug.NeonHomeTuner
+import com.uacspoofer.mobile.ui.theme.AppTheme
+import com.uacspoofer.mobile.ui.theme.styleTokens
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
 import com.uacspoofer.mobile.ui.theme.colorsFor
+import com.uacspoofer.mobile.ui.theme.neonDp
 import com.uacspoofer.mobile.update.AppRelease
 import com.uacspoofer.mobile.update.AppUpdateManager
 import com.uacspoofer.mobile.update.UpdateCheckResult
@@ -759,6 +763,7 @@ private fun HomeScreenContent(
     }
     val showGuide = guideStep != null && guideTarget?.isAttached == true
     val guideSession = guideStep?.takeIf { showGuide }?.let { HomeGuideSession(it, gotItFocus) }
+    val neonHome = styleTokens()
 
     CompositionLocalProvider(
         LocalHomeGuideActive provides showGuide,
@@ -769,11 +774,15 @@ private fun HomeScreenContent(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        UacColors.BackgroundTop,
-                        UacColors.BackgroundMiddle,
-                        UacColors.BackgroundBottom,
-                    ),
+                    colors = if (neonHome != null) {
+                        listOf(neonHome.bgTop, neonHome.bgMid, neonHome.bgBottom)
+                    } else {
+                        listOf(
+                            UacColors.BackgroundTop,
+                            UacColors.BackgroundMiddle,
+                            UacColors.BackgroundBottom,
+                        )
+                    },
                 ),
             )
             .homeRemoteDpad(onMenuClick),
@@ -785,29 +794,34 @@ private fun HomeScreenContent(
         val tight = innerHeight < 620.dp
         val wide = LocalWideShell.current || WideShell.isWide(maxWidth, maxHeight)
         val contentMax = if (wide) WideShell.HomeContentMax else maxWidth
-        val selectorMaxWidth = contentMax * 0.80f
+        val selectorMaxWidth = contentMax * (neonHome?.rowWidth ?: 0.80f)
         val headerPad = if (wide) WideShell.EdgePadding else if (compact) 20.dp else 24.dp
         val topSpacing = (innerHeight * 0.028f).coerceIn(
             if (tight) 6.dp else 10.dp,
             if (compact) 18.dp else 28.dp,
         )
 
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val radius = size.width * 0.70f
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        stateColors.accent.copy(alpha = 0.040f),
-                        stateColors.accent.copy(alpha = 0.016f),
-                        stateColors.accent.copy(alpha = 0f),
-                    ),
-                    center = Offset(size.width / 2f, size.height * 0.41f),
-                    radius = radius,
-                ),
-                center = Offset(size.width / 2f, size.height * 0.41f),
-                radius = radius,
-            )
-        }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithCache {
+                    val radius = size.width * 0.70f
+                    val wash = if (neonHome == null || neonHome.bgGlowFollowState) stateColors.accent else neonHome.bgGlow
+                    val center = Offset(size.width / 2f, size.height * 0.41f)
+                    val brush = Brush.radialGradient(
+                        colors = listOf(
+                            wash.copy(alpha = neonHome?.bgGlowAlpha ?: 0.040f),
+                            wash.copy(alpha = neonHome?.bgGlowMidAlpha ?: 0.016f),
+                            wash.copy(alpha = 0f),
+                        ),
+                        center = center,
+                        radius = radius,
+                    )
+                    onDrawBehind {
+                        drawCircle(brush = brush, radius = radius, center = center)
+                    }
+                },
+        )
 
         Column(
             modifier = Modifier
@@ -868,12 +882,12 @@ private fun HomeScreenContent(
                                         tight || maxHeight < 280.dp -> 22.dp
                                         compact -> 36.dp
                                         else -> 54.dp
-                                    }
+                                    } + (neonHome?.glowExtra ?: 0f).dp
                                     val diameter = minOf(
                                         maxWidth * 0.54f,
                                         (maxHeight - halo).coerceAtLeast(0.dp),
                                         if (compact) 200.dp else 220.dp,
-                                    )
+                                    ) * (neonHome?.buttonScale ?: 1f)
                                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                         if (diameter > 0.dp) {
                                             ConnectButton(
@@ -900,7 +914,7 @@ private fun HomeScreenContent(
                             TrafficStatsRow(
                                 accent = stateColors.accent,
                                 compact = compact,
-                                modifier = Modifier.fillMaxWidth(0.86f),
+                                modifier = Modifier.fillMaxWidth(neonHome?.trafficWidth ?: 0.86f),
                             )
                             Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
                             ConnectionAwareFeatureCard(
@@ -908,7 +922,7 @@ private fun HomeScreenContent(
                                 profile = profile,
                                 accent = stateColors.accent,
                                 compact = compact,
-                                modifier = Modifier.fillMaxWidth(0.86f),
+                                modifier = Modifier.fillMaxWidth(neonHome?.insightWidth ?: 0.86f),
                             )
                             Spacer(Modifier.height(if (tight) 2.dp else if (compact) 3.dp else 6.dp))
                         }
@@ -916,11 +930,23 @@ private fun HomeScreenContent(
                 }
             }
             AnimatedDottedWave(
-                accent = stateColors.accent,
+                accent = neonHome?.waveStart ?: stateColors.accent,
+                secondary = neonHome?.waveEnd,
+                glowBlurPx = neonHome?.waveGlowBlur ?: 8f,
+                glowAlpha = neonHome?.waveGlowAlpha ?: 0.72f,
                 motionEnabled = motionEnabled,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(if (tight) 14.dp else if (compact) 22.dp else 32.dp)
+                    .height(
+                        if (neonHome == null) {
+                            if (tight) 14.dp else if (compact) 22.dp else 32.dp
+                        } else if (tight) {
+                            neonDp(true, 32f, 14f, neonHome.waveHeight)
+                        } else {
+                            neonDp(compact, 32f, 22f, neonHome.waveHeight)
+                        },
+                    )
+                    .then(if (neonHome != null) Modifier.graphicsLayer { alpha = neonHome.waveAlpha } else Modifier)
                     .clip(RectangleShape),
             )
         }
@@ -969,6 +995,9 @@ private fun HomeScreenContent(
                 },
             )
         }
+        if (com.uacspoofer.mobile.ui.theme.UacThemeState.theme == AppTheme.NEON) {
+            NeonHomeTuner()
+        }
     }
     }
 }
@@ -988,6 +1017,7 @@ private fun SelectedProfileRow(
     val powStore = remember(context) { PowEngineStore.get(context) }
     val powSettings by powStore.settings.collectAsStateWithLifecycle()
     val isPersian = LocalHomePersian.current
+    val neonRow = styleTokens()
     val nameLocale = if (isPersian) Locale("fa") else Locale.ENGLISH
     val selectedLabel = when {
         engineMode.isTor -> if (torSettings.exitCountryCode.isEmpty()) {
@@ -1023,7 +1053,8 @@ private fun SelectedProfileRow(
     Row(
         modifier = modifier
             .widthIn(max = maxWidth)
-            .height(44.dp)
+            .height(neonRow?.rowHeight?.dp ?: 44.dp)
+            .then(if (neonRow != null) Modifier.graphicsLayer { alpha = neonRow.rowAlpha } else Modifier)
             .semantics(mergeDescendants = true) { role = Role.Button }
             .then(
                 if (guideSession?.step == HomeGuideStep.Country) {
@@ -1038,17 +1069,28 @@ private fun SelectedProfileRow(
                 indication = LocalIndication.current,
                 onClick = onClick,
             )
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = (neonRow?.rowPadH ?: 12f).dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(Modifier.size(6.5.dp).background(UacColors.DisconnectedBlue, CircleShape))
+        Box(
+            Modifier.size(neonRow?.dotSize?.dp ?: 6.5.dp).background(
+                neonRow?.dotColor ?: UacColors.DisconnectedBlue,
+                CircleShape,
+            ),
+        )
         Spacer(Modifier.size(7.dp))
         Text(
             homeText("Selected", "انتخاب‌شده"),
-            color = UacColors.TextSecondary,
-            fontSize = 11.sp,
+            color = neonRow?.selectedLabelColor ?: UacColors.TextSecondary,
+            fontSize = (neonRow?.selectedLabelSize ?: 11f).sp,
             fontFamily = localizedFont,
-            fontWeight = if (LocalHomePersian.current) FontWeight.Medium else null,
+            fontWeight = if (neonRow != null) {
+                FontWeight(if (isPersian) neonRow.selectedLabelWeightFa else neonRow.selectedLabelWeight)
+            } else if (isPersian) {
+                FontWeight.Medium
+            } else {
+                null
+            },
         )
         Spacer(Modifier.size(9.dp))
         Box(Modifier.size(width = 1.dp, height = 16.dp).background(Color.White.copy(alpha = 0.13f)))
@@ -1068,9 +1110,9 @@ private fun SelectedProfileRow(
         ) { current ->
             Text(
                 current,
-                color = UacColors.DisconnectedBlue,
-                fontSize = 13.5.sp,
-                fontWeight = FontWeight.Medium,
+                color = neonRow?.selectedValueColor ?: UacColors.DisconnectedBlue,
+                fontSize = (neonRow?.selectedValueSize ?: 13.5f).sp,
+                fontWeight = if (neonRow != null) FontWeight(neonRow.selectedValueWeight) else FontWeight.Medium,
                 fontFamily = localizedFont,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1080,9 +1122,9 @@ private fun SelectedProfileRow(
         Icon(
             Icons.Outlined.ChevronRight,
             contentDescription = null,
-            tint = UacColors.DisconnectedBlue,
+            tint = neonRow?.selectedValueColor ?: UacColors.DisconnectedBlue,
             modifier = Modifier
-                .size(17.dp)
+                .size((neonRow?.selectedChevron ?: 17f).dp)
                 .graphicsLayer { translationX = chevronOffset },
         )
     }

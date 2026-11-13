@@ -91,10 +91,30 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
 
-private val DialogSurface = Color(0xFF0A1623)
-private val DialogInnerSurface = Color(0xFF0D1C2B)
-private val DialogBorder = Color(0x5536516D)
-private val DialogBlue = Color(0xFF45B7FF)
+private val DialogSurface: Color
+    get() = when (com.uacspoofer.mobile.ui.theme.UacThemeState.theme) {
+        com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS -> com.uacspoofer.mobile.ui.theme.UacColors.Surface
+        com.uacspoofer.mobile.ui.theme.AppTheme.NEON -> Color(0xFF140820)
+        com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC -> Color(0xFF0A1623)
+    }
+private val DialogInnerSurface: Color
+    get() = when (com.uacspoofer.mobile.ui.theme.UacThemeState.theme) {
+        com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS -> Color(0xFF161A36)
+        com.uacspoofer.mobile.ui.theme.AppTheme.NEON -> Color(0xFF1A0B2E)
+        com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC -> Color(0xFF0D1C2B)
+    }
+private val DialogBorder: Color
+    get() = when (com.uacspoofer.mobile.ui.theme.UacThemeState.theme) {
+        com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS -> com.uacspoofer.mobile.ui.theme.UacColors.CardBorder
+        com.uacspoofer.mobile.ui.theme.AppTheme.NEON -> Color(0x66FF2BD6)
+        com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC -> Color(0x5536516D)
+    }
+private val DialogBlue: Color
+    get() = when (com.uacspoofer.mobile.ui.theme.UacThemeState.theme) {
+        com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS -> com.uacspoofer.mobile.ui.theme.UacColors.NeonCyan
+        com.uacspoofer.mobile.ui.theme.AppTheme.NEON -> Color(0xFF22E7FF)
+        com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC -> Color(0xFF45B7FF)
+    }
 
 @Composable
 internal fun HomeLogsDialog(

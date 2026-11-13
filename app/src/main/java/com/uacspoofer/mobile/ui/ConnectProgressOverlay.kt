@@ -251,7 +251,14 @@ internal fun ConnectProgressOverlay(
                 .widthIn(max = 380.dp)
                 .fillMaxWidth()
                 .clip(shape)
-                .background(Brush.linearGradient(listOf(Color(0xF0142231), Color(0xEB0A1520))), shape)
+                .background(
+                    if (com.uacspoofer.mobile.ui.theme.UacThemeState.theme == com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS) {
+                        Brush.linearGradient(listOf(Color(0xF010142E), Color(0xEB070F33)))
+                    } else {
+                        Brush.linearGradient(listOf(Color(0xF0142231), Color(0xEB0A1520)))
+                    },
+                    shape,
+                )
                 .border(1.dp, accent.copy(alpha = 0.35f), shape)
                 .clickable(onClick = onTap)
                 .padding(horizontal = 14.dp, vertical = 11.dp),
