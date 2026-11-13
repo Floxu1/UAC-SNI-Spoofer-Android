@@ -8,8 +8,6 @@ import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.vpn.TunStats
 import java.io.File
-import java.net.Inet4Address
-import java.net.NetworkInterface
 
 object PowTun2Socks {
     private const val NATIVE_EXIT_GRACE_MS = 5_000L
@@ -29,29 +27,7 @@ object PowTun2Socks {
         get() = runCatching { HevSocks5Tunnel.TProxyIsRunning() }.getOrDefault(false)
 
     fun selectPrivateAddress(): PrivateAddress {
-        val candidates = linkedMapOf(
-            "10" to PrivateAddress("10.0.0.1", "10.0.0.0", 8, "10.0.0.2"),
-            "172" to PrivateAddress("172.16.0.1", "172.16.0.0", 12, "172.16.0.2"),
-            "192" to PrivateAddress("192.168.0.1", "192.168.0.0", 16, "192.168.0.2"),
-            "169" to PrivateAddress("169.254.1.1", "169.254.1.0", 24, "169.254.1.2"),
-        )
-        val interfaces = runCatching { NetworkInterface.getNetworkInterfaces() }.getOrNull()
-        if (interfaces != null) {
-            for (netInterface in interfaces) {
-                for (inetAddress in netInterface.inetAddresses) {
-                    if (inetAddress !is Inet4Address) continue
-                    val ip = inetAddress.hostAddress ?: continue
-                    when {
-                        ip.startsWith("10.") -> candidates.remove("10")
-                        ip.length >= 6 &&
-                            ip.substring(0, 6) >= "172.16" &&
-                            ip.substring(0, 6) <= "172.31" -> candidates.remove("172")
-                        ip.startsWith("192.168") -> candidates.remove("192")
-                    }
-                }
-            }
-        }
-        val selected = candidates.values.firstOrNull() ?: defaultPrivateAddress()
+        val selected = defaultPrivateAddress()
         privateAddress = selected
         AppLogRepository.info(
             LogSource.POW,
@@ -127,5 +103,5 @@ object PowTun2Socks {
     }
 
     private fun defaultPrivateAddress() =
-        PrivateAddress("10.0.0.1", "10.0.0.0", 8, "10.0.0.2")
+        PrivateAddress("198.18.0.1", "198.18.0.1", 32, "198.18.0.2")
 }

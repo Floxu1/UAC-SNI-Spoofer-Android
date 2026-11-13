@@ -1,10 +1,14 @@
 package com.uacspoofer.mobile.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -34,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -49,6 +54,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -56,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.uacspoofer.mobile.R
 import com.uacspoofer.mobile.auto.AutoBootstrapStore
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.engine.pow.PowPhase
@@ -131,8 +138,17 @@ internal fun ConnectProgressOverlay(
         }
     }
 
+    val context = LocalContext.current
+    val panelStore = remember(context) { ConnectPanelStore.get(context) }
+    val panelMode by panelStore.status.collectAsStateWithLifecycle()
+    val collapsedLift by animateDpAsState(
+        targetValue = if (panelMode == ConnectPanelMode.COLLAPSED) (-28).dp else 0.dp,
+        animationSpec = tween(250, easing = FastOutSlowInEasing),
+        label = "status-pill-lift",
+    )
+
     AnimatedVisibility(
-        visible = mode != OverlayMode.HIDDEN,
+        visible = mode != OverlayMode.HIDDEN && panelMode != ConnectPanelMode.CLOSED,
         modifier = modifier,
         enter = fadeIn(tween(220)) +
             slideInVertically(tween(320, easing = FastOutSlowInEasing)) { -it / 2 } +
@@ -234,6 +250,7 @@ internal fun ConnectProgressOverlay(
             else -> homeText("Preparing secure tunnel…", "در حال آماده‌سازی تونل امن…")
         }
         val font = homeLocalizedFont()
+        val paint = connectPanelPaint(primary = false)
         val shape = RoundedCornerShape(18.dp)
         val dismiss: () -> Unit = { mode = OverlayMode.HIDDEN }
         val onTap: () -> Unit = when {
@@ -245,21 +262,74 @@ internal fun ConnectProgressOverlay(
             if (mode == OverlayMode.SUCCESS) 1f else ConnectProgressModel.progress(steps),
             tween(500, easing = FastOutSlowInEasing), label = "cpProgress",
         )
+        val focused = steps.getOrNull(ConnectProgressModel.focusIndex(steps))
+        val stepName = focused?.let { homeText(it.english, it.persian) }.orEmpty()
+        val collapsedTitle = if (stepName.isBlank()) title else "$title · $stepName"
 
-        Column(
+        Box(
+            Modifier
+                .widthIn(max = 380.dp)
+                .offset(y = collapsedLift)
+                .animateContentSize(tween(250, easing = FastOutSlowInEasing)),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+        AnimatedContent(
+            targetState = panelMode == ConnectPanelMode.OPEN,
+            transitionSpec = {
+                ContentTransform(
+                    fadeIn(tween(250)),
+                    fadeOut(tween(250)),
+                    sizeTransform = null,
+                )
+            },
+            label = "status-panel-fold",
+        ) { expanded ->
+        if (!expanded) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(paint.background)
+                    .border(1.dp, paint.border.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
+                    .clickable(role = androidx.compose.ui.semantics.Role.Button) {
+                        panelStore.setStatus(ConnectPanelMode.OPEN)
+                    }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PulseDot(accent, pulsing = mode == OverlayMode.CONNECTING)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    collapsedTitle,
+                    color = UacColors.TextPrimary,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = font,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 220.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    homeLtr(ConnectProgressModel.formatElapsed(elapsed)),
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Spacer(Modifier.width(6.dp))
+                Icon(
+                    Icons.Rounded.ExpandMore,
+                    connectPanelText(R.string.connect_panel_expand),
+                    tint = UacColors.TextSecondary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        } else Column(
             Modifier
                 .widthIn(max = 380.dp)
                 .fillMaxWidth()
                 .clip(shape)
-                .background(
-                    if (com.uacspoofer.mobile.ui.theme.UacThemeState.theme == com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS) {
-                        Brush.linearGradient(listOf(Color(0xF010142E), Color(0xEB070F33)))
-                    } else {
-                        Brush.linearGradient(listOf(Color(0xF0142231), Color(0xEB0A1520)))
-                    },
-                    shape,
-                )
-                .border(1.dp, accent.copy(alpha = 0.35f), shape)
+                .background(paint.background, shape)
+                .border(1.dp, paint.border.copy(alpha = 0.75f), shape)
                 .clickable(onClick = onTap)
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
@@ -291,6 +361,11 @@ internal fun ConnectProgressOverlay(
                         modifier = Modifier.size(20.dp).clip(CircleShape).clickable(onClick = dismiss).padding(2.dp),
                     )
                 }
+                Spacer(Modifier.width(6.dp))
+                ConnectPanelActions(
+                    onCollapse = { panelStore.setStatus(ConnectPanelMode.COLLAPSED) },
+                    onClose = { panelStore.setStatus(ConnectPanelMode.CLOSED) },
+                )
             }
             Spacer(Modifier.height(9.dp))
             if (steps.isNotEmpty()) {
@@ -327,6 +402,8 @@ internal fun ConnectProgressOverlay(
                         .padding(horizontal = 14.dp, vertical = 6.dp),
                 )
             }
+        }
+        }
         }
     }
 }

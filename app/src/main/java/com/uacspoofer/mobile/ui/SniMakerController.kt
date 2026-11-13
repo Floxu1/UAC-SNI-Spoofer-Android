@@ -600,18 +600,18 @@ internal class SniMakerController(context: Context) : Closeable {
         const val DEFAULT_WORKERS = 3
         const val DEFAULT_TIMEOUT_MS = 20_000
 
-        private const val PREFERENCES_NAME = "sni_config_maker"
-        private const val KEY_URL = "subscription_url"
-        private const val KEY_WORKERS = "test_workers"
-        private const val KEY_TIMEOUT = "test_timeout_ms"
+        internal const val PREFERENCES_NAME = "sni_config_maker"
+        internal const val KEY_URL = "subscription_url"
+        internal const val KEY_WORKERS = "test_workers"
+        internal const val KEY_TIMEOUT = "test_timeout_ms"
         private const val KEY_ADAPTIVE_TEST_MIGRATION = "adaptive_test_settings_v1"
         private const val LEGACY_DEFAULT_WORKERS = 6
         private const val LEGACY_DEFAULT_TIMEOUT_MS = 8_000
-        private const val DEFAULT_SUBSCRIPTION_URL =
+        internal const val DEFAULT_SUBSCRIPTION_URL =
             "https://gitverse.ru/api/repos/flaafix/AetrisVPN_Black_list/raw/branch/master/configs.txt"
         private const val LOAD_BATCH_SIZE = 250
         private const val MAX_TOTAL_ROWS = 10_000
-        private const val MAX_URL_CHARS = 2_048
+        internal const val MAX_URL_CHARS = 2_048
         private const val MAX_PASTE_CHARS = 24 * 1024 * 1024
         private const val MAX_EDITOR_CHARS = 64 * 1024
         private const val MAX_DOWNLOAD_BYTES = 24 * 1024 * 1024

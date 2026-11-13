@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -219,7 +220,16 @@ private fun ConnectedInsightsCard(
             .background(tuned?.insightFill ?: UacColors.Surface.copy(alpha = 0.82f), shape)
             .border(
                 tuned?.insightBorder?.dp ?: 0.75.dp,
-                if (solaris) UacColors.CardBorder else tuned?.insightBorderColor ?: UacColors.CardBorder,
+                if (tuned != null) {
+                    val legacy = if (solaris) UacColors.CardBorder else tuned.insightBorderColor
+                    val untouched = tuned.cardBorderStart == tuned.cardBorderColor &&
+                        tuned.cardBorderEnd == tuned.cardBorderColor
+                    Brush.linearGradient(
+                        if (untouched) listOf(legacy, legacy) else listOf(tuned.cardBorderStart, tuned.cardBorderEnd),
+                    )
+                } else {
+                    Brush.linearGradient(listOf(UacColors.CardBorder, UacColors.CardBorder))
+                },
                 shape,
             )
             .padding(horizontal = 5.dp, vertical = if (compact) 7.dp else 9.dp),

@@ -460,13 +460,12 @@ class UacVpnService : VpnService() {
         settings: AdvancedSettingsData,
         underlyingNetwork: Network,
     ): android.os.ParcelFileDescriptor? {
-        val route = TunRouteParser.parse(settings.tunRoute)
         return Builder()
             .setSession("UAC Route MTU Probe")
             .setBlocking(false)
             .setMtu(settings.tunMtu)
             .addAddress(settings.tunAddress, 32)
-            .addRoute(route.first, route.second)
+            .routeAroundPrivateLan(settings.tunRoute)
             .addDnsServer(settings.nativeDns)
             .addDisallowedApplication(packageName)
             .apply {
@@ -1632,7 +1631,6 @@ class UacVpnService : VpnService() {
     private fun establishTun(
         settings: AdvancedSettingsData,
     ): android.os.ParcelFileDescriptor? {
-        val route = TunRouteParser.parse(settings.tunRoute)
         val routing = AppRoutingPreferences.snapshot(this)
         val torRelay = activeEngine.isTor
         val dns = if (torRelay) TorTunRelayConfig.MAP_DNS else settings.nativeDns
@@ -1647,7 +1645,7 @@ class UacVpnService : VpnService() {
             .setBlocking(false)
             .setMtu(settings.tunMtu)
             .addAddress(settings.tunAddress, 32)
-            .addRoute(route.first, route.second)
+            .routeAroundPrivateLan(settings.tunRoute)
             .addDnsServer(dns)
             .apply { if (settings.ipv4Only || torRelay) allowFamily(OsConstants.AF_INET) }
         AppRoutingPreferences.applyTo(builder, this)
@@ -1671,12 +1669,18 @@ class UacVpnService : VpnService() {
             .setBlocking(false)
             .setMtu(tunMtu)
             .addAddress(address.ipAddress, address.prefixLength)
-            .addRoute("0.0.0.0", 0)
-            .addRoute(address.subnet, address.prefixLength)
+            .routeAroundPrivateLan("0.0.0.0/0")
             .addDnsServer(address.router)
             .allowFamily(OsConstants.AF_INET)
         AppRoutingPreferences.applyTo(builder, this)
         return attachPacketFilter(builder.establish(), tunMtu)
+    }
+
+    private fun Builder.routeAroundPrivateLan(configured: String): Builder {
+        TunLanBypass.routesFor(configured).forEach { (address, prefix) ->
+            addRoute(address, prefix)
+        }
+        return this
     }
 
     private fun attachPacketFilter(
@@ -2230,8 +2234,8 @@ class UacVpnService : VpnService() {
                 .setBlocking(true)
                 .setMtu(1280)
                 .addAddress("10.255.255.1", 32)
-                .addRoute("0.0.0.0", 0)
-                .addDnsServer("10.255.255.2")
+                .routeAroundPrivateLan("0.0.0.0/0")
+                .addDnsServer("192.0.2.1")
                 .allowFamily(OsConstants.AF_INET)
                 .addDisallowedApplication(packageName)
             val next = builder.establish() ?: return@runCatching false

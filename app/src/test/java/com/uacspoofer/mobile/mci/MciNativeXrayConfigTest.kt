@@ -40,4 +40,42 @@ class MciNativeXrayConfigTest {
         assertTrue(config.contains("\"inboundTag\":[\"dns-query\"],\"outboundTag\":\"proxy\""))
         assertFalse(config.contains("\"inboundTag\":[\"dns-query\"],\"outboundTag\":\"probe-proxy\""))
     }
+
+    @Test
+    fun hostnameEdgeResolvesOnThePhoneNotThroughTheProxy() {
+        val config = MciNativeXrayConfig.build(
+            edge = MciEdge("panel.example.com", 28000, "uac-direct-compat", 1),
+        )
+
+        assertTrue(
+            config.contains(
+                """"address":"localhost","domains":["full:panel.example.com"],"skipFallback":true""",
+            ),
+        )
+        assertTrue(config.contains("\"inboundTag\":[\"dns-query\"],\"outboundTag\":\"proxy\""))
+    }
+
+    @Test
+    fun privateLanIsDirectEvenWhenIranDirectIsOff() {
+        val config = MciNativeXrayConfig.build(
+            settings = AdvancedSettingsData.DEFAULT.copy(iranDirect = false),
+        )
+        val privateRule = config.indexOf("10.0.0.0/8")
+        val dnsRule = config.indexOf("\"port\":\"53\"")
+
+        assertTrue(config.contains("\"tag\":\"direct\""))
+        assertTrue(config.contains("172.16.0.0/12"))
+        assertTrue(config.contains("192.168.0.0/16"))
+        assertTrue(config.contains("127.0.0.0/8"))
+        assertTrue(privateRule >= 0 && dnsRule > privateRule)
+        assertFalse(config.contains("geoip:private"))
+    }
+
+    @Test
+    fun ipEdgeDoesNotPinADialHostResolver() {
+        val config = MciNativeXrayConfig.build()
+
+        assertFalse(config.contains("full:104.26.13.100"))
+        assertFalse(config.contains("full:panel.example.com"))
+    }
 }

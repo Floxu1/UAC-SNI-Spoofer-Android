@@ -98,7 +98,7 @@ class NotificationTrafficMeter {
         private fun sideText(arrow: String, bytes: Long, bytesPerSecond: Long, withSpeed: Boolean): String {
             val total = compact(bytes.toDouble(), BYTE_UNITS)
             if (!withSpeed) return "$arrow $total"
-            return "$arrow $total  ${compact(bytesPerSecond.toDouble(), SPEED_UNITS)}"
+            return "$arrow $total | ${compact(bytesPerSecond.toDouble(), SPEED_UNITS)}"
         }
 
         /** At most 4 digits: 45.5M, 194M, 11K/s, 1023B. Rolls to the next unit at 1000. */

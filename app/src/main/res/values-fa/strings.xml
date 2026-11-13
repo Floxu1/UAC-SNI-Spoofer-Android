@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_backup_title">پشتیبان تنظیمات</string>
+    <string name="settings_backup_summary">ذخیرهٔ تم، زبان، موتورها و گزینه‌های اتصال در یک فایل JSON</string>
+    <string name="settings_restore_title">بازیابی از فایل</string>
+    <string name="settings_restore_summary">اعمال یک فایل پشتیبان</string>
+    <string name="settings_reset_title">بازنشانی تنظیمات</string>
+    <string name="settings_reset_summary">برگرداندن تنظیمات به پیش‌فرض</string>
+    <string name="settings_backup_saved">پشتیبان ذخیره شد</string>
+    <string name="settings_backup_failed">نوشتن پشتیبان انجام نشد</string>
+    <string name="settings_restore_confirm_title">بازیابی تنظیمات</string>
+    <string name="settings_restore_confirm_body">این پشتیبان از نسخهٔ %1$s است و در %2$s ذخیره شده.</string>
+    <string name="settings_restore_confirm_disconnect">قبل از اعمال، اتصال قطع می‌شود.</string>
+    <string name="settings_restore_apply">بازیابی</string>
+    <string name="settings_cancel">انصراف</string>
+    <string name="settings_restore_done">%1$d تنظیم بازیابی شد، %2$d مورد نادیده گرفته شد</string>
+    <string name="settings_restore_bad_file">این فایل پشتیبان تنظیمات نیست</string>
+    <string name="settings_disconnect_failed">اتصال قطع نشد. هیچ تغییری اعمال نشد.</string>
+    <string name="settings_reset_confirm_title">تنظیمات بازنشانی شود؟</string>
+    <string name="settings_reset_confirm_body">تم، زبان، موتورها و گزینه‌های اتصال به پیش‌فرض برمی‌گردند. کش و سابقهٔ اتصال می‌مانند.</string>
+    <string name="settings_reset_confirm_disconnect">اول اتصال قطع می‌شود.</string>
+    <string name="settings_reset_now">بازنشانی</string>
+    <string name="settings_reset_backup_first">اول بکاپ بگیرم؟</string>
+    <string name="settings_reset_done">تنظیمات بازنشانی شد</string>
+    <string name="settings_action_failed">انجام نشد. هیچ تغییری اعمال نشد.</string>
+    <string name="settings_ok">باشه</string>
+    <string name="connect_panel_collapse">جمع کردن</string>
+    <string name="connect_panel_close">بستن</string>
+    <string name="connect_panel_expand">باز کردن</string>
+    <string name="connect_panel_reopen">نمایش وضعیت اتصال</string>
+    <string name="connect_panel_count">%1$d/%2$d</string>
+</resources>

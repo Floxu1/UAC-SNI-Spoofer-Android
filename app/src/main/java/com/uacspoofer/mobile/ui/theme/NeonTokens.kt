@@ -14,7 +14,7 @@ import java.util.Locale
 
 @Immutable
 data class NeonTokens(
-    val bgTop: Color = Color(0xFF07010F),
+    val bgTop: Color = Color(0xFF21033F),
     val bgMid: Color = Color(0xFF0E0420),
     val bgBottom: Color = Color(0xFF160628),
     val bgGlowAlpha: Float = 0.04f,
@@ -54,10 +54,18 @@ data class NeonTokens(
     val hairlineAlpha3: Float = 0.044f,
     val hairlineAlpha4: Float = 0f,
     val glowBlur: Float = 0f,
-    val glowBlurConnected: Float = 21.197f,
-    val glowAlpha: Float = 241.75f,
-    val glowSpread: Float = -4.447f,
-    val glowDisconnected: Float = 0.659f,
+    val glowBlurConnected: Float = 56.723f,
+    val glowAlpha: Float = 216.139f,
+    val glowSpread: Float = 5.581f,
+    val glowDisconnected: Float = 0.34f,
+    val connectOrbitMs: Float = 2000f,
+    val connectSweepMin: Float = 100f,
+    val connectSweepMax: Float = 150f,
+    val connectNearBlur: Float = 10f,
+    val connectFarBlur: Float = 26f,
+    val connectNearAlpha: Float = 1f,
+    val connectFarAlpha: Float = 0.6f,
+    val connectHeadRadius: Float = 2.5f,
     val innerGlowBlur: Float = 7.837f,
     val innerGlowAlpha: Float = 190.323f,
     val innerGlowInset: Float = 0f,
@@ -102,21 +110,28 @@ data class NeonTokens(
     val cardCorner: Float = 21f,
     val cardBorder: Float = 1f,
     val cardBorderColor: Color = Color(0xE4FF2AD8),
+    val cardBorderStart: Color = Color(0xE4FF2AD8),
+    val cardBorderEnd: Color = Color(0xE4FF2AD8),
+    val cardGlowColorStart: Color = Color(0xE4FF2AD8),
+    val cardGlowColorEnd: Color = Color(0xE4FF2AD8),
+    val cardGlowBlur: Float = 6.835f,
+    val cardGlowAlpha: Float = 0.329f,
+    val cardGlowSpread: Float = 7.196f,
     val cardFillStart: Color = Color(0xE6140824),
     val cardFillEnd: Color = Color(0xC0130519),
     val cardPadH: Float = 11f,
-    val cardAlpha: Float = 0.676f,
+    val cardAlpha: Float = 1f,
     val cardIconBox: Float = 36f,
     val cardIcon: Float = 21f,
     val cardIconFollowState: Boolean = true,
-    val cardIconColor: Color = Color(0xFF8861C9),
+    val cardIconColor: Color = Color(0xFFA061C9),
     val cardLabelSize: Float = 12f,
     val cardLabelWeight: Int = 400,
     val cardLabelWeightFa: Int = 500,
     val cardLabelColor: Color = Color(0xFF25EAFF),
     val cardValueSize: Float = 25.939f,
     val cardValueWeight: Int = 900,
-    val cardValueColor: Color = Color(0xFFFF2BD8),
+    val cardValueColor: Color = Color(0xFFF900C2),
     val cardBarHeight: Float = 3f,
     val cardBarStart: Color = Color(0xFFFF2BD6),
     val cardBarEnd: Color = Color(0xFF22E7FF),
@@ -167,14 +182,14 @@ data class NeonTokens(
     val waveGlowAlpha: Float = 0.926f,
     val waveAlpha: Float = 1f,
 ) {
-    fun toKotlin(): String {
+    fun toKotlin(name: String = "NeonTokens"): String {
         fun c(color: Color) = "Color(0x%08X)".format(color.toArgb())
         fun n(value: Float): String {
             val text = String.format(Locale.US, "%.3f", value).trimEnd('0').trimEnd('.')
             return text + "f"
         }
         return buildString {
-            appendLine("NeonTokens(")
+            appendLine("$name(")
             appendLine("    bgTop = ${c(bgTop)},")
             appendLine("    bgMid = ${c(bgMid)},")
             appendLine("    bgBottom = ${c(bgBottom)},")
@@ -219,6 +234,14 @@ data class NeonTokens(
             appendLine("    glowAlpha = ${n(glowAlpha)},")
             appendLine("    glowSpread = ${n(glowSpread)},")
             appendLine("    glowDisconnected = ${n(glowDisconnected)},")
+            appendLine("    connectOrbitMs = ${n(connectOrbitMs)},")
+            appendLine("    connectSweepMin = ${n(connectSweepMin)},")
+            appendLine("    connectSweepMax = ${n(connectSweepMax)},")
+            appendLine("    connectNearBlur = ${n(connectNearBlur)},")
+            appendLine("    connectFarBlur = ${n(connectFarBlur)},")
+            appendLine("    connectNearAlpha = ${n(connectNearAlpha)},")
+            appendLine("    connectFarAlpha = ${n(connectFarAlpha)},")
+            appendLine("    connectHeadRadius = ${n(connectHeadRadius)},")
             appendLine("    innerGlowBlur = ${n(innerGlowBlur)},")
             appendLine("    innerGlowAlpha = ${n(innerGlowAlpha)},")
             appendLine("    innerGlowInset = ${n(innerGlowInset)},")
@@ -263,6 +286,13 @@ data class NeonTokens(
             appendLine("    cardCorner = ${n(cardCorner)},")
             appendLine("    cardBorder = ${n(cardBorder)},")
             appendLine("    cardBorderColor = ${c(cardBorderColor)},")
+            appendLine("    cardBorderStart = ${c(cardBorderStart)},")
+            appendLine("    cardBorderEnd = ${c(cardBorderEnd)},")
+            appendLine("    cardGlowColorStart = ${c(cardGlowColorStart)},")
+            appendLine("    cardGlowColorEnd = ${c(cardGlowColorEnd)},")
+            appendLine("    cardGlowBlur = ${n(cardGlowBlur)},")
+            appendLine("    cardGlowAlpha = ${n(cardGlowAlpha)},")
+            appendLine("    cardGlowSpread = ${n(cardGlowSpread)},")
             appendLine("    cardFillStart = ${c(cardFillStart)},")
             appendLine("    cardFillEnd = ${c(cardFillEnd)},")
             appendLine("    cardPadH = ${n(cardPadH)},")
@@ -421,10 +451,17 @@ val SolarisTokens = NeonTokens(
     cardCorner = 21f,
     cardBorder = 1f,
     cardBorderColor = Color(0xE4FF682A),
+    cardBorderStart = Color(0xE4FF682A),
+    cardBorderEnd = Color(0xE4FF682A),
+    cardGlowColorStart = Color(0xE4FF682A),
+    cardGlowColorEnd = Color(0xE4FF682A),
+    cardGlowBlur = 6.834f,
+    cardGlowAlpha = 0.329f,
+    cardGlowSpread = 7.028f,
     cardFillStart = Color(0xE6090824),
     cardFillEnd = Color(0xC0080519),
     cardPadH = 11f,
-    cardAlpha = 0.676f,
+    cardAlpha = 1f,
     cardIconBox = 36f,
     cardIcon = 21f,
     cardIconFollowState = true,
@@ -499,8 +536,20 @@ object NeonLive {
     }
 }
 
+object SolarisLive {
+    var tokens by mutableStateOf(SolarisTokens)
+
+    fun reset() {
+        tokens = SolarisTokens
+    }
+
+    fun update(block: (NeonTokens) -> NeonTokens) {
+        tokens = block(tokens)
+    }
+}
+
 internal fun styleTokens(): NeonTokens? = when (UacThemeState.theme) {
-    AppTheme.SOLARIS -> SolarisTokens
+    AppTheme.SOLARIS -> SolarisLive.tokens
     AppTheme.NEON -> NeonLive.tokens
     AppTheme.CLASSIC -> null
 }

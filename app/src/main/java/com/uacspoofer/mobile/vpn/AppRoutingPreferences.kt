@@ -71,6 +71,11 @@ object AppRoutingPreferences {
         persist(context.applicationContext, mutableSettings.value.copy(mode = mode))
     }
 
+    fun replace(context: Context, settings: AppRoutingSettings) {
+        initialize(context)
+        persist(context.applicationContext, settings)
+    }
+
     fun setPackageSelected(context: Context, packageName: String, selected: Boolean) {
         initialize(context)
         val packages = mutableSettings.value.selectedPackages.toMutableSet().apply {

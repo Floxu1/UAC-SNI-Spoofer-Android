@@ -1,5 +1,9 @@
 package com.uacspoofer.mobile.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import android.os.Build
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -7,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -23,19 +28,36 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.ui.theme.AppTheme
 import com.uacspoofer.mobile.ui.theme.UacThemeState
 import com.uacspoofer.mobile.ui.theme.styleTokens
@@ -45,6 +67,7 @@ import com.uacspoofer.mobile.ui.theme.neonSp
 import com.uacspoofer.mobile.vpn.MonthlyTrafficStore
 import com.uacspoofer.mobile.vpn.TrafficStatsStore
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 internal fun TrafficStatsRow(
@@ -103,6 +126,27 @@ private fun TrafficStatCard(
     )
     val total = formatBytes(totalBytes)
     val rate = formatBytes(bytesPerSecond)
+    val connection by ConnectionStateStore.state.collectAsState()
+    val speedFloor = 64L * 1024L
+    var peak by remember { mutableLongStateOf(speedFloor) }
+    val barConnected = connection == ConnectionState.CONNECTED
+    if (neon && tuned != null) {
+        if (!barConnected) {
+            if (peak != speedFloor) peak = speedFloor
+        } else if (bytesPerSecond > peak) {
+            peak = bytesPerSecond
+        }
+    }
+    val barTarget = if (neon && tuned != null && barConnected) {
+        (bytesPerSecond.toFloat() / peak.coerceAtLeast(speedFloor).toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val barFraction by animateFloatAsState(
+        targetValue = barTarget,
+        animationSpec = tween(durationMillis = 400),
+        label = "trafficBar",
+    )
     val cardFill = if (tuned != null) {
         listOf(tuned.cardFillStart, tuned.cardFillEnd)
     } else {
@@ -110,8 +154,20 @@ private fun TrafficStatCard(
     }
     val cardEdge = tuned?.cardBorderColor ?: accent.copy(alpha = 0.44f)
     val iconTint = if (tuned != null && !tuned.cardIconFollowState) tuned.cardIconColor else accent
-    Row(
-        modifier = modifier
+    val glowBlurPx = with(LocalDensity.current) { (tuned?.cardGlowBlur ?: 0f).dp.toPx() }
+    val glowEffect = remember(glowBlurPx) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || glowBlurPx < 1f) {
+            null
+        } else {
+            val sigma = glowBlurPx * 0.57735f + 0.5f
+            BlurEffect(sigma, sigma, TileMode.Decal)
+        }
+    }
+    val cardBorderBrush = tuned?.let {
+        Brush.linearGradient(listOf(it.cardBorderStart, it.cardBorderEnd))
+    }
+    Box(
+        modifier
             .height(
                 if (tuned != null) {
                     neonDp(compact, 104f, 92f, tuned.cardHeight)
@@ -121,9 +177,32 @@ private fun TrafficStatCard(
                     88.dp
                 },
             )
+            .graphicsLayer { clip = false },
+    ) {
+        if (tuned != null && barConnected && tuned.cardGlowAlpha > 0.004f && tuned.cardGlowSpread > 0.05f) {
+            CardEdgeGlow(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer { clip = false },
+                spreadDp = tuned.cardGlowSpread,
+                cornerDp = tuned.cardCorner,
+                blurPx = glowBlurPx,
+                alpha = tuned.cardGlowAlpha,
+                effect = glowEffect,
+                colorStart = tuned.cardGlowColorStart,
+                colorEnd = tuned.cardGlowColorEnd,
+            )
+        }
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
             .then(if (tuned != null) Modifier.graphicsLayer { alpha = tuned.cardAlpha } else Modifier)
             .background(Brush.linearGradient(cardFill), shape)
-            .border(if (tuned != null) tuned.cardBorder.dp else 1.dp, cardEdge, shape)
+            .border(
+                if (tuned != null) tuned.cardBorder.dp else 1.dp,
+                cardBorderBrush ?: SolidColor(cardEdge),
+                shape,
+            )
             .padding(horizontal = if (tuned != null) neonDp(compact, 11f, 8f, tuned.cardPadH) else if (compact) 8.dp else 11.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -163,14 +242,25 @@ private fun TrafficStatCard(
                 maxLines = 1,
             )
             if (neon && tuned != null) {
-                Text(
-                    rate.amount,
-                    color = tuned.cardValueColor,
-                    fontSize = neonSp(compact, 26f, 22f, tuned.cardValueSize),
-                    fontWeight = FontWeight(tuned.cardValueWeight),
-                    maxLines = 1,
-                )
-                val fraction = (bytesPerSecond.toFloat() / 400_000f).coerceIn(0.08f, 1f)
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(
+                        rate.amount,
+                        color = tuned.cardValueColor,
+                        fontSize = neonSp(compact, 26f, 22f, tuned.cardValueSize),
+                        fontWeight = FontWeight(tuned.cardValueWeight),
+                        maxLines = 1,
+                        modifier = Modifier.alignByBaseline(),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "${rate.unit}/s",
+                        color = tuned.cardValueColor.copy(alpha = 0.55f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        modifier = Modifier.alignByBaseline(),
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 val barStart = if (solaris) UacColors.NeonCyan else tuned.cardBarStart
                 val barEnd = if (solaris) UacColors.ConnectedGreen else tuned.cardBarEnd
@@ -188,7 +278,7 @@ private fun TrafficStatCard(
                     ) {
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth(fraction)
+                                .fillMaxWidth(barFraction)
                                 .height(tuned.cardBarHeight.dp)
                                 .clip(RoundedCornerShape(50))
                                 .background(Brush.horizontalGradient(listOf(barStart, barEnd))),
@@ -243,7 +333,76 @@ private fun TrafficStatCard(
             }
         }
     }
+    }
 }
+
+@Composable
+private fun CardEdgeGlow(
+    modifier: Modifier,
+    spreadDp: Float,
+    cornerDp: Float,
+    blurPx: Float,
+    alpha: Float,
+    effect: BlurEffect?,
+    colorStart: Color,
+    colorEnd: Color,
+) {
+    val density = LocalDensity.current
+    val spreadPx = with(density) { spreadDp.dp.toPx() }
+    val cornerPx = with(density) { cornerDp.dp.toPx() }
+    val padPx = blurPx * 3f + spreadPx
+    val pad = padPx.roundToInt()
+    Layout(
+        content = {
+            Box(
+                Modifier.drawWithContent {
+                    val hole = Path().apply {
+                        addRoundRect(cardHole(padPx, cornerPx))
+                    }
+                    clipPath(hole, ClipOp.Difference) {
+                        this@drawWithContent.drawContent()
+                    }
+                },
+            ) {
+                Canvas(
+                    Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            clip = false
+                            this.alpha = alpha.coerceIn(0f, 1f)
+                            renderEffect = effect
+                        },
+                ) {
+                    drawPath(
+                        path = Path().apply { addRoundRect(cardHole(padPx, cornerPx)) },
+                        brush = Brush.linearGradient(listOf(colorStart, colorEnd)),
+                        style = Stroke(width = spreadPx),
+                    )
+                }
+            }
+        },
+        modifier = modifier.graphicsLayer { clip = false },
+    ) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val height = constraints.maxHeight
+        if (width == Constraints.Infinity || height == Constraints.Infinity) {
+            layout(0, 0) {}
+        } else {
+            val child = measurables[0].measure(Constraints.fixed(width + pad * 2, height + pad * 2))
+            layout(width, height) {
+                child.place(-pad, -pad)
+            }
+        }
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.cardHole(padPx: Float, cornerPx: Float) = RoundRect(
+    left = padPx,
+    top = padPx,
+    right = size.width - padPx,
+    bottom = size.height - padPx,
+    cornerRadius = CornerRadius(cornerPx, cornerPx),
+)
 
 @Composable
 internal fun TrafficUsagePanels() {

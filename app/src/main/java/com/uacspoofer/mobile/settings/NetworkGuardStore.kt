@@ -65,6 +65,12 @@ class NetworkGuardStore private constructor(context: Context) {
     }
 
     @Synchronized
+    fun replace(value: NetworkGuardSettings) {
+        persist(value)
+        com.uacspoofer.mobile.mci.DomesticDirect.applyEnabled(value.iranDirect)
+    }
+
+    @Synchronized
     fun setIranDirect(enabled: Boolean) {
         persist(mutableSettings.value.copy(iranDirect = enabled))
         com.uacspoofer.mobile.mci.DomesticDirect.applyEnabled(enabled)

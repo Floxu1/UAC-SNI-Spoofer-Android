@@ -1,18 +1,31 @@
 package com.uacspoofer.mobile.ui
 
+import android.os.Build
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +37,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -33,8 +47,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.material.icons.rounded.Menu
@@ -45,7 +63,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,22 +74,30 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.util.lerp
+import kotlin.math.cos
+import kotlin.math.sin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import com.uacspoofer.mobile.R
+import com.uacspoofer.mobile.ui.theme.NeonTokens
 import com.uacspoofer.mobile.ui.theme.styleTokens
 import com.uacspoofer.mobile.ui.theme.neonDp
 import com.uacspoofer.mobile.ui.theme.neonSp
@@ -77,6 +105,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -347,6 +376,51 @@ internal fun ConnectButton(
         ),
         label = "connect-loading-sweep",
     )
+    val styledTokens = styleTokens()
+    val orbitMs = styledTokens?.connectOrbitMs?.toInt()?.coerceIn(300, 8_000) ?: 2_000
+    val sweepLo = styledTokens?.connectSweepMin ?: 100f
+    val sweepHi = styledTokens?.connectSweepMax ?: 150f
+    val ringBreath = transition.animateFloat(
+        initialValue = 0.75f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "connect-ring-breath",
+    )
+    val iconBreath = transition.animateFloat(
+        initialValue = 0.8f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "connect-icon-breath",
+    )
+    val cometOrbit = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = orbitMs, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "connect-comet-orbit",
+    )
+    val cometSweep = transition.animateFloat(
+        initialValue = minOf(sweepLo, sweepHi),
+        targetValue = maxOf(sweepLo, sweepHi),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "connect-comet-sweep",
+    )
+    val connectExit = animateFloatAsState(
+        targetValue = if (styledTokens != null && state == ConnectionState.CONNECTING) 1f else 0f,
+        animationSpec = tween(durationMillis = 300),
+        label = "connect-comet-fade",
+    )
     val ringBrushes = remember { SweepRingBrushes() }
     val emphasizePersianLabel = isPersian
     val buttonLabel = when (state) {
@@ -357,12 +431,14 @@ internal fun ConnectButton(
         ConnectionState.ERROR -> homeText("RETRY", "تلاش دوباره")
     }
 
-    val neonTokens = styleTokens()
+    val neonTokens = styledTokens
+    val gpuGlow = neonTokens != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val density = LocalDensity.current
     val outerGlow = remember { NeonGlowBuffer() }
     val innerGlow = remember { NeonGlowBuffer() }
     val buttonAlpha = neonTokens?.buttonAlpha ?: 1f
     val neonGlowBox = neonTokens?.let { tuned ->
-        val blurDp = maxOf(tuned.glowBlur, tuned.glowBlurConnected, 0f)
+        val blurDp = maxOf(tuned.glowBlur, tuned.glowBlurConnected, tuned.connectFarBlur, 0f)
         val outerReach = tuned.ringWidth / 2f +
             tuned.hairlineStart +
             tuned.hairlineGap * (tuned.hairlineCount - 1).coerceAtLeast(0) +
@@ -386,8 +462,50 @@ internal fun ConnectButton(
             .clickable(enabled = !interactionDisabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(modifier = Modifier.matchParentSize()) {
-            val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow.value else 1f
+        val outerAwake = state == ConnectionState.CONNECTED
+        if (gpuGlow && neonTokens != null && outerAwake) {
+            val tuned = neonTokens
+            val outerBlurPx = with(density) { tuned.glowBlurConnected.dp.toPx() }
+            GpuBlurredRing(
+                modifier = Modifier.matchParentSize(),
+                blurPx = outerBlurPx,
+                pulse = null,
+                resting = 1f,
+                glide = connectExit,
+                glideIdle = 0f,
+                glideSettled = 1f,
+                colorAlpha = tuned.glowAlpha,
+            ) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val surfaceRadius = diameter.toPx() / 2f
+                val tube = tuned.ringWidth.dp.toPx()
+                val tubeRadius = surfaceRadius + tube / 2f
+                rotate(tuned.gradientAngle, center) {
+                    drawCircle(
+                        brush = neonSweep(tuned.gradientStart, tuned.gradientEnd, center),
+                        radius = tubeRadius + tuned.glowSpread.dp.toPx(),
+                        center = center,
+                        style = Stroke(width = tube),
+                    )
+                }
+            }
+        }
+        val ringBreathing = neonTokens != null && connectExit.value > 0.001f
+        Canvas(
+            modifier = Modifier
+                .matchParentSize()
+                .then(
+                    if (ringBreathing) {
+                        Modifier.graphicsLayer {
+                            val exit = connectExit.value
+                            alpha = lerp(1f, ringBreath.value, exit)
+                            clip = false
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
             val center = Offset(size.width / 2f, size.height / 2f)
             val surfaceRadius = diameter.toPx() / 2f
             val atmosphericRadius = size.minDimension / 2f
@@ -398,35 +516,36 @@ internal fun ConnectButton(
                 if (!neon || tuned == null) return SolidColor(accent.copy(alpha = alpha))
                 return ringBrushes.sweep(alpha, center, tuned.gradientStart, tuned.gradientEnd)
             }
-            val neonGain = when (state) {
-                ConnectionState.CONNECTED -> 1f
-                ConnectionState.CONNECTING -> glowIntensity
-                else -> neonTokens?.glowDisconnected ?: 0.55f
-            }
 
             if (neon && neonTokens != null) {
                 val tuned = neonTokens
+                val exit = connectExit.value
                 val tube = tuned.ringWidth.dp.toPx()
                 val tubeRadius = surfaceRadius + tube / 2f
+                val idle = tuned.glowDisconnected
+                val settled = if (state == ConnectionState.CONNECTED) 1f else idle
+                val tubeGain = lerp(settled, idle, exit)
+                val hairSettled = if (state == ConnectionState.CONNECTED) settled else idle * 0.18f
+                val hairGain = lerp(hairSettled, idle * 0.18f, exit)
                 rotate(tuned.gradientAngle, center) {
-                drawBlurredNeonRing(
+                if (!gpuGlow && state == ConnectionState.CONNECTED) drawBlurredNeonRing(
                     center = center,
                         radius = tubeRadius + tuned.glowSpread.dp.toPx(),
                     stroke = tube,
-                        blur = (if (state == ConnectionState.CONNECTED) tuned.glowBlurConnected else tuned.glowBlur).dp.toPx(),
-                        alpha = (tuned.glowAlpha * neonGain).toInt().coerceIn(0, 255),
+                        blur = tuned.glowBlurConnected.dp.toPx(),
+                        alpha = (tuned.glowAlpha * (1f - exit)).toInt().coerceIn(0, 255),
                     buffer = outerGlow,
                         gradientStart = tuned.gradientStart,
                         gradientEnd = tuned.gradientEnd,
                 )
                 drawCircle(
-                    brush = ring(1f),
+                    brush = ring(tubeGain),
                     radius = tubeRadius,
                     center = center,
                     style = Stroke(width = tube),
                 )
                 drawCircle(
-                        color = tuned.ringCore.copy(alpha = tuned.ringCore.alpha * tuned.ringCoreAlpha),
+                        color = tuned.ringCore.copy(alpha = tuned.ringCore.alpha * tuned.ringCoreAlpha * tubeGain),
                     radius = tubeRadius,
                     center = center,
                         style = Stroke(width = tuned.ringCoreWidth.dp.toPx()),
@@ -440,7 +559,7 @@ internal fun ConnectButton(
                     repeat(tuned.hairlineCount.coerceIn(0, hairAlphas.size)) { index ->
                         val gap = (tuned.hairlineStart + tuned.hairlineGap * index).dp.toPx()
                         drawCircle(
-                            brush = ring(hairAlphas[index] * neonGain),
+                            brush = ring(hairAlphas[index] * hairGain),
                             radius = tubeRadius + gap,
                             center = center,
                             style = Stroke(width = tuned.hairlineWidth.dp.toPx()),
@@ -449,6 +568,7 @@ internal fun ConnectButton(
                     }
                 }
             } else {
+            val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow.value else 1f
             drawCircle(
                 brush = Brush.radialGradient(
                     colorStops = arrayOf(
@@ -566,19 +686,44 @@ internal fun ConnectButton(
                 .semantics { contentDescription = buttonLabel },
             contentAlignment = Alignment.Center,
         ) {
+            if (gpuGlow && neonTokens != null) {
+                val tuned = neonTokens
+                val innerBlurPx = with(density) { tuned.innerGlowBlur.dp.toPx() }
+                GpuBlurredRing(
+                    modifier = Modifier.matchParentSize(),
+                    blurPx = innerBlurPx,
+                    pulse = null,
+                    resting = tuned.glowDisconnected,
+                    glide = connectExit,
+                    glideBreath = ringBreath,
+                    glideIdle = tuned.glowDisconnected,
+                    glideSettled = if (state == ConnectionState.CONNECTED) 1f else tuned.glowDisconnected,
+                    colorAlpha = tuned.innerGlowAlpha,
+                ) {
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val outerRadius = size.minDimension / 2f - 2.dp.toPx()
+                    rotate(tuned.gradientAngle, center) {
+                        drawCircle(
+                            brush = neonSweep(tuned.gradientStart, tuned.gradientEnd, center),
+                            radius = outerRadius - tuned.innerGlowInset.dp.toPx(),
+                            center = center,
+                            style = Stroke(width = tuned.ringWidth.dp.toPx()),
+                        )
+                    }
+                }
+            }
             Canvas(modifier = Modifier.matchParentSize()) {
-                val glowIntensity = if (state == ConnectionState.CONNECTING) animatedGlow.value else 1f
                 val center = Offset(size.width / 2f, size.height / 2f)
                 val outerRadius = size.minDimension / 2f - 2.dp.toPx()
                 val neonDisc = com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon
                 if (neonDisc) {
                     val tuned = neonTokens
-                    if (tuned != null) {
-                    val inward = when (state) {
-                        ConnectionState.CONNECTED -> 1f
-                        ConnectionState.CONNECTING -> glowIntensity
-                            else -> tuned.glowDisconnected
-                    }
+                    if (tuned != null && !gpuGlow) {
+                    val exit = connectExit.value
+                    val breath = if (exit > 0.001f) ringBreath.value else 1f
+                    val idle = tuned.glowDisconnected
+                    val settled = if (state == ConnectionState.CONNECTED) 1f else idle
+                    val inward = lerp(settled, idle * breath, exit)
                         rotate(tuned.gradientAngle, center) {
                     drawBlurredNeonRing(
                         center = center,
@@ -594,6 +739,7 @@ internal fun ConnectButton(
                     }
                     return@Canvas
                 }
+                val glowIntensity = if (!gpuGlow && state == ConnectionState.CONNECTING) animatedGlow.value else 1f
                 fun discRingBrush(alpha: Float): Brush {
                     if (!neonDisc) return SolidColor(accent.copy(alpha = alpha))
                     val magenta = Color(0xFFFF2BD6).copy(alpha = alpha)
@@ -727,7 +873,17 @@ internal fun ConnectButton(
                     imageVector = Icons.Rounded.PowerSettingsNew,
                     contentDescription = null,
                     tint = iconTint,
-                    modifier = Modifier.size(diameter * (neonTokens?.iconScale ?: 0.21f)),
+                    modifier = Modifier
+                        .size(diameter * (neonTokens?.iconScale ?: 0.21f))
+                        .then(
+                            if (neonTokens != null && connectExit.value > 0.001f) {
+                                Modifier.graphicsLayer {
+                                    alpha = lerp(1f, iconBreath.value, connectExit.value)
+                                }
+                            } else {
+                                Modifier
+                            },
+                        ),
                 )
                 Spacer(Modifier.height(if (diameter < 150.dp) 4.dp else 8.dp))
                 Text(
@@ -765,6 +921,16 @@ internal fun ConnectButton(
                 )
             }
         }
+
+        if (neonTokens != null) {
+            ConnectingComet(
+                tokens = neonTokens,
+                diameter = diameter,
+                orbit = cometOrbit,
+                sweep = cometSweep,
+                fade = connectExit,
+            )
+        }
     }
 }
 
@@ -773,6 +939,9 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
     val context = LocalContext.current
+    val panelStore = remember(context) { ConnectPanelStore.get(context) }
+    val statusPanel by panelStore.status.collectAsStateWithLifecycle()
+    val stepsPanel by panelStore.steps.collectAsStateWithLifecycle()
     val engineMode = rememberDisplayedEngineMode()
     val advancedStore = remember(context) { AdvancedSettingsStore(context) }
     val advanced by advancedStore.state.collectAsStateWithLifecycle()
@@ -908,7 +1077,11 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
 
     val neonStatus = styleTokens()
     val statusColor = if (neonStatus != null && !neonStatus.statusUseAccent) neonStatus.statusColor else accent
+    val showProgressInfo = (state == ConnectionState.CONNECTING || state == ConnectionState.ERROR) &&
+        (statusPanel == ConnectPanelMode.CLOSED || (engineMode.isPow && stepsPanel == ConnectPanelMode.CLOSED))
+    val reopen = connectPanelText(R.string.connect_panel_reopen)
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             text = status,
             color = statusColor,
@@ -924,6 +1097,27 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             maxLines = 1,
             softWrap = false,
         )
+        AnimatedVisibility(
+            visible = showProgressInfo,
+            enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.8f, animationSpec = tween(200)),
+            exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.8f, animationSpec = tween(200)),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(8.dp))
+                ReopenPanelsButton(
+                    label = reopen,
+                    onClick = {
+                        if (statusPanel == ConnectPanelMode.CLOSED) {
+                            panelStore.setStatus(ConnectPanelMode.COLLAPSED)
+                        }
+                        if (stepsPanel == ConnectPanelMode.CLOSED) {
+                            panelStore.setSteps(ConnectPanelMode.COLLAPSED)
+                        }
+                    },
+                )
+            }
+        }
+        }
         Spacer(Modifier.height(3.dp))
         Text(
             text = hint,
@@ -944,16 +1138,92 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     }
 }
 
+@Composable
+private fun ReopenPanelsButton(label: String, onClick: () -> Unit) {
+    val tokens = styleTokens()
+    val start = tokens?.gradientStart ?: UacColors.DisconnectedBlue
+    val end = tokens?.gradientEnd ?: UacColors.ConnectingCyan
+    val glyph = androidx.compose.ui.graphics.lerp(Color.White, end, 0.32f)
+    val density = LocalDensity.current
+    val glow = remember(density) {
+        val blurPx = with(density) { 10.dp.toPx() }
+        val sigma = blurPx * 0.57735f + 0.5f
+        BlurEffect(sigma, sigma, TileMode.Decal)
+    }
+    val interaction = remember { MutableInteractionSource() }
+    Box(
+        modifier = Modifier
+            .minimumInteractiveComponentSize()
+            .sizeIn(minWidth = 40.dp, minHeight = 40.dp)
+            .semantics { contentDescription = label }
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(bounded = false, radius = 20.dp, color = end.copy(alpha = 0.28f)),
+                role = Role.Button,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(44.dp)
+                .graphicsLayer {
+                    renderEffect = glow
+                    clip = false
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier
+                    .size(22.dp)
+                    .background(end.copy(alpha = 0.25f), CircleShape),
+            )
+        }
+        Box(
+            Modifier
+                .size(22.dp)
+                .background(end.copy(alpha = 0.08f), CircleShape)
+                .border(
+                    width = 1.5.dp,
+                    brush = Brush.linearGradient(listOf(start, end)),
+                    shape = CircleShape,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "i",
+                color = glyph,
+                fontSize = 12.sp,
+                fontStyle = FontStyle.Italic,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = homeLocalizedFont(),
+            )
+        }
+    }
+}
+
 private const val CONNECTING_ROUTE_HINT_DELAY_MS = 2_000L
 
 @Composable
 internal fun PowConnectSheet(modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val panelStore = remember(context) { ConnectPanelStore.get(context) }
+    val panelMode by panelStore.steps.collectAsStateWithLifecycle()
     val engineMode = rememberDisplayedEngineMode()
     val status by PowStatusStore.status.collectAsStateWithLifecycle()
     val connection by ConnectionStateStore.state.collectAsStateWithLifecycle()
+    val previousConnection = remember { mutableStateOf(connection) }
+    LaunchedEffect(connection, engineMode.isPow) {
+        val enteredError = connection == ConnectionState.ERROR &&
+            previousConnection.value != ConnectionState.ERROR
+        previousConnection.value = connection
+        if (engineMode.isPow && enteredError) {
+            panelStore.setSteps(ConnectPanelMode.OPEN)
+        }
+    }
     if (!engineMode.isPow) return
     val visible = connection == ConnectionState.CONNECTING || connection == ConnectionState.ERROR
-    if (!visible || status.steps.isEmpty()) return
+    if (!visible || status.steps.isEmpty() || panelMode == ConnectPanelMode.CLOSED) return
     val persian = LocalHomePersian.current
     val font = homeLocalizedFont()
     val rows = remember(status.steps, persian) { powStepRows(status.steps, persian) }
@@ -962,21 +1232,68 @@ internal fun PowConnectSheet(modifier: Modifier = Modifier) {
         scroll.animateScrollTo(scroll.maxValue)
     }
     val shape = RoundedCornerShape(18.dp)
+    val paint = connectPanelPaint(primary = true)
+    val done = rows.count { it.state == PowStepState.DONE }
+    val current = rows.firstOrNull { it.state == PowStepState.RUNNING }
+        ?: rows.firstOrNull { it.state == PowStepState.FAILED }
+        ?: rows.lastOrNull()
+    var dragDown by remember { mutableFloatStateOf(0f) }
     CompositionLocalProvider(
         LocalLayoutDirection provides if (persian) LayoutDirection.Rtl else LayoutDirection.Ltr,
     ) {
-        Column(
-            modifier = modifier
+        Box(
+            modifier
+                .fillMaxWidth()
+                .animateContentSize(tween(250, easing = FastOutSlowInEasing)),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+        AnimatedContent(
+            targetState = panelMode == ConnectPanelMode.OPEN,
+            transitionSpec = {
+                ContentTransform(
+                    fadeIn(tween(250)),
+                    fadeOut(tween(250)),
+                    sizeTransform = null,
+                )
+            },
+            label = "steps-panel-fold",
+        ) { expanded ->
+        if (!expanded) {
+            PowStepsCollapsed(
+                modifier = Modifier.fillMaxWidth(),
+                row = current,
+                done = done,
+                total = rows.size,
+                paint = paint,
+                persian = persian,
+                font = font,
+                onExpand = { panelStore.setSteps(ConnectPanelMode.OPEN) },
+            )
+        } else Column(
+            Modifier
                 .fillMaxWidth()
                 .clip(shape)
-                .background(UacColors.Surface.copy(alpha = 0.96f))
-                .border(1.dp, UacColors.CardBorder, shape)
+                .background(paint.background)
+                .border(1.dp, paint.border.copy(alpha = 0.75f), shape)
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(Unit) {
+                        detectVerticalDragGestures(
+                            onDragStart = { dragDown = 0f },
+                            onVerticalDrag = { _, dy -> if (dy > 0f) dragDown += dy },
+                            onDragEnd = {
+                                if (dragDown > 48.dp.toPx()) panelStore.setSteps(ConnectPanelMode.COLLAPSED)
+                                dragDown = 0f
+                            },
+                            onDragCancel = { dragDown = 0f },
+                        )
+                    },
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
                     text = homeText("Connection steps", "مراحل اتصال"),
@@ -986,7 +1303,12 @@ internal fun PowConnectSheet(modifier: Modifier = Modifier) {
                     fontFamily = font,
                     textAlign = TextAlign.Start,
                     style = TextStyle(textDirection = if (persian) TextDirection.Rtl else TextDirection.Ltr),
-                    modifier = Modifier.weight(1f),
+                )
+                ConnectPanelCount(done, rows.size, paint.border)
+                Spacer(Modifier.weight(1f))
+                ConnectPanelActions(
+                    onCollapse = { panelStore.setSteps(ConnectPanelMode.COLLAPSED) },
+                    onClose = { panelStore.setSteps(ConnectPanelMode.CLOSED) },
                 )
             }
             Box(
@@ -1003,6 +1325,81 @@ internal fun PowConnectSheet(modifier: Modifier = Modifier) {
             ) {
                 rows.forEach { row -> PowStepLine(row, persian, font) }
             }
+        }
+        }
+        }
+    }
+}
+
+@Composable
+private fun PowStepsCollapsed(
+    modifier: Modifier,
+    row: PowStepRow?,
+    done: Int,
+    total: Int,
+    paint: ConnectPanelPaint,
+    persian: Boolean,
+    font: androidx.compose.ui.text.font.FontFamily?,
+    onExpand: () -> Unit,
+) {
+    val fraction = if (total == 0) 0f else done.toFloat() / total.toFloat()
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(paint.background)
+            .border(1.dp, paint.border.copy(alpha = 0.75f), RoundedCornerShape(16.dp))
+            .clickable(role = Role.Button, onClick = onExpand),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (row != null) {
+                Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                    when (row.state) {
+                        PowStepState.DONE -> Icon(
+                            Icons.Rounded.Check, null, tint = UacColors.ConnectedGreen, modifier = Modifier.size(14.dp),
+                        )
+                        PowStepState.FAILED -> Icon(
+                            Icons.Rounded.Close, null, tint = UacColors.ErrorRed, modifier = Modifier.size(14.dp),
+                        )
+                        PowStepState.RUNNING -> CircularProgressIndicator(
+                            color = paint.border,
+                            trackColor = paint.border.copy(alpha = 0.15f),
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
+            }
+            Text(
+                text = row?.title.orEmpty(),
+                color = UacColors.TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = font,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = TextStyle(textDirection = if (persian) TextDirection.Rtl else TextDirection.Ltr),
+                modifier = Modifier.weight(1f),
+            )
+            ConnectPanelCount(done, total, paint.border)
+            Icon(
+                Icons.Rounded.ExpandLess,
+                connectPanelText(R.string.connect_panel_expand),
+                tint = UacColors.TextSecondary,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.08f))) {
+            Box(
+                Modifier
+                    .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                    .height(3.dp)
+                    .background(paint.border),
+            )
         }
     }
 }
@@ -1318,6 +1715,433 @@ private fun FeatureItem(
             fontFamily = localizedFont,
         )
     }
+}
+
+private fun neonSweep(start: Color, end: Color, center: Offset): Brush =
+    Brush.sweepGradient(
+        colorStops = arrayOf(
+            0.00f to end,
+            0.22f to end,
+            0.42f to start,
+            0.78f to start,
+            1.00f to end,
+        ),
+        center = center,
+    )
+
+@Composable
+private fun GpuBlurredRing(
+    modifier: Modifier,
+    blurPx: Float,
+    pulse: State<Float>?,
+    resting: Float,
+    colorAlpha: Float,
+    glide: State<Float>? = null,
+    glideBreath: State<Float>? = null,
+    glideIdle: Float = resting,
+    glideSettled: Float = resting,
+    content: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit,
+) {
+    val effect = remember(blurPx) {
+        if (blurPx < 1f) {
+            null
+        } else {
+            val sigma = blurPx * 0.57735f + 0.5f
+            BlurEffect(sigma, sigma, TileMode.Decal)
+        }
+    }
+    Box(
+        modifier.graphicsLayer {
+            val gain = if (glide != null) {
+                val exit = glide.value
+                val breath = if (exit > 0.001f && glideBreath != null) glideBreath.value else 1f
+                lerp(glideSettled, glideIdle * breath, exit)
+            } else if (pulse != null) {
+                pulse.value
+            } else {
+                resting
+            }
+            alpha = (colorAlpha * gain / 255f).coerceIn(0f, 1f)
+            scaleX = 1f
+            scaleY = 1f
+            clip = false
+            renderEffect = effect
+        },
+    ) {
+        Canvas(Modifier.matchParentSize(), onDraw = content)
+    }
+}
+
+@Composable
+private fun BoxScope.ConnectingComet(
+    tokens: NeonTokens,
+    diameter: Dp,
+    orbit: State<Float>,
+    sweep: State<Float>,
+    fade: State<Float>,
+) {
+    val strokes = remember { CometStrokes() }
+    Canvas(Modifier.matchParentSize()) {
+        val presence = fade.value
+        if (presence <= 0.001f) return@Canvas
+        val diameterPx = diameter.toPx()
+        val gpu = strokes.drawGpuGlows(this, tokens, diameterPx, orbit, sweep, fade)
+        if (!gpu) {
+            strokes.drawTrailMasked(
+                scope = this,
+                tokens = tokens,
+                diameterPx = diameterPx,
+                orbit = orbit,
+                sweep = sweep,
+                fade = fade,
+                blurPx = tokens.connectFarBlur.dp.toPx(),
+                layerAlpha = tokens.connectFarAlpha,
+            )
+            strokes.drawTrailMasked(
+                scope = this,
+                tokens = tokens,
+                diameterPx = diameterPx,
+                orbit = orbit,
+                sweep = sweep,
+                fade = fade,
+                blurPx = tokens.connectNearBlur.dp.toPx(),
+                layerAlpha = tokens.connectNearAlpha,
+            )
+        }
+        strokes.drawTrail(this, tokens, diameterPx, orbit, sweep, fade, alphaScale = presence)
+        strokes.drawHead(this, tokens, diameterPx, orbit, fade)
+    }
+}
+
+private class CometStrokes {
+    private val trailPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+        strokeJoin = android.graphics.Paint.Join.ROUND
+        isDither = true
+        xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD)
+    }
+    private val maskPaint = android.graphics.Paint(trailPaint)
+    private val addPaint = android.graphics.Paint().apply {
+        xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD)
+    }
+    private val recordPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        style = android.graphics.Paint.Style.STROKE
+        strokeCap = android.graphics.Paint.Cap.ROUND
+        strokeJoin = android.graphics.Paint.Join.ROUND
+        isDither = true
+    }
+    private val path = android.graphics.Path()
+    private val oval = android.graphics.RectF()
+    private val colors = IntArray(7)
+    private val stops = FloatArray(7)
+    private var sweepShader: android.graphics.SweepGradient? = null
+    private var shaderCx = Float.NaN
+    private var shaderCy = Float.NaN
+    private var shaderSpan = Float.NaN
+    private var shaderStart = 0
+    private var shaderEnd = 0
+    private var bitmap: android.graphics.Bitmap? = null
+    private var maskRadius = Float.NaN
+    private var maskFilter: android.graphics.BlurMaskFilter? = null
+    private var farNode: Any? = null
+    private var nearNode: Any? = null
+    private var farSigma = Float.NaN
+    private var nearSigma = Float.NaN
+    private var gpuFailed = false
+
+    fun drawGpuGlows(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: State<Float>,
+        sweep: State<Float>,
+        fade: State<Float>,
+    ): Boolean {
+        if (gpuFailed || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        if (fade.value <= 0.001f) return true
+        return drawGpuGlows31(scope, tokens, diameterPx, orbit, sweep, fade)
+    }
+
+    private fun drawGpuGlows31(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: State<Float>,
+        sweep: State<Float>,
+        fade: State<Float>,
+    ): Boolean {
+        return try {
+            val placed = place(scope, tokens, diameterPx, orbit, sweep) ?: return true
+            val presence = fade.value
+            scope.drawIntoCanvas { canvas ->
+                val native = canvas.nativeCanvas
+                glowNode(
+                    native = native,
+                    placed = placed,
+                    far = true,
+                    blurPx = with(scope) { tokens.connectFarBlur.dp.toPx() },
+                    layerAlpha = tokens.connectFarAlpha,
+                    presence = presence,
+                    width = scope.size.width.toInt().coerceAtLeast(1),
+                    height = scope.size.height.toInt().coerceAtLeast(1),
+                )
+                glowNode(
+                    native = native,
+                    placed = placed,
+                    far = false,
+                    blurPx = with(scope) { tokens.connectNearBlur.dp.toPx() },
+                    layerAlpha = tokens.connectNearAlpha,
+                    presence = presence,
+                    width = scope.size.width.toInt().coerceAtLeast(1),
+                    height = scope.size.height.toInt().coerceAtLeast(1),
+                )
+            }
+            true
+        } catch (error: Throwable) {
+            gpuFailed = true
+            false
+        }
+    }
+
+    private fun glowNode(
+        native: android.graphics.Canvas,
+        placed: PlacedTrail,
+        far: Boolean,
+        blurPx: Float,
+        layerAlpha: Float,
+        presence: Float,
+        width: Int,
+        height: Int,
+    ) {
+        if (blurPx < 1f || layerAlpha <= 0.001f || width < 2 || height < 2) return
+        val sigma = blurPx * 0.57735f + 0.5f
+        val node = renderNode(far)
+        node.setPosition(0, 0, width, height)
+        node.setClipToBounds(false)
+        val cached = if (far) farSigma else nearSigma
+        if (cached != sigma) {
+            node.setRenderEffect(
+                android.graphics.RenderEffect.createBlurEffect(
+                    sigma,
+                    sigma,
+                    android.graphics.Shader.TileMode.DECAL,
+                ),
+            )
+            if (far) farSigma = sigma else nearSigma = sigma
+        }
+        recordPaint.shader = placed.shader
+        recordPaint.strokeWidth = placed.stroke
+        recordPaint.alpha = (layerAlpha.coerceIn(0f, 1f) * presence * 255f).toInt().coerceIn(0, 255)
+        val recording = node.beginRecording()
+        recording.save()
+        recording.rotate(placed.spin, placed.cx, placed.cy)
+        recording.drawPath(path, recordPaint)
+        recording.restore()
+        node.endRecording()
+        val checkpoint = native.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), addPaint)
+        native.drawRenderNode(node)
+        native.restoreToCount(checkpoint)
+    }
+
+    private fun renderNode(far: Boolean): android.graphics.RenderNode {
+        val current = (if (far) farNode else nearNode) as? android.graphics.RenderNode
+        if (current != null) return current
+        val created = android.graphics.RenderNode(if (far) "uac-comet-far" else "uac-comet-near")
+        created.setClipToBounds(false)
+        if (far) farNode = created else nearNode = created
+        return created
+    }
+
+    fun drawTrail(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: State<Float>,
+        sweep: State<Float>,
+        fade: State<Float>,
+        alphaScale: Float,
+    ) {
+        if (fade.value <= 0.001f || alphaScale <= 0.001f) return
+        val placed = place(scope, tokens, diameterPx, orbit, sweep) ?: return
+        trailPaint.shader = placed.shader
+        trailPaint.strokeWidth = placed.stroke
+        trailPaint.alpha = (alphaScale.coerceIn(0f, 1f) * 255f).toInt().coerceIn(0, 255)
+        scope.rotate(placed.spin, Offset(placed.cx, placed.cy)) {
+            drawIntoCanvas { canvas ->
+                canvas.nativeCanvas.drawPath(path, trailPaint)
+            }
+        }
+    }
+
+    fun drawTrailMasked(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: State<Float>,
+        sweep: State<Float>,
+        fade: State<Float>,
+        blurPx: Float,
+        layerAlpha: Float,
+    ) {
+        val presence = fade.value
+        if (presence <= 0.001f || layerAlpha <= 0.001f || blurPx < 1f) return
+        val placed = place(scope, tokens, diameterPx, orbit, sweep) ?: return
+        val width = scope.size.width.toInt().coerceAtLeast(1)
+        val height = scope.size.height.toInt().coerceAtLeast(1)
+        val buffer = bitmap?.takeIf { it.width == width && it.height == height } ?: android.graphics.Bitmap.createBitmap(
+            width,
+            height,
+            android.graphics.Bitmap.Config.ARGB_8888,
+        ).also {
+            bitmap?.recycle()
+            bitmap = it
+        }
+        if (maskRadius != blurPx) {
+            maskFilter = android.graphics.BlurMaskFilter(blurPx, android.graphics.BlurMaskFilter.Blur.NORMAL)
+            maskRadius = blurPx
+        }
+        buffer.eraseColor(android.graphics.Color.TRANSPARENT)
+        maskPaint.shader = placed.shader
+        maskPaint.strokeWidth = placed.stroke
+        maskPaint.maskFilter = maskFilter
+        maskPaint.xfermode = null
+        maskPaint.alpha = (layerAlpha.coerceIn(0f, 1f) * presence * 255f).toInt().coerceIn(0, 255)
+        val software = android.graphics.Canvas(buffer)
+        software.save()
+        software.rotate(placed.spin, placed.cx, placed.cy)
+        software.drawPath(path, maskPaint)
+        software.restore()
+        scope.drawIntoCanvas { canvas ->
+            canvas.nativeCanvas.drawBitmap(buffer, 0f, 0f, addPaint)
+        }
+    }
+
+    fun drawHead(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: State<Float>,
+        fade: State<Float>,
+    ) {
+        val presence = fade.value
+        if (presence <= 0.001f) return
+        val orbitDeg = orbit.value
+        val stroke = with(scope) { tokens.ringWidth.dp.toPx() }
+        val radius = diameterPx / 2f + stroke / 2f
+        val cx = scope.size.width / 2f
+        val cy = scope.size.height / 2f
+        val theta = Math.toRadians(orbitDeg.toDouble())
+        val hx = cx + radius * cos(theta).toFloat()
+        val hy = cy + radius * sin(theta).toFloat()
+        val haloPx = with(scope) { 11.dp.toPx() }
+        val headPx = with(scope) { tokens.connectHeadRadius.dp.toPx() }
+        val head = Offset(hx, hy)
+        scope.drawCircle(
+            brush = Brush.radialGradient(
+                colorStops = arrayOf(
+                    0f to tokens.gradientEnd.copy(alpha = 0.55f * presence),
+                    1f to Color.Transparent,
+                ),
+                center = head,
+                radius = haloPx,
+            ),
+            radius = haloPx,
+            center = head,
+            blendMode = BlendMode.Plus,
+        )
+        scope.drawCircle(
+            color = Color(0xFFEBFFFF).copy(alpha = presence),
+            radius = headPx,
+            center = head,
+        )
+    }
+
+    private fun place(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: State<Float>,
+        sweep: State<Float>,
+    ): PlacedTrail? {
+        val stroke = with(scope) { tokens.ringWidth.dp.toPx() }
+        if (stroke < 0.5f || diameterPx < 1f) return null
+        val span = sweep.value.coerceIn(8f, 350f)
+        val orbitDeg = orbit.value
+        val cx = scope.size.width / 2f
+        val cy = scope.size.height / 2f
+        val radius = diameterPx / 2f + stroke / 2f
+        oval.set(cx - radius, cy - radius, cx + radius, cy + radius)
+        val head = 180f + span / 2f
+        path.rewind()
+        path.addArc(oval, head - span, span)
+        val shader = sweepShader(cx, cy, span, tokens.gradientStart, tokens.gradientEnd)
+        return PlacedTrail(shader, stroke, orbitDeg - head, cx, cy)
+    }
+
+    private fun sweepShader(
+        cx: Float,
+        cy: Float,
+        span: Float,
+        gradientStart: Color,
+        gradientEnd: Color,
+    ): android.graphics.SweepGradient {
+        val head = 180f + span / 2f
+        val tail = 180f - span / 2f
+        val at60 = head - span * 0.60f
+        val at15 = head - span * 0.15f
+        val after = (head + 1.15f).coerceAtMost(359.3f)
+        stops[0] = 0f
+        stops[1] = tail / 360f
+        stops[2] = at60 / 360f
+        stops[3] = at15 / 360f
+        stops[4] = head / 360f
+        stops[5] = after / 360f
+        stops[6] = 1f
+        for (index in 1 until stops.lastIndex) {
+            if (stops[index] <= stops[index - 1]) {
+                stops[index] = (stops[index - 1] + 0.0008f).coerceAtMost(0.998f)
+            }
+        }
+        val startColor = colorWithAlpha(gradientStart, 0.5f)
+        val endColor = colorWithAlpha(gradientEnd, 1f)
+        colors[0] = 0
+        colors[1] = 0
+        colors[2] = startColor
+        colors[3] = endColor
+        colors[4] = 0xFFEBFFFF.toInt()
+        colors[5] = 0
+        colors[6] = 0
+        val moved = sweepShader == null ||
+            shaderCx != cx ||
+            shaderCy != cy ||
+            shaderStart != startColor ||
+            shaderEnd != endColor ||
+            kotlin.math.abs(shaderSpan - span) > 0.2f
+        if (moved) {
+            sweepShader = android.graphics.SweepGradient(cx, cy, colors, stops)
+            shaderCx = cx
+            shaderCy = cy
+            shaderStart = startColor
+            shaderEnd = endColor
+            shaderSpan = span
+        }
+        return sweepShader!!
+    }
+
+    private class PlacedTrail(
+        val shader: android.graphics.SweepGradient,
+        val stroke: Float,
+        val spin: Float,
+        val cx: Float,
+        val cy: Float,
+    )
+}
+
+private fun colorWithAlpha(color: Color, alpha: Float): Int {
+    val rgb = color.toArgb() and 0x00FFFFFF
+    val channel = (alpha.coerceIn(0f, 1f) * 255f).toInt().coerceIn(0, 255)
+    return (channel shl 24) or rgb
 }
 
 private class NeonGlowBuffer {

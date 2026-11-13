@@ -263,6 +263,7 @@ internal fun SettingsScreen(
                             onClick = onAdvancedSettingsClick,
                         )
                     }
+                    SettingsBackupRows(isPersian = isPersian)
                     CrashReportSettingsRow(showDivider = true)
                     QuickSettingsTileRow(
                         notice = tileNotice,
@@ -1313,7 +1314,7 @@ private fun SettingsToggleRow(
 }
 
 @Composable
-private fun SettingsNavRow(
+internal fun SettingsNavRow(
     icon: ImageVector,
     title: String,
     summary: String,

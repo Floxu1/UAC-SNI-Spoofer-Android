@@ -132,6 +132,75 @@ class ProfileStore(context: Context) {
     fun selectedProfile(): ProxyProfile = snapshot().selectedProfile
 
     @Synchronized
+    fun backupProfilesJson(): String {
+        snapshot()
+        return prefs.getString(KEY_PROFILES, "[]") ?: "[]"
+    }
+
+    @Synchronized
+    fun backupSelectedId(): String = snapshot().selectedId
+
+    /** Returns applied keys and skipped profile rows or a bad selection. */
+    @Synchronized
+    fun replaceFromBackup(rawJson: String?, selectedId: String?): Pair<Int, Int> {
+        var applied = 0
+        var ignored = 0
+        if (rawJson != null) {
+            val array = runCatching { JSONArray(rawJson) }.getOrNull()
+            if (array == null) {
+                ignored++
+            } else {
+                val parsed = mutableListOf<ProxyProfile>()
+                repeat(array.length()) { index ->
+                    val item = array.optJSONObject(index)
+                    if (item == null) {
+                        ignored++
+                        return@repeat
+                    }
+                    val storedCountry = CountryMetadata.resolve(
+                        item.optString("countryCode"),
+                        item.optString("countryName"),
+                    )
+                    val profile = runCatching {
+                        ProfileUriParser.parse(
+                            item.optString("uri"),
+                            id = item.optString("id"),
+                            nameOverride = item.optString("name"),
+                        ).let { parsedProfile ->
+                            if (storedCountry.isKnown) parsedProfile.copy(country = storedCountry) else parsedProfile
+                        }
+                    }.getOrNull()
+                    if (profile == null || profile.isBuiltIn) ignored++ else parsed += profile
+                }
+                writeProfiles(parsed)
+                applied++
+            }
+        }
+        if (selectedId != null) {
+            val library = snapshot()
+            val id = ProxyProfile.migrateSelectedId(selectedId)
+            val ok = ProxyProfile.isProtectedBuiltIn(id) || library.customProfiles.any { it.id == id }
+            prefs.edit().putString(KEY_SELECTED, if (ok) id else ProxyProfile.AUTO_ID).apply()
+            if (ok) applied++ else ignored++
+        }
+        return applied to ignored
+    }
+
+    @Synchronized
+    fun resetCustomProfiles() {
+        writeProfiles(emptyList())
+        prefs.edit().putString(KEY_SELECTED, ProxyProfile.AUTO_ID).apply()
+    }
+
+    @Synchronized
+    fun restoreProfilePrefs(rawJson: String, selectedId: String) {
+        prefs.edit()
+            .putString(KEY_PROFILES, rawJson)
+            .putString(KEY_SELECTED, selectedId)
+            .apply()
+    }
+
+    @Synchronized
     fun markActive(id: String, endpoint: ProfileEndpoint) {
         prefs.edit()
             .putString(KEY_ACTIVE, id)

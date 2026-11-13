@@ -25,8 +25,8 @@ class AppThemeStore private constructor(context: Context) {
     }
 
     private fun read(): AppTheme {
-        val stored = prefs.getString(KEY, AppTheme.CLASSIC.name)
-        return AppTheme.entries.firstOrNull { it.name == stored } ?: AppTheme.CLASSIC
+        val stored = prefs.getString(KEY, AppTheme.NEON.name)
+        return AppTheme.entries.firstOrNull { it.name == stored } ?: AppTheme.NEON
     }
 
     companion object {

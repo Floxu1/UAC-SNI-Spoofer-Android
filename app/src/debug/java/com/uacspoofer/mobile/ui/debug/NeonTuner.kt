@@ -1,5 +1,6 @@
 package com.uacspoofer.mobile.ui.debug
 
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,10 +34,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -43,8 +49,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.uacspoofer.mobile.ui.theme.AppTheme
 import com.uacspoofer.mobile.ui.theme.NeonLive
 import com.uacspoofer.mobile.ui.theme.NeonTokens
+import com.uacspoofer.mobile.ui.theme.SolarisLive
+import com.uacspoofer.mobile.ui.theme.UacThemeState
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -52,99 +61,194 @@ import kotlin.math.roundToInt
 private val Ink = Color(0xFFF4EEFF)
 private val Mute = Color(0xFFCDBFE0)
 private val Cyan = Color(0xFF22D3EE)
-private val Sheet = Color(0xF2100618)
+private val Sheet = Color(0xD9100618)
+private val neonHistory = TokenHistory()
+private val solarisHistory = TokenHistory()
+
+private class TokenHistory {
+    var undo by mutableStateOf(emptyList<NeonTokens>())
+        private set
+    var redo by mutableStateOf(emptyList<NeonTokens>())
+        private set
+
+    fun commit(before: NeonTokens, after: NeonTokens) {
+        if (before == after) return
+        undo = (undo + before).takeLast(50)
+        redo = emptyList()
+    }
+
+    fun undo(current: NeonTokens): NeonTokens? {
+        val previous = undo.lastOrNull() ?: return null
+        undo = undo.dropLast(1)
+        redo = redo + current
+        return previous
+    }
+
+    fun redo(current: NeonTokens): NeonTokens? {
+        val next = redo.lastOrNull() ?: return null
+        redo = redo.dropLast(1)
+        undo = (undo + current).takeLast(50)
+        return next
+    }
+}
+
+private fun historyFor(theme: AppTheme): TokenHistory = when (theme) {
+    AppTheme.SOLARIS -> solarisHistory
+    else -> neonHistory
+}
+
+private fun writeTokens(tokens: NeonTokens) {
+    when (UacThemeState.theme) {
+        AppTheme.SOLARIS -> SolarisLive.tokens = tokens
+        else -> NeonLive.tokens = tokens
+    }
+}
 
 @Composable
 fun NeonHomeTuner() {
-    var open by remember { mutableStateOf(false) }
+    val theme = UacThemeState.theme
+    if (theme != AppTheme.NEON && theme != AppTheme.SOLARIS) return
+    val solaris = theme == AppTheme.SOLARIS
+    val themeName = if (solaris) "Solaris" else "Neon"
+    var open by remember { mutableStateOf(true) }
     var dump by remember { mutableStateOf<String?>(null) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    var heightFraction by remember { mutableStateOf(0.46f) }
     val clipboard = LocalClipboardManager.current
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .zIndex(40f),
     ) {
-        val sheetHeight = maxHeight * 0.56f
-        if (open) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(sheetHeight),
-            ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Sheet)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                    ),
-            )
+        val panelWidth = maxWidth * 0.94f
+        val openHeight = maxHeight * heightFraction
+        val limitX = with(LocalDensity.current) { maxWidth.toPx() }
+        val limitY = with(LocalDensity.current) { maxHeight.toPx() }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp)
+                .offset { IntOffset(offset.x.roundToInt(), offset.y.roundToInt()) }
+                .width(panelWidth)
+                .height(if (open) openHeight else 52.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Sheet)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                ),
+        ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(limitX, limitY) {
+                            detectDragGestures { change, drag ->
+                                change.consume()
+                                offset = Offset(
+                                    x = (offset.x + drag.x).coerceIn(-limitX * 0.45f, limitX * 0.45f),
+                                    y = (offset.y + drag.y).coerceIn(-limitY * 0.82f, 24f),
+                                )
+                            }
+                        }
+                        .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("تنظیم تم", color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = {
-                        val code = NeonLive.tokens.toKotlin()
-                        clipboard.setText(AnnotatedString(code))
-                        dump = code
-                    }) { Text("Copy values", color = Cyan) }
-                    TextButton(onClick = {
-                        NeonLive.reset()
-                        dump = null
-                    }) { Text("Reset", color = Color(0xFFFF8AB8)) }
-                }
-                if (dump != null) {
-                    Text(
-                        dump.orEmpty(),
-                        color = Mute,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 120.dp)
-                            .verticalScroll(rememberScrollState()),
+                    Box(
+                        Modifier
+                            .width(36.dp)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Cyan),
                     )
+                    Spacer(Modifier.width(8.dp))
+                    Text(themeName, color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                    Spacer(Modifier.width(4.dp))
+                    val history = historyFor(theme)
+                    TextButton(
+                        onClick = {
+                            val restored = history.undo(activeTokens()) ?: return@TextButton
+                            writeTokens(restored)
+                        },
+                        enabled = history.undo.isNotEmpty(),
+                        modifier = Modifier.height(32.dp),
+                    ) {
+                        Text("↶", color = if (history.undo.isNotEmpty()) Ink else Mute.copy(alpha = 0.35f), fontSize = 18.sp)
+                    }
+                    TextButton(
+                        onClick = {
+                            val restored = history.redo(activeTokens()) ?: return@TextButton
+                            writeTokens(restored)
+                        },
+                        enabled = history.redo.isNotEmpty(),
+                        modifier = Modifier.height(32.dp),
+                    ) {
+                        Text("↷", color = if (history.redo.isNotEmpty()) Ink else Mute.copy(alpha = 0.35f), fontSize = 18.sp)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = { open = !open },
+                        modifier = Modifier.height(32.dp),
+                    ) {
+                        Text(if (open) "جمع" else "باز", color = Cyan, fontSize = 12.sp)
+                    }
                 }
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    Fold("پس‌زمینه") { BackgroundControls() }
-                    Fold("عنوان و خط زیرش") { TitleControls() }
-                    Fold("دکمه اتصال") { ButtonControls() }
-                    Fold("متن وضعیت") { StatusControls() }
-                    Fold("ردیف Selected") { RowControls() }
-                    Fold("کارت Download و Upload") { TrafficControls() }
-                    Fold("کارت Ping / Country / Log") { InsightControls() }
-                    Fold("کپسول موتورها") { RailControls() }
-                    Fold("منوی همبرگری") { MenuControls() }
-                    Fold("موج‌ها و نقاط پایین") { WaveControls() }
+                if (open) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ارتفاع", color = Mute, fontSize = 11.sp, modifier = Modifier.width(52.dp))
+                        Slider(
+                            value = heightFraction,
+                            onValueChange = { heightFraction = it },
+                            valueRange = 0.28f..0.72f,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = {
+                            val code = activeTokens().toKotlin(if (solaris) "SolarisTokens" else "NeonTokens")
+                            clipboard.setText(AnnotatedString(code))
+                            dump = code
+                        }) { Text("Copy", color = Cyan, fontSize = 12.sp) }
+                        TextButton(onClick = {
+                            val before = activeTokens()
+                            if (solaris) SolarisLive.reset() else NeonLive.reset()
+                            historyFor(theme).commit(before, activeTokens())
+                            dump = null
+                        }) { Text("Reset", color = Color(0xFFFF8AB8), fontSize = 12.sp) }
+                    }
+                    if (dump != null) {
+                        Text(
+                            dump.orEmpty(),
+                            color = Mute,
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 88.dp)
+                                .verticalScroll(rememberScrollState()),
+                        )
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        Fold("پس‌زمینه") { BackgroundControls() }
+                        Fold("عنوان و خط زیرش") { TitleControls() }
+                        Fold("دکمه اتصال") { ButtonControls() }
+                        Fold("متن وضعیت") { StatusControls() }
+                        Fold("ردیف Selected") { RowControls() }
+                        Fold("کارت Download و Upload") { TrafficControls() }
+                        Fold("کارت Ping / Country / Log") { InsightControls() }
+                        Fold("کپسول موتورها") { RailControls() }
+                        Fold("منوی همبرگری") { MenuControls() }
+                        Fold("موج‌ها و نقاط پایین") { WaveControls() }
+                    }
                 }
             }
-            }
-        }
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 8.dp, bottom = if (open) sheetHeight + 8.dp else 72.dp)
-                .size(36.dp)
-                .clip(CircleShape)
-                .background(Cyan)
-                .clickable { open = !open },
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(if (open) "×" else "تم", color = Color(0xFF140818), fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
@@ -184,11 +288,20 @@ private fun Knob(
     onChange: (Float) -> Unit,
 ) {
     val shown = value.coerceIn(range.start, range.endInclusive)
+    var before by remember { mutableStateOf<NeonTokens?>(null) }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(label, color = Mute, fontSize = 12.sp, modifier = Modifier.width(118.dp), maxLines = 2)
         Slider(
             value = shown,
-            onValueChange = onChange,
+            onValueChange = { next ->
+                if (before == null) before = activeTokens()
+                onChange(next)
+            },
+            onValueChangeFinished = {
+                val start = before
+                before = null
+                if (start != null) historyFor(UacThemeState.theme).commit(start, activeTokens())
+            },
             valueRange = range,
             steps = steps,
             modifier = Modifier.weight(1f),
@@ -218,7 +331,14 @@ private fun IntKnob(
 private fun Flag(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Text(label, color = Mute, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        Switch(checked = value, onCheckedChange = onChange)
+        Switch(
+            checked = value,
+            onCheckedChange = { next ->
+                val start = activeTokens()
+                onChange(next)
+                historyFor(UacThemeState.theme).commit(start, activeTokens())
+            },
+        )
     }
 }
 
@@ -247,11 +367,21 @@ private fun Swatch(label: String, color: Color, onChange: (Color) -> Unit) {
     }
 }
 
-private fun edit(block: (NeonTokens) -> NeonTokens) = NeonLive.update(block)
+private fun activeTokens(): NeonTokens = when (UacThemeState.theme) {
+    AppTheme.SOLARIS -> SolarisLive.tokens
+    else -> NeonLive.tokens
+}
+
+private fun edit(block: (NeonTokens) -> NeonTokens) {
+    when (UacThemeState.theme) {
+        AppTheme.SOLARIS -> SolarisLive.update(block)
+        else -> NeonLive.update(block)
+    }
+}
 
 @Composable
 private fun BackgroundControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Swatch("بالا", t.bgTop) { c -> edit { it.copy(bgTop = c) } }
     Swatch("وسط", t.bgMid) { c -> edit { it.copy(bgMid = c) } }
     Swatch("پایین", t.bgBottom) { c -> edit { it.copy(bgBottom = c) } }
@@ -263,7 +393,7 @@ private fun BackgroundControls() {
 
 @Composable
 private fun TitleControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("اندازه متن", t.titleSize, 12f..48f) { v -> edit { it.copy(titleSize = v) } }
     IntKnob("وزن", t.titleWeight, 100f..900f, 7) { v -> edit { it.copy(titleWeight = v.coerceIn(100, 900)) } }
     Knob("شفافیت", t.titleAlpha, 0f..1f) { v -> edit { it.copy(titleAlpha = v) } }
@@ -282,7 +412,7 @@ private fun TitleControls() {
 
 @Composable
 private fun ButtonControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("مقیاس دکمه", t.buttonScale, 0.6f..1.5f) { v -> edit { it.copy(buttonScale = v) } }
     Knob("شفافیت دکمه", t.buttonAlpha, 0f..1f) { v -> edit { it.copy(buttonAlpha = v) } }
     Knob("حاشیه glow", t.glowExtra, 0f..80f) { v -> edit { it.copy(glowExtra = v) } }
@@ -306,6 +436,14 @@ private fun ButtonControls() {
     Knob("شدت محو", t.glowAlpha, 0f..255f) { v -> edit { it.copy(glowAlpha = v) } }
     Knob("پخش محو", t.glowSpread, -8f..30f) { v -> edit { it.copy(glowSpread = v) } }
     Knob("شدت حالت قطع", t.glowDisconnected, 0f..1.4f) { v -> edit { it.copy(glowDisconnected = v) } }
+    Knob("دور دنباله", t.connectOrbitMs, 800f..4000f) { v -> edit { it.copy(connectOrbitMs = v) } }
+    Knob("کوتاهی دنباله", t.connectSweepMin, 40f..220f) { v -> edit { it.copy(connectSweepMin = v) } }
+    Knob("بلندی دنباله", t.connectSweepMax, 60f..260f) { v -> edit { it.copy(connectSweepMax = v) } }
+    Knob("محو نزدیک دنباله", t.connectNearBlur, 0f..40f) { v -> edit { it.copy(connectNearBlur = v) } }
+    Knob("محو دور دنباله", t.connectFarBlur, 0f..60f) { v -> edit { it.copy(connectFarBlur = v) } }
+    Knob("شدت محو نزدیک", t.connectNearAlpha, 0f..1f) { v -> edit { it.copy(connectNearAlpha = v) } }
+    Knob("شدت محو دور", t.connectFarAlpha, 0f..1f) { v -> edit { it.copy(connectFarAlpha = v) } }
+    Knob("اندازه سر دنباله", t.connectHeadRadius, 0.5f..8f) { v -> edit { it.copy(connectHeadRadius = v) } }
     Knob("محو داخلی", t.innerGlowBlur, 0f..48f) { v -> edit { it.copy(innerGlowBlur = v) } }
     Knob("شدت محو داخلی", t.innerGlowAlpha, 0f..255f) { v -> edit { it.copy(innerGlowAlpha = v) } }
     Knob("فرو رفتن محو", t.innerGlowInset, 0f..16f) { v -> edit { it.copy(innerGlowInset = v) } }
@@ -325,7 +463,7 @@ private fun ButtonControls() {
 
 @Composable
 private fun StatusControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("اندازه وضعیت", t.statusSize, 10f..32f) { v -> edit { it.copy(statusSize = v) } }
     IntKnob("وزن وضعیت", t.statusWeight, 100f..900f, 7) { v -> edit { it.copy(statusWeight = v.coerceIn(100, 900)) } }
     Knob("شفافیت وضعیت", t.statusAlpha, 0f..1f) { v -> edit { it.copy(statusAlpha = v) } }
@@ -340,7 +478,7 @@ private fun StatusControls() {
 
 @Composable
 private fun RowControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("عرض ردیف", t.rowWidth, 0.4f..1f) { v -> edit { it.copy(rowWidth = v) } }
     Knob("ارتفاع", t.rowHeight, 28f..72f) { v -> edit { it.copy(rowHeight = v) } }
     Knob("فاصله افقی", t.rowPadH, 0f..40f) { v -> edit { it.copy(rowPadH = v) } }
@@ -359,7 +497,7 @@ private fun RowControls() {
 
 @Composable
 private fun TrafficControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("عرض", t.trafficWidth, 0.5f..1f) { v -> edit { it.copy(trafficWidth = v) } }
     Knob("ارتفاع", t.cardHeight, 60f..160f) { v -> edit { it.copy(cardHeight = v) } }
     Knob("شعاع گوشه", t.cardCorner, 0f..40f) { v -> edit { it.copy(cardCorner = v) } }
@@ -385,11 +523,18 @@ private fun TrafficControls() {
     Swatch("شروع پس‌زمینه", t.cardFillStart) { c -> edit { it.copy(cardFillStart = c) } }
     Swatch("پایان پس‌زمینه", t.cardFillEnd) { c -> edit { it.copy(cardFillEnd = c) } }
     Swatch("رنگ خط", t.cardBorderColor) { c -> edit { it.copy(cardBorderColor = c) } }
+    Swatch("شروع خط", t.cardBorderStart) { c -> edit { it.copy(cardBorderStart = c) } }
+    Swatch("پایان خط", t.cardBorderEnd) { c -> edit { it.copy(cardBorderEnd = c) } }
+    Swatch("شروع هاله", t.cardGlowColorStart) { c -> edit { it.copy(cardGlowColorStart = c) } }
+    Swatch("پایان هاله", t.cardGlowColorEnd) { c -> edit { it.copy(cardGlowColorEnd = c) } }
+    Knob("بلور هاله", t.cardGlowBlur, 0f..40f) { v -> edit { it.copy(cardGlowBlur = v) } }
+    Knob("شفافیت هاله", t.cardGlowAlpha, 0f..1f) { v -> edit { it.copy(cardGlowAlpha = v) } }
+    Knob("پهنای هاله", t.cardGlowSpread, 0f..36f) { v -> edit { it.copy(cardGlowSpread = v) } }
 }
 
 @Composable
 private fun InsightControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("عرض", t.insightWidth, 0.5f..1f) { v -> edit { it.copy(insightWidth = v) } }
     Knob("ارتفاع", t.insightHeight, 60f..150f) { v -> edit { it.copy(insightHeight = v) } }
     Knob("شعاع گوشه", t.insightCorner, 0f..36f) { v -> edit { it.copy(insightCorner = v) } }
@@ -411,7 +556,7 @@ private fun InsightControls() {
 
 @Composable
 private fun RailControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("عرض", t.railWidth, 32f..80f) { v -> edit { it.copy(railWidth = v) } }
     Knob("ارتفاع آیتم", t.railItem, 24f..64f) { v -> edit { it.copy(railItem = v) } }
     Knob("ارتفاع انتخاب", t.railItemOn, 32f..90f) { v -> edit { it.copy(railItemOn = v) } }
@@ -433,7 +578,7 @@ private fun RailControls() {
 
 @Composable
 private fun MenuControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("اندازه دکمه", t.menuButton, 28f..64f) { v -> edit { it.copy(menuButton = v) } }
     Knob("اندازه آیکون", t.menuIcon, 14f..40f) { v -> edit { it.copy(menuIcon = v) } }
     Knob("شفافیت", t.menuAlpha, 0f..1f) { v -> edit { it.copy(menuAlpha = v) } }
@@ -442,7 +587,7 @@ private fun MenuControls() {
 
 @Composable
 private fun WaveControls() {
-    val t = NeonLive.tokens
+    val t = activeTokens()
     Knob("ارتفاع", t.waveHeight, 8f..80f) { v -> edit { it.copy(waveHeight = v) } }
     Knob("محو", t.waveGlowBlur, 0f..40f) { v -> edit { it.copy(waveGlowBlur = v) } }
     Knob("شدت محو", t.waveGlowAlpha, 0f..1f) { v -> edit { it.copy(waveGlowAlpha = v) } }

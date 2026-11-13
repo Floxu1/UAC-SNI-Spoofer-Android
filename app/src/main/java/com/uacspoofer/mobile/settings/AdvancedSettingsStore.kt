@@ -123,6 +123,10 @@ class AdvancedSettingsStore(context: Context) {
     private val mutable = MutableStateFlow(read())
     val state: StateFlow<AdvancedSettingsData> = mutable
 
+    init {
+        listeners.add(mutable)
+    }
+
     fun snapshot(): AdvancedSettingsData = read().copy(iranDirect = NetworkGuardStore.get(appContext).snapshot().iranDirect).also { mutable.value = it }
     fun update(block: (AdvancedSettingsData) -> AdvancedSettingsData) = save(block(snapshot()))
     fun resetDefaults(): AdvancedSettingsData = save(AdvancedSettingsData.DEFAULT)
@@ -148,7 +152,7 @@ class AdvancedSettingsStore(context: Context) {
             .putBoolean("dnsServeStale", v.dnsServeStale).putBoolean("tcpFastOpen", v.tcpFastOpen).putBoolean("bigBuffers", v.bigBuffers).putBoolean("prewarm", v.prewarm)
             .apply()
         NetworkGuardStore.get(appContext).setIranDirect(v.iranDirect)
-        mutable.value = v
+        listeners.forEach { it.value = v }
         return v
     }
 
@@ -187,6 +191,7 @@ class AdvancedSettingsStore(context: Context) {
     }
 
     companion object {
+        private val listeners = java.util.concurrent.CopyOnWriteArrayList<MutableStateFlow<AdvancedSettingsData>>()
         private const val PREF="advanced_runtime_settings"
         private const val TELEGRAM_EDGE9_MIGRATION="telegram_edge9_primary_v1"
         private const val STREAMING_MTU1400_MIGRATION="streaming_mtu1400_no_telegram_route_tcp443_v2"

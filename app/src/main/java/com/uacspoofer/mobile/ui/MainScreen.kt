@@ -146,18 +146,9 @@ fun MainScreen(
     var directSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
     var xraySettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
     var connectFlowVisible by remember { mutableStateOf(false) }
-    val languagePrefs = remember(context) {
-        context.getSharedPreferences("app_preferences", android.content.Context.MODE_PRIVATE)
-    }
-
-    var selectedLanguage by rememberSaveable {
-        mutableStateOf(
-            when (languagePrefs.getString("language", "PERSIAN")) {
-                "ENGLISH" -> DrawerLanguage.ENGLISH
-                else -> DrawerLanguage.PERSIAN
-            }
-        )
-    }
+    val languageStore = remember(context) { LanguageStore.get(context) }
+    val selectedLanguage by languageStore.language.collectAsStateWithLifecycle()
+    val settingsRevision by com.uacspoofer.mobile.settings.SettingsBackup.revision.collectAsStateWithLifecycle()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
     val homeRemoteFocus = remember { HomeRemoteFocus() }
@@ -317,7 +308,12 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(selectedDestination, state) {
+    LaunchedEffect(settingsRevision) {
+        if (settingsRevision == 0) return@LaunchedEffect
+        homeConfigsLibrary = profileStore.snapshot()
+    }
+
+    LaunchedEffect(selectedDestination, state, settingsRevision) {
         val nextProfile = if (state == ConnectionState.CONNECTED) {
             profileStore.activeProfile() ?: profileStore.selectedProfile()
         } else {
@@ -379,11 +375,7 @@ fun MainScreen(
                     closeDrawer()
                 },
                 onLanguageSelected = { language ->
-                    selectedLanguage = language
-
-                    languagePrefs.edit()
-                        .putString("language", language.name)
-                        .apply()
+                    languageStore.set(language)
                 },
                 modifier = Modifier
                     .fillMaxHeight()
@@ -995,7 +987,9 @@ private fun HomeScreenContent(
                 },
             )
         }
-        if (com.uacspoofer.mobile.ui.theme.UacThemeState.theme == AppTheme.NEON) {
+        if (com.uacspoofer.mobile.ui.theme.UacThemeState.theme == AppTheme.NEON ||
+            com.uacspoofer.mobile.ui.theme.UacThemeState.theme == AppTheme.SOLARIS
+        ) {
             NeonHomeTuner()
         }
     }

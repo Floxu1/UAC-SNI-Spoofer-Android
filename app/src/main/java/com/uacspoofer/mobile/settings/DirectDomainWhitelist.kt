@@ -28,6 +28,11 @@ class DirectDomainWhitelist private constructor(context: Context) {
     }
 
     @Synchronized
+    fun replace(raw: List<String>) {
+        persist(raw.mapNotNull { normalize(it) }.distinct().sorted())
+    }
+
+    @Synchronized
     fun remove(host: String) {
         val key = normalize(host) ?: host.trim().lowercase()
         persist(mutable.value.filterNot { it == key })

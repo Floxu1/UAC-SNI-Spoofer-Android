@@ -106,7 +106,7 @@ internal fun paletteFor(theme: AppTheme): UacPalette = when (theme) {
 }
 
 internal object UacThemeState {
-    var theme by mutableStateOf(AppTheme.CLASSIC)
+    var theme by mutableStateOf(AppTheme.NEON)
     var palette by mutableStateOf(ClassicPalette)
     val isNeon: Boolean get() = palette.neon
 }

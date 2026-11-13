@@ -10,6 +10,7 @@ import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.vpn.VpnPauseStore
 import com.uacspoofer.mobile.settings.DirectDomainWhitelist
 import com.uacspoofer.mobile.vpn.AdaptiveDnsResolvers
+import com.uacspoofer.mobile.vpn.TunLanBypass
 
 data class MciXrayRuntimeOptions(
     val identityOverride: RuntimeProxyIdentity? = null,
@@ -78,15 +79,15 @@ internal object MciXrayConfigBuilder {
             add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp","rules":[{"action":"hijack"}]}}""")
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
             // Xray runs outside the VPN (the app is a disallowed application), so direct sockets
-            // never loop back into the tunnel.
-            if (s.iranDirect || VpnPauseStore.isPaused() || whitelistHosts.isNotEmpty()) {
-                add("""{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"AsIs"},"streamSettings":{"sockopt":{${TcpFastOpenSupport.field(s.tcpFastOpen)}"tcpNoDelay":true}}}""")
-            }
+            // never loop back into the tunnel. Always present: private LAN is direct even when
+            // Iran-direct is off.
+            add("""{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"AsIs"},"streamSettings":{"sockopt":{${TcpFastOpenSupport.field(s.tcpFastOpen)}"tcpNoDelay":true}}}""")
         }.joinToString(",\n")
 
         val acceptedInbounds = "[\"socks-in\"]"
         val dnsInbounds = if (nativeTun) "[\"socks-in\",\"tun-in\"]" else acceptedInbounds
         val routingRules = buildList {
+            add("""{"type":"field","inboundTag":$dnsInbounds,"ip":[${TunLanBypass.privateIpsJson()}],"outboundTag":"direct"}""")
             add("""{"type":"field","inboundTag":$dnsInbounds,"network":"tcp,udp","port":"53","outboundTag":"dns-out"}""")
             if (VpnPauseStore.isPaused()) {
                 // Pause: force EVERYTHING off the proxy (user TCP/UDP + Xray DNS module).
@@ -145,6 +146,13 @@ internal object MciXrayConfigBuilder {
         val resolverServers = resolverOrder.joinToString(",") { resolver ->
             """{"address":"${q(resolver.url)}","queryStrategy":"UseIPv4","timeoutMs":3000,"skipFallback":false}"""
         }
+        // The dial host has to resolve before the proxy exists. Sending that lookup through
+        // dns-query -> proxy deadlocks a hostname config (REALITY/ECH and any manual link).
+        // localhost is the phone resolver; this process is excluded from the tunnel.
+        val dialDns = dialHostDns(buildList {
+            add(edge.address)
+            cleanHop?.edge?.address?.let(::add)
+        })
         // Iranian names resolve with the phone's own resolver (Xray is outside the VPN) so they get
         // Iranian CDN answers for the direct route; everything else uses DoH through the tunnel.
         val wlDns = DirectDomainWhitelist.xrayDomainsJson(DirectDomainWhitelist.snapshotOrEmpty())
@@ -159,7 +167,7 @@ internal object MciXrayConfigBuilder {
                 """{"address":"localhost","domains":[$wlDns],"skipFallback":true},"""
             else -> ""
         }
-        val dns = """"dns":{"hosts":{$resolverHosts},"servers":[$iranDns$resolverServers],"queryStrategy":"UseIPv4","disableCache":false,"serveStale":${s.dnsServeStale},"serveExpiredTTL":${if (s.dnsServeStale) DNS_STALE_CAP_SECONDS else 0},"enableParallelQuery":false,"tag":"dns-query"},"""
+        val dns = """"dns":{"hosts":{$resolverHosts},"servers":[$dialDns$iranDns$resolverServers],"queryStrategy":"UseIPv4","disableCache":false,"serveStale":${s.dnsServeStale},"serveExpiredTTL":${if (s.dnsServeStale) DNS_STALE_CAP_SECONDS else 0},"enableParallelQuery":false,"tag":"dns-query"},"""
 
         val verbose = !runtimeOptions.quietLogging && (runtimeOptions.verboseLogging || debugLogging)
         val logLevel = if (verbose) "debug" else "warning"
@@ -454,6 +462,26 @@ internal object MciXrayConfigBuilder {
             ?.let { ",\"packetEncoding\":\"${q(it)}\"" }
             .orEmpty()
         return """{"vnext":[{"address":"${q(address)}","port":$port,"users":[{$userJson}]}]$encoding}"""
+    }
+
+    /** First DNS server: the server name itself, resolved on the phone, never via the proxy. */
+    private fun dialHostDns(hosts: List<String>): String {
+        val domains = hosts
+            .map { it.trim().removePrefix("[").removeSuffix("]").trim().lowercase() }
+            .filter { it.isNotEmpty() && !isIpLiteral(it) }
+            .distinct()
+        if (domains.isEmpty()) return ""
+        val encoded = domains.joinToString(",") { "\"full:${q(it)}\"" }
+        return """{"address":"localhost","domains":[$encoded],"skipFallback":true},"""
+    }
+
+    private fun isIpLiteral(host: String): Boolean {
+        if (':' in host) return true
+        val parts = host.split('.')
+        return parts.size == 4 && parts.all { octet ->
+            val number = octet.toIntOrNull()
+            number != null && number in 0..255
+        }
     }
 
     private fun q(value: String): String = value
