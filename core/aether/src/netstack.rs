@@ -315,8 +315,6 @@ struct TcpState {
     pending: Vec<u8>,
     established: bool,
     half_closed: bool,
-    /// Holds the large High-tier buffers (counted against the cap).
-    big: bool,
 }
 
 struct UdpState {
@@ -615,7 +613,6 @@ async fn run(
                                             pending: Vec::new(),
                                             established: false,
                                             half_closed: false,
-                                            big: false,
                                         },
                                     );
                                     log::debug!(
@@ -695,17 +692,8 @@ async fn sleep_opt(delay: Option<std::time::Duration>) {
 fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
     match cmd {
         Cmd::OpenTcp { dst, resp } => {
-            // Outbound dials are the chain legs (Psiphon SSH through WARP), so
-            // on the High tier the first few get large windows. The cap bounds
-            // memory when many dials are open at once.
-            let (big_rx, big_tx, big_cap) = crate::sysprofile::netstack_tcp_big();
-            let big_live = s.tcp_conns.values().filter(|c| c.big).count();
-            let big = big_cap > 0 && big_live < big_cap && big_rx > tcp_buf();
-            let mut socket = if big {
-                new_tcp_socket(big_rx, big_tx)
-            } else {
-                new_tcp_socket(tcp_buf(), tcp_buf())
-            };
+            let (rx, tx) = crate::sysprofile::netstack_tcp_outbound_buffers();
+            let mut socket = new_tcp_socket(rx, tx);
 
             let local_port = alloc_port(&mut s.next_port);
             let remote = to_ip_endpoint(dst);
@@ -731,18 +719,13 @@ fn handle_cmd(s: &mut NetStack, cmd: Cmd) {
                     pending: Vec::new(),
                     established: false,
                     half_closed: false,
-                    big,
                 },
             );
-            if big {
-                log::debug!(
-                    "[netstack] tcp id={id} to {dst}: large buffers {}KB/{}KB ({}/{})",
-                    big_rx / 1024,
-                    big_tx / 1024,
-                    big_live + 1,
-                    big_cap
-                );
-            }
+            log::debug!(
+                "[netstack] tcp id={id} to {dst}: outbound buffers rx={}KB tx={}KB",
+                rx / 1024,
+                tx / 1024,
+            );
         }
         Cmd::OpenUdp { resp } => {
             let rx_meta = vec![udp::PacketMetadata::EMPTY; udp_meta()];
@@ -1265,6 +1248,41 @@ mod tests {
             saw_teardown,
             "the netstack never closed the socket after the app went away, so it leaks"
         );
+    }
+
+    #[tokio::test]
+    async fn outbound_receive_windows_do_not_shrink_after_six_connections() {
+        let mut device = StackDevice::new(1400);
+        let mut iface = Interface::new(
+            Config::new(HardwareAddress::Ip), &mut device, Instant::now(),
+        );
+        iface.update_ip_addrs(|addrs| {
+            addrs.push(IpCidr::new(IpAddress::v4(198, 18, 0, 1), 24)).unwrap();
+        });
+        let mut stack = NetStack {
+            iface,
+            device,
+            sockets: SocketSet::new(Vec::new()),
+            tcp_conns: HashMap::new(),
+            udp_conns: HashMap::new(),
+            next_id: 0,
+            next_port: 40000,
+            data_in_tx: mpsc::channel(1).0,
+            accept_tx: None,
+        };
+        let (expected_rx, expected_tx) = crate::sysprofile::netstack_tcp_outbound_buffers();
+        for index in 0..8 {
+            let (resp, _response) = oneshot::channel();
+            handle_cmd(&mut stack, Cmd::OpenTcp {
+                dst: "198.18.0.2:443".parse().unwrap(),
+                resp,
+            });
+            assert_eq!(stack.tcp_conns.len(), index + 1);
+            let state = stack.tcp_conns.get(&index).unwrap();
+            let socket = stack.sockets.get::<tcp::Socket>(state.handle);
+            assert_eq!(socket.recv_capacity(), expected_rx, "RX for connection {}", index + 1);
+            assert_eq!(socket.send_capacity(), expected_tx, "TX for connection {}", index + 1);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

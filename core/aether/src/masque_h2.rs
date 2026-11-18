@@ -8,7 +8,6 @@ use boring::pkey::PKey;
 use boring::ssl::{SslConnector, SslMethod, SslVersion};
 use boring::x509::X509;
 use bytes::Bytes;
-use futures::FutureExt;
 use http::Method;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -851,8 +850,7 @@ pub async fn run(
             status.as_u16()
         )));
     }
-    let mut recv_body = response.into_body();
-    let mut capsules = CapsuleParser::new();
+    let recv_body = response.into_body();
 
     let mut validate_deadline: Option<Instant> = None;
     if data_check {
@@ -893,6 +891,30 @@ pub async fn run(
         let _ = sender_done_tx.send(result);
     });
     let _sender_guard = AbortOnDrop(sender_handle);
+
+    // The receive worker may await the bounded netstack queue without holding
+    // the controller or upload path hostage. All workers are aborted on exit.
+    let receive_stats = std::sync::Arc::new(crate::h2_receive::ReceiveStats::default());
+    let worker_stats = receive_stats.clone();
+    let (validation_tx, mut validation_rx) = tokio::sync::watch::channel(0u32);
+    let mut validation_open = true;
+    let (receiver_done_tx, mut receiver_done) = oneshot::channel::<Result<()>>();
+    let receiver_handle = tokio::spawn(async move {
+        let mut capsules = CapsuleParser::new();
+        let result = crate::h2_receive::forward(
+            recv_body,
+            inbound_tx,
+            move |chunk| {
+                capsules.push(chunk);
+                decode_capsules(&mut capsules, &addr_tx)
+            },
+            validation_tx,
+            DATA_PROBE_REQUIRED_SUCCESSES,
+            worker_stats,
+        ).await.map_err(AetherError::Masque);
+        let _ = receiver_done_tx.send(result);
+    });
+    let _receiver_guard = AbortOnDrop(receiver_handle);
 
     loop {
         if data_check && !ready_fired {
@@ -987,41 +1009,20 @@ pub async fn run(
                 };
             }
 
-            data = futures::future::poll_fn(|cx| recv_body.poll_data(cx)) => {
-                // Take whatever else is already buffered (up to PACKET_BATCH
-                // chunks) before going back to select.
-                let mut next = data;
-                let mut ended: Option<Result<()>> = None;
-                let mut taken = 0usize;
-                loop {
-                    match next {
-                        Some(Ok(chunk)) => {
-                            let _ = recv_body.flow_control().release_capacity(chunk.len());
-                            capsules.push(&chunk);
-                        }
-                        Some(Err(e)) => {
-                            log::warn!("[h2] recv body error: {e}");
-                            ended = Some(Err(AetherError::Masque(format!("h2 body: {e}"))));
-                            break;
-                        }
-                        None => {
-                            log_or_debug(quiet, "[h2] server closed stream".to_string());
-                            ended = Some(Ok(()));
-                            break;
-                        }
-                    }
-                    taken += 1;
-                    if taken >= PACKET_BATCH {
-                        break;
-                    }
-                    match futures::future::poll_fn(|cx| recv_body.poll_data(cx)).now_or_never() {
-                        Some(more) => next = more,
-                        None => break,
-                    }
+            done = &mut receiver_done => {
+                return match done {
+                    Ok(result) => result,
+                    Err(_) => Err(AetherError::Masque("h2 receiver stopped".into())),
+                };
+            }
+
+            changed = validation_rx.changed(), if data_check && !ready_fired && validation_open => {
+                if changed.is_err() {
+                    validation_open = false;
+                    continue;
                 }
-                let got_data = drain_capsules(&mut capsules, &inbound_tx, &addr_tx);
-                if got_data && !ready_fired {
-                    validate_successes += 1;
+                if !ready_fired {
+                    validate_successes = *validation_rx.borrow_and_update();
                     log::debug!(
                         "[h2] data-plane round-trip {}/{} confirmed",
                         validate_successes, DATA_PROBE_REQUIRED_SUCCESSES
@@ -1040,9 +1041,6 @@ pub async fn run(
                             log::trace!("[h2] follow-up data-plane probe: {e}");
                         }
                     }
-                }
-                if let Some(end) = ended {
-                    return end;
                 }
             }
         }
@@ -1143,12 +1141,11 @@ async fn send_capsule(send: &mut h2::SendStream<Bytes>, data: Bytes) -> Result<(
     Ok(())
 }
 
-fn drain_capsules(
+fn decode_capsules(
     capsules: &mut CapsuleParser,
-    inbound_tx: &mpsc::Sender<Vec<u8>>,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
-) -> bool {
-    let mut delivered = false;
+) -> std::result::Result<Vec<Vec<u8>>, String> {
+    let mut packets = Vec::new();
     loop {
         match capsules.next() {
             Ok(Some(Capsule::Datagram(payload))) => {
@@ -1159,14 +1156,7 @@ fn drain_capsules(
                         continue;
                     }
                 };
-                delivered = true;
-                match inbound_tx.try_send(pkt) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        log::trace!("[h2] inbound queue full, dropping datagram");
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return delivered,
-                }
+                packets.push(pkt);
             }
             Ok(Some(Capsule::AddressAssign(addrs))) => {
                 for a in addrs {
@@ -1187,12 +1177,11 @@ fn drain_capsules(
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(e) => {
-                log::trace!("[h2] capsule parse: {e}");
-                break;
+                return Err(format!("h2 capsule parse: {e}"));
             }
         }
     }
-    delivered
+    Ok(packets)
 }
 
 fn bytes_to_ip(version: u8, bytes: &[u8]) -> Option<IpAddr> {

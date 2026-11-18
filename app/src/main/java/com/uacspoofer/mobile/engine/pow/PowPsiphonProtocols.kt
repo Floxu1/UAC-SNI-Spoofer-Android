@@ -205,14 +205,11 @@ internal object PowPsiphonProtocols {
         config.put("EstablishTunnelTimeoutSeconds", strategy.timeoutSeconds)
         if (!preferredRegion.isNullOrBlank()) {
             config.put("EgressRegion", preferredRegion)
-            // Nearby head start keeps the strategy timeout (20s for F behind
-            // WARP) and the protocol cap set above. An explicit country gets
-            // a longer window and may use any protocol that country serves.
+            // Country selection changes the exit, not the transport strategy.
+            // Keep its protocol limits for both explicit and nearby countries;
+            // only an explicit selection gets the longer establishment window.
             if (!regionBias) {
                 config.put("EstablishTunnelTimeoutSeconds", REGION_PHASE_TIMEOUT_SECONDS)
-                config.remove("InitialLimitTunnelProtocols")
-                config.remove("InitialLimitTunnelProtocolsCandidateCount")
-                config.remove("LimitTunnelProtocols")
             }
         }
         if (direct) {

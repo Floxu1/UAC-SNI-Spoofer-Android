@@ -19,7 +19,20 @@ data class AutoCandidate(
     val cleanIp: Boolean = false,
 )
 
-/** Pure parsing/ordering of the Patterniha Free-Configs list (unit-tested). */
+/** Source for Engine 1 Auto; kept separate from manually imported Patterniha URLs. */
+object AutoConfigFeed {
+    const val ID = "freeport-alive-v1"
+    const val RAW_URL = "https://raw.githubusercontent.com/mhammaddawudi/freeport/configs/alive.txt"
+    const val API_URL = "https://api.github.com/repos/mhammaddawudi/freeport/contents/alive.txt?ref=configs"
+    val MIRRORS = listOf(
+        RAW_URL,
+        "https://cdn.jsdelivr.net/gh/mhammaddawudi/freeport@configs/alive.txt",
+        "https://fastly.jsdelivr.net/gh/mhammaddawudi/freeport@configs/alive.txt",
+        API_URL,
+    )
+}
+
+/** Pure parsing/ordering of Auto config lists (also used for Patterniha imports). */
 object PatternihaList {
     const val RAW_URL = "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt"
     const val JSDELIVR_URL = "https://cdn.jsdelivr.net/gh/patterniha/Free-Configs@main/configs.txt"

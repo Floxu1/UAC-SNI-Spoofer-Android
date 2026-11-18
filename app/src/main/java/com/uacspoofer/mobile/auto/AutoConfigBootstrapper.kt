@@ -39,7 +39,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 /**
- * Engine 1 Auto mode: picks a working Patterniha config for this network. Runs only inside a connect
+ * Engine 1 Auto mode: picks a working Freeport alive config for this network. Runs only inside a connect
  * (no background work): operator/DPI type -> list -> clean-IP copies -> capped batch real-delay test
  * (about 24 configs per Xray process, ~6 s) -> top 10 kept per network.
  */

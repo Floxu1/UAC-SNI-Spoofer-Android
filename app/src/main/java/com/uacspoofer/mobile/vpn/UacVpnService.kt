@@ -2311,19 +2311,21 @@ class UacVpnService : VpnService() {
     }
 
     private fun startLanShare() {
-        if (!networkGuardStore.snapshot().lanShare || !resourcesActive) {
+        val guard = networkGuardStore.snapshot()
+        if (!guard.lanShare || !resourcesActive) {
             LanShareProxy.stop()
             return
         }
         runCatching {
             LanShareProxy.start(
+                mode = guard.lanShareMode,
                 upstreamHost = "127.0.0.1",
                 upstreamPort = lanShareUpstreamPort(),
                 protect = { socket -> protectOutbound(socket) },
             )
         }.onFailure { error ->
             AppLogRepository.warning(LogSource.SERVICE, "LAN share failed", error)
-            LanShareStatus.update(LanShareEndpoint(detail = error.message.orEmpty()))
+            LanShareStatus.update(LanShareEndpoint(detail = error.message.orEmpty(), mode = guard.lanShareMode))
         }
     }
 

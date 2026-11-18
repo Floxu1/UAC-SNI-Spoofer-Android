@@ -42,6 +42,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -162,7 +163,7 @@ internal fun EngineSwitchRail(
     val railEdge = tuned?.railBorderColor ?: Color.White.copy(alpha = 0.24f)
     Box(
         modifier = modifier
-            .then(if (tuned != null) Modifier.graphicsLayer { alpha = tuned.railAlpha } else Modifier)
+            .then(if (tuned != null && tuned.railAlpha != 1f) Modifier.graphicsLayer { alpha = tuned.railAlpha } else Modifier)
             .shadow(tuned?.railShadow?.dp ?: 16.dp, railShape, ambientColor = accent.copy(alpha = 0.35f), spotColor = Color.Black.copy(alpha = 0.4f))
             .clip(railShape)
             .background(Brush.verticalGradient(listOf(railTop, railBottom)))
@@ -232,18 +233,24 @@ private fun EngineSwitchItem(
     )
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(
+    val scale = animateFloatAsState(
         if (pressed) 0.86f else 1f,
         spring(dampingRatio = 0.5f, stiffness = Spring.StiffnessMedium),
         label = "engine-item-press",
     )
-    val spin = rememberInfiniteTransition(label = "engine-item-spin")
-    val spinDeg by spin.animateFloat(0f, 360f, infiniteRepeatable(tween(1_100, easing = LinearEasing), RepeatMode.Restart), label = "engine-item-spin-deg")
+    val scaling by remember(scale) { derivedStateOf { scale.value != 1f } }
+    // Idle engine icons have no visible motion, so do not keep four clocks running.
+    val spinDeg = if (spinning) {
+        rememberInfiniteTransition(label = "engine-item-spin").animateFloat(
+            0f, 360f, infiniteRepeatable(tween(1_100, easing = LinearEasing), RepeatMode.Restart),
+            label = "engine-item-spin-deg",
+        )
+    } else null
     val description = mode.switchContentDescription()
     Column(
         modifier = Modifier
             .size(width, h)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .then(if (scaling) Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value } else Modifier)
             .clip(RoundedCornerShape(percent = 50))
             .trackHomeSlot(mode.toHomeRemoteSlot())
             .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Tab, onClick = onClick)
@@ -270,7 +277,7 @@ private fun EngineSwitchItem(
                             20.dp
                         },
                     )
-                    .graphicsLayer { rotationZ = if (spinning) spinDeg else 0f },
+                    .then(if (spinDeg != null) Modifier.graphicsLayer { rotationZ = spinDeg.value } else Modifier),
             )
         }
         AnimatedVisibility(

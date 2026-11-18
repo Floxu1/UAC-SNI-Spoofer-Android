@@ -569,6 +569,18 @@ private fun PowAdvancedCard(
             )
         }
         PowExpandBody(visible = expanded) {
+            PowSwitchRow(
+                icon = Icons.Outlined.Bolt,
+                title = homeText("Speed test when connecting", "تست سرعت هنگام اتصال"),
+                subtitle = homeText(
+                    "MASQUE H2 + Psiphon only. Uses data and adds connection time. Applies next connection.",
+                    "فقط MASQUE H2 + Psiphon؛ مصرف اینترنت و زمان اتصال بیشتر. از اتصال بعدی.",
+                ),
+                checked = settings.startupSpeedTest,
+                accent = accent,
+                onCheckedChange = { store.save(settings.copy(startupSpeedTest = it)) },
+            )
+            PowRowDivider()
             PowPickerRow(
                 icon = Icons.Outlined.Shield,
                 label = homeText("HTTP/2 obfuscation", "مبهم‌سازی HTTP/2"),

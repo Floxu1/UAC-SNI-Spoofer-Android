@@ -123,6 +123,7 @@ class PowConnectionCoordinator(
     @Volatile private var connectedSignal: CompletableDeferred<Unit>? = null
     @Volatile private var ladderJob: Job? = null
     @Volatile private var currentSettings = PowEngineSettings.DEFAULT
+    @Volatile private var startupSelecting = false
     @Volatile private var innerStarted = false
     @Volatile private var sessionMtu = PowTunRelayConfig.DEFAULT_MTU
     @Volatile private var qualityJob: Job? = null
@@ -236,6 +237,7 @@ class PowConnectionCoordinator(
         qualityRetunes.set(0)
         crashRecovers.set(0)
         currentSettings = store.snapshot()
+        startupSelecting = true
         proxyMode = settings.connectionMode == CONNECTION_MODE_PROXY
         socksPort = if (proxyMode) settings.socksPort else PowCoreConfig.SOCKS_PORT
         PowLiveExit.reset()
@@ -317,6 +319,8 @@ class PowConnectionCoordinator(
                     error("Psiphon did not connect in time")
                 }
                 ensureActive()
+                selectStartupDownloadPath()
+                ensureActive()
                 if (!proxyMode) {
                     openDeviceTun(establishTun)
                     val fd = tunFd ?: error("VPN interface missing")
@@ -339,6 +343,9 @@ class PowConnectionCoordinator(
                 }
                 }
                 innerReady = true
+                startupSelecting = false
+                recordLadderWinner()
+                maybeStartSidecar()
                 rememberConnectedMode()
                 val ready = when {
                     proxyMode -> "UAC PoW ready · Proxy SOCKS 127.0.0.1:$socksPort"
@@ -827,6 +834,7 @@ class PowConnectionCoordinator(
         silent: Boolean = false,
         retune: Boolean = false,
         chainPort: Int = PowCoreConfig.CHAIN_SOCKS_PORT,
+        forcedPeer: String? = null,
     ): String? {
         val mci = PowCoreConfig.usesMciFirewall(appContext, currentSettings)
         val plan = PowCoreConfig.outerPlan(currentSettings, mci)
@@ -871,7 +879,7 @@ class PowConnectionCoordinator(
             } else {
                 scanMode
             }
-            val budget = PowCoreConfig.outerBudgetMs(
+            val budget = if (forcedPeer != null) 12_000L else PowCoreConfig.outerBudgetMs(
                 protocol,
                 retune = retune,
                 scanMode = attemptScan,
@@ -892,7 +900,7 @@ class PowConnectionCoordinator(
                 "Outer attempt ${offset + 1}/${ordered.size}: $label (${budget / 1000}s, $attemptScan)" +
                     if (retune) " fresh" else "",
             )
-            val config = if (chainPort == PowCoreConfig.CHAIN_SOCKS_PORT) {
+            val baseConfig = if (chainPort == PowCoreConfig.CHAIN_SOCKS_PORT) {
                 PowCoreConfig.chainOuterJson(
                     appContext,
                     protocol,
@@ -904,6 +912,8 @@ class PowConnectionCoordinator(
             } else {
                 PowGhostHandover.shadowChainJson(appContext, protocol, currentSettings, chainPort, mci)
             }
+            val config = if (forcedPeer == null) baseConfig else JSONObject(baseConfig)
+                .put("forced_peer", forcedPeer).toString()
             val prepared = try {
                 Result.success(AetherNative.prepareCancellable(config))
             } catch (cancelled: CancellationException) {
@@ -1071,6 +1081,118 @@ class PowConnectionCoordinator(
         PowLiveExit.publish(socksPort, warp = true)
     }
 
+    /** Bounded startup-only comparison of existing H2 peers and Psiphon strategies. */
+    private suspend fun selectStartupDownloadPath() {
+        if (!currentSettings.startupSpeedTest) return
+        if (directPsiphon || lastOuterProtocol != "masque" || wonTransport != "h2") return
+        val peer = runCatching {
+            PowPathMemory.parseTomlPeer(PowCoreConfig.lastconnPath(appContext).readText())
+        }.getOrNull()?.takeIf(PowStartupSpeedPicker::validPeer) ?: return
+        val initial = PowStartupSpeedPicker.Route(peer, activeLadder()[winnerIndex()].name)
+        // Keep the actual connected country's scope identical for every trial.
+        val country = JSONObject(lastPsiphonConfig).optString("EgressRegion").ifBlank { null }
+        val memory = appContext.getSharedPreferences("pow_startup_download_v1", Context.MODE_PRIVATE)
+        val key = "${PowNetworkScoreboard.networkKey(appContext)}|${currentSettings.exitCountryCode}|${currentSettings.masqueIpVersion}|${currentSettings.h2Fingerprint}"
+        val remembered = runCatching {
+            val entry = JSONObject(memory.getString(key, "")!!)
+            if (System.currentTimeMillis() - entry.getLong("at") !in 0..PowStartupSpeedPicker.MEMORY_TTL_MS) null
+            else PowStartupSpeedPicker.Route(entry.getString("peer"), entry.getString("strategy"))
+        }.getOrNull()
+        val candidates = PowStartupSpeedPicker.candidates(
+            initial, PowCoreConfig.cleanH2Peers(appContext), activeLadder().map { it.name }, remembered,
+        )
+        if (candidates.isEmpty()) return
+        // Separate datastores retain each candidate's Psiphon server affinity.
+        // In particular, testing an alternative must not overwrite the baseline's server cache.
+        val configs = mutableMapOf(initial to lastPsiphonConfig)
+        candidates.forEachIndexed { slot, route ->
+            val strategy = activeLadder().first { it.name == route.strategy }
+            configs[route] = PowPsiphonProtocols.buildConfig(
+                socksPort = socksPort,
+                dataDirectory = appContext.getDir("uac-pow-startup-$slot", 0).absolutePath,
+                preferredRegion = country,
+                strategy = strategy,
+                optimizedMode = currentSettings.optimizedMode,
+                direct = false,
+            )
+        }
+        AppLogRepository.info(LogSource.POW, "Startup download pick: ${candidates.size + 1} existing path recipes; no new scan")
+        val choice = PowStartupSpeedPicker.select(
+            initial = initial,
+            candidates = candidates,
+            now = SystemClock::elapsedRealtime,
+            activate = { route, budget -> activateStartupRoute(route, configs.getValue(route), budget) },
+            measure = {
+                coroutineContext.ensureActive()
+                if (stopRequested.get()) throw CancellationException("Session stopped")
+                PowStatusStore.update(PowPhase.INNER, 75, "سنجش سرعت دانلود پیش از اتصال")
+                PowStartupDownloadProbe.measure(socksPort, diagnostic = {
+                    AppLogRepository.debug(LogSource.POW, "Startup download probe: $it")
+                })
+            },
+            report = { AppLogRepository.info(LogSource.POW, "Startup download pick: $it") },
+        )
+        if (choice.sample != null) {
+            memory.edit().putString(key, JSONObject().put("peer", choice.route.peer)
+                .put("strategy", choice.route.strategy).put("at", System.currentTimeMillis())
+                .put("bits_per_second", choice.sample.bitsPerSecond).toString()).apply()
+        }
+        AppLogRepository.success(LogSource.POW,
+            "Startup download pick finished; ${choice.route.peer} ${choice.route.strategy}; no periodic speed tests")
+    }
+
+    private suspend fun activateStartupRoute(
+        route: PowStartupSpeedPicker.Route,
+        routeConfig: String,
+        budgetMs: Long,
+    ): Boolean {
+        return withTimeoutOrNull(budgetMs) {
+            coroutineContext.ensureActive()
+            if (stopRequested.get()) throw CancellationException("Session stopped")
+            val index = activeLadder().indexOfFirst { it.name == route.strategy }
+            if (index < 0) return@withTimeoutOrNull false
+            ladderActive.set(false)
+            ladderJob?.cancel()
+            innerReady = false
+            innerCallbacksArmed.set(false)
+            psiphonGeneration.set(-1)
+            cancelZeroTunnelTimeout()
+            val old = psiphon
+            psiphon = null
+            withContext(Dispatchers.IO + NonCancellable) {
+                try { old?.stop() } finally { old?.close() }
+            }
+            // The old Android service destroys its process on unbind.
+            delay(1_200)
+            innerStarted = false
+            psiphonTunnelCount.set(0)
+            val livePeer = runCatching {
+                PowPathMemory.parseTomlPeer(PowCoreConfig.lastconnPath(appContext).readText())
+            }.getOrNull()
+            if (!AetherNative.isReady() || livePeer != route.peer) {
+                if (raiseOuterLeg(silent = true, forcedPeer = route.peer) == null) return@withTimeoutOrNull false
+                val actual = runCatching {
+                    PowPathMemory.parseTomlPeer(PowCoreConfig.lastconnPath(appContext).readText())
+                }.getOrNull()
+                if (actual != route.peer) return@withTimeoutOrNull false
+            }
+            ladderIndex = index
+            activeTunnelProtocol = ""
+            regionPhase = false
+            regionPhaseBias = false
+            val config = JSONObject(routeConfig).put("LocalSocksProxyPort", socksPort).toString()
+            val signal = CompletableDeferred<Unit>()
+            connectedSignal = signal
+            lastPsiphonConfig = config
+            psiphonGeneration.set(sessionGeneration.get())
+            innerCallbacksArmed.set(true)
+            innerStarted = true
+            innerClient().start(config)
+            signal.await()
+            psiphonTunnelCount.get() > 0 && AetherNative.isReady()
+        } ?: false
+    }
+
     private suspend fun startPsiphonTunnel(keepExit: Boolean = false, socks: Int = socksPort) {
         val generation = sessionGeneration.get()
         val ladder = activeLadder()
@@ -1220,6 +1342,7 @@ class PowConnectionCoordinator(
     }
 
     private fun recordLadderWinner() {
+        if (startupSelecting || warpOnly) return
         val winner = winnerIndex()
         val shape = PowPsiphonProtocols.signature(directPsiphon)
         val rtt = baselineRttMs
@@ -1311,6 +1434,7 @@ class PowConnectionCoordinator(
 
     private suspend fun stopLocked() {
         stopRequested.set(true)
+        startupSelecting = false
         cancelZeroTunnelTimeout()
         psiphonTunnelCount.set(0)
         cancelQualityWork()
@@ -1368,7 +1492,7 @@ class PowConnectionCoordinator(
 
     /** Tunnel 2 follows tunnel 1: started (or re-routed) each time tunnel 1 connects. */
     private fun maybeStartSidecar() {
-        if (!sidecarWanted()) return
+        if (startupSelecting || !sidecarWanted()) return
         val config = lastPsiphonConfig.ifBlank { return }
         sidecar.ensure(config, directPsiphon)
     }
@@ -1402,7 +1526,7 @@ class PowConnectionCoordinator(
             if (psiphonGeneration.get() != sessionGeneration.get()) return
             if (!innerCallbacksArmed.get()) return
             AppLogRepository.info(LogSource.POW, "Psiphon connecting")
-            if (innerReady && !retuning.get() && !stopRequested.get() && !restoreWaiting.get()) {
+            if (!startupSelecting && innerReady && !retuning.get() && !stopRequested.get() && !restoreWaiting.get()) {
                 scheduleZeroTunnelTimeout("psiphon reconnecting")
             }
         }
@@ -1434,6 +1558,7 @@ class PowConnectionCoordinator(
         }
 
         override fun onExiting() {
+            if (startupSelecting) return
             if (psiphonGeneration.get() != sessionGeneration.get()) return
             cancelZeroTunnelTimeout()
             psiphonTunnelCount.set(0)
@@ -1463,7 +1588,7 @@ class PowConnectionCoordinator(
                     psiphonTunnelCount.set(count)
                     if (count > 0) {
                         cancelZeroTunnelTimeout()
-                    } else if (innerReady && !retuning.get() && !stopRequested.get() && !restoreWaiting.get()) {
+                    } else if (!startupSelecting && innerReady && !retuning.get() && !stopRequested.get() && !restoreWaiting.get()) {
                         scheduleZeroTunnelTimeout("0 active tunnels")
                     }
                 }
@@ -1911,6 +2036,7 @@ class PowConnectionCoordinator(
      * establish against the dead SOCKS and rebuild outer first, then Psiphon.
      */
     private suspend fun onOuterLegDied(label: String) {
+        if (startupSelecting) return
         if (stopRequested.get() || VpnPauseStore.isPaused()) return
         if (retuning.get() || simSwitchInFlight.get() || restoreWaiting.get()) return
         if (!sessionSupposedUp() && !innerReady) return

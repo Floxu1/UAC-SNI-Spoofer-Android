@@ -177,6 +177,7 @@ object SettingsBackup {
         settings.putTyped(KILL, "bool", guard.killSwitch)
         settings.putTyped(AUTO, "bool", guard.autoConnect)
         settings.putTyped(LAN, "bool", guard.lanShare)
+        settings.putTyped(LAN_MODE, "string", guard.lanShareMode.id)
         settings.putTyped(DNS, "bool", guard.dnsSinkhole)
         settings.putTyped(WEBRTC, "bool", guard.webRtcBlock)
         settings.putTyped(QUIC, "bool", guard.quicBlock)
@@ -242,6 +243,8 @@ object SettingsBackup {
             killSwitch = bag.bool(KILL, guardNow.killSwitch),
             autoConnect = bag.bool(AUTO, guardNow.autoConnect),
             lanShare = bag.bool(LAN, guardNow.lanShare),
+            lanShareMode = LanShareMode.fromId(bag.choice(LAN_MODE, guardNow.lanShareMode.id,
+                LanShareMode.SOCKS5.id, LanShareMode.entries.map { it.id }.toSet())),
             dnsSinkhole = bag.bool(DNS, guardNow.dnsSinkhole),
             webRtcBlock = bag.bool(WEBRTC, guardNow.webRtcBlock),
             quicBlock = bag.bool(QUIC, guardNow.quicBlock),
@@ -1093,6 +1096,7 @@ object SettingsBackup {
     private const val KILL = "network_guard_v1/kill_switch"
     private const val AUTO = "network_guard_v1/auto_connect"
     private const val LAN = "network_guard_v1/lan_share"
+    private const val LAN_MODE = "network_guard_v1/lan_share_mode"
     private const val DNS = "network_guard_v1/dns_sinkhole"
     private const val WEBRTC = "network_guard_v1/webrtc_block"
     private const val QUIC = "network_guard_v1/quic_block_v2"
@@ -1111,7 +1115,7 @@ object SettingsBackup {
     private const val PANEL_STEPS = "uac_connect_panels/steps"
 
     private val KNOWN = setOf(
-        THEME, LANGUAGE, ENGINE, KILL, AUTO, LAN, DNS, WEBRTC, QUIC, IPV6, IRAN, DOMAINS, GPS,
+        THEME, LANGUAGE, ENGINE, KILL, AUTO, LAN, LAN_MODE, DNS, WEBRTC, QUIC, IPV6, IRAN, DOMAINS, GPS,
         PROFILES, SELECTED, ADAPTIVE, SNI_URL, SNI_WORKERS, SNI_TIMEOUT, AI, PANEL_STATUS, PANEL_STEPS,
         "${ADV}connectionMode", "${ADV}primaryAddress", "${ADV}primaryPort", "${ADV}primaryMaxSplit",
         "${ADV}irancellAddress", "${ADV}irancellPort", "${ADV}irancellMaxSplit",

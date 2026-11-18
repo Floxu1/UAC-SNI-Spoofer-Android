@@ -21,6 +21,8 @@ data class PowEngineSettings(
     val h2LargeWindows: Boolean = true,
     val h2SocketTuning: Boolean = true,
     val h2SpeedPick: Boolean = true,
+    /** Optional real-download comparison, only before MASQUE H2 + Psiphon connects. */
+    val startupSpeedTest: Boolean = false,
     val h2Obfuscation: String = H2_OBFS_UNCHANGED,
     val tunMtu: Int = TUN_MTU_DEFAULT,
     val h2FragmentMode: String = H2_FRAG_AUTO,

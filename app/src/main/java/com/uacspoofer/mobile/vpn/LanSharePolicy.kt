@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.vpn
 
 import com.uacspoofer.mobile.profiles.PhoneImportLan
+import com.uacspoofer.mobile.settings.LanShareMode
 
 object LanSharePolicy {
     const val PORT = 18_080
@@ -25,6 +26,7 @@ data class LanShareEndpoint(
     val address: String? = null,
     val port: Int = LanSharePolicy.PORT,
     val detail: String = "",
+    val mode: LanShareMode = LanShareMode.SOCKS5,
 ) {
     val label: String? = if (listening) LanSharePolicy.endpoint(address, port) else null
 }

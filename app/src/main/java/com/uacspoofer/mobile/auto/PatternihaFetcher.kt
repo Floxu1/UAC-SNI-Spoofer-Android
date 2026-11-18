@@ -12,8 +12,8 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
 /**
- * Fetches the Patterniha list (raw GitHub, then jsDelivr, then the GitHub contents API) with ETag,
- * keeps the last good copy on disk, and refreshes at most once a day. Only called during connect.
+ * Fetches the Freeport alive list (raw GitHub, then jsDelivr, then the GitHub contents API) with ETag,
+ * keeps the last good copy on disk, and refreshes at most once every three hours. Only called during connect.
  */
 class PatternihaFetcher(private val store: AutoConfigStore, private val network: Network?) {
     data class Result(val text: String, val source: String)
@@ -21,10 +21,10 @@ class PatternihaFetcher(private val store: AutoConfigStore, private val network:
     suspend fun load(now: Long = System.currentTimeMillis()): Result? = withContext(Dispatchers.IO) {
         val cached = store.cachedList()
         if (cached != null && now - store.listFetchedAt() in 0..REFRESH_MS) return@withContext Result(cached, "cache")
-        for (url in PatternihaList.MIRRORS) {
+        for (url in AutoConfigFeed.MIRRORS) {
             coroutineContext.ensureActive()
             val fetched = runCatching { fetch(url, cached != null, now) }
-                .onFailure { log("Patterniha list fetch failed via ${host(url)}: ${it.message}") }
+                .onFailure { log("Freeport alive list fetch failed via ${host(url)}: ${it.message}") }
                 .getOrNull()
             if (fetched != null) return@withContext fetched
         }
@@ -40,13 +40,13 @@ class PatternihaFetcher(private val store: AutoConfigStore, private val network:
             connection.setRequestProperty("User-Agent", "UAC-SNI-Spoofer-Android/Auto")
             connection.setRequestProperty(
                 "Accept",
-                if (url == PatternihaList.API_URL) "application/vnd.github.raw" else "text/plain,*/*",
+                if (url == AutoConfigFeed.API_URL) "application/vnd.github.raw" else "text/plain,*/*",
             )
             if (haveCache) store.listEtag(url)?.let { connection.setRequestProperty("If-None-Match", it) }
             val code = connection.responseCode
             if (code == HttpURLConnection.HTTP_NOT_MODIFIED && haveCache) {
                 store.touchList(now)
-                log("Patterniha list unchanged (304) via ${host(url)}")
+                log("Freeport alive list unchanged (304) via ${host(url)}")
                 return store.cachedList()?.let { Result(it, "304 ${host(url)}") }
             }
             check(code in 200..299) { "HTTP $code" }
@@ -63,7 +63,7 @@ class PatternihaFetcher(private val store: AutoConfigStore, private val network:
             }
             check(PatternihaList.parse(text).isNotEmpty()) { "no usable configs in list" }
             store.saveList(text, url, connection.getHeaderField("ETag"), now)
-            log("Patterniha list fetched via ${host(url)} (${text.length} chars)")
+            log("Freeport alive list fetched via ${host(url)} (${text.length} chars)")
             return Result(text, host(url))
         } finally {
             connection.disconnect()
@@ -75,7 +75,7 @@ class PatternihaFetcher(private val store: AutoConfigStore, private val network:
     private fun log(message: String) = runCatching { AppLogRepository.info(LogSource.ADAPTIVE, message) }
 
     companion object {
-        const val REFRESH_MS = 24L * 60 * 60 * 1000
+        const val REFRESH_MS = 3L * 60 * 60 * 1000
         private const val CONNECT_TIMEOUT_MS = 6_000
         private const val READ_TIMEOUT_MS = 10_000
         private const val MAX_BYTES = 8 * 1024 * 1024

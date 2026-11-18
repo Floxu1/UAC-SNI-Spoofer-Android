@@ -1,6 +1,8 @@
 package com.uacspoofer.mobile.ui
 
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
@@ -61,9 +63,12 @@ import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -194,7 +199,7 @@ internal fun HomeHeader(
                 onClick = onMenuClick,
                 modifier = Modifier
                     .size(buttonSize)
-                    .then(if (neonMenu != null) Modifier.graphicsLayer { alpha = menuAlpha } else Modifier)
+                    .then(if (neonMenu != null && menuAlpha != 1f) Modifier.graphicsLayer { alpha = menuAlpha } else Modifier)
                     .focusProperties { canFocus = !drawerOpen }
                     .trackHomeSlot(HomeRemoteSlot.Menu)
                     .openDrawerOnDpadLeft(onMenuClick),
@@ -226,7 +231,7 @@ internal fun HomeHeader(
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .size(buttonSize)
-                .then(if (neonMenu != null) Modifier.graphicsLayer { alpha = menuAlpha } else Modifier)
+                .then(if (neonMenu != null && menuAlpha != 1f) Modifier.graphicsLayer { alpha = menuAlpha } else Modifier)
                 .focusProperties { canFocus = !drawerOpen }
                 .trackHomeSlot(HomeRemoteSlot.Menu)
                 .openDrawerOnDpadLeft(onMenuClick),
@@ -280,7 +285,7 @@ internal fun AppTitle(compact: Boolean, accent: Color) {
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
             .padding(horizontal = if (neonTitle != null) neonDp(compact, 64f, 56f, neonTitle.titlePad) else if (compact) 56.dp else 64.dp)
-            .then(if (neonTitle != null) Modifier.graphicsLayer { alpha = neonTitle.titleAlpha } else Modifier),
+            .then(if (neonTitle != null && neonTitle.titleAlpha != 1f) Modifier.graphicsLayer { alpha = neonTitle.titleAlpha } else Modifier),
     ) {
         Text(
             text = when {
@@ -348,8 +353,20 @@ internal fun ConnectButton(
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
     val interactionDisabled = state == ConnectionState.DISCONNECTING
-    val transition = rememberInfiniteTransition(label = "connect-glow")
-    val animatedGlow = transition.animateFloat(
+    val styledTokens = styleTokens()
+    val connectExit = animateFloatAsState(
+        targetValue = if (styledTokens != null && state == ConnectionState.CONNECTING) 1f else 0f,
+        animationSpec = tween(durationMillis = 300),
+        label = "connect-comet-fade",
+    )
+    // Read only the fade boundary in composition, not its value every frame.
+    val cometVisible by remember(connectExit) { derivedStateOf { connectExit.value > 0.001f } }
+    val classicMotion = styledTokens == null && state == ConnectionState.CONNECTING
+    val styledMotion = styledTokens != null && (state == ConnectionState.CONNECTING || cometVisible)
+    val transition = if (classicMotion || styledMotion) rememberInfiniteTransition(label = "connect-glow") else null
+    val stillOne = remember { mutableFloatStateOf(1f) }
+    val stillZero = remember { mutableFloatStateOf(0f) }
+    val animatedGlow = if (classicMotion) transition!!.animateFloat(
         initialValue = 0.72f,
         targetValue = 1.16f,
         animationSpec = infiniteRepeatable(
@@ -357,8 +374,8 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Reverse,
         ),
         label = "connect-glow-intensity",
-    )
-    val loadingRotation = transition.animateFloat(
+    ) else stillOne
+    val loadingRotation = if (classicMotion) transition!!.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
@@ -366,8 +383,8 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Restart,
         ),
         label = "connect-loading-rotation",
-    )
-    val loadingSweep = transition.animateFloat(
+    ) else stillZero
+    val loadingSweep = if (classicMotion) transition!!.animateFloat(
         initialValue = 58f,
         targetValue = 292f,
         animationSpec = infiniteRepeatable(
@@ -375,12 +392,11 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Reverse,
         ),
         label = "connect-loading-sweep",
-    )
-    val styledTokens = styleTokens()
+    ) else stillZero
     val orbitMs = styledTokens?.connectOrbitMs?.toInt()?.coerceIn(300, 8_000) ?: 2_000
     val sweepLo = styledTokens?.connectSweepMin ?: 100f
     val sweepHi = styledTokens?.connectSweepMax ?: 150f
-    val ringBreath = transition.animateFloat(
+    val ringBreath = if (styledMotion) transition!!.animateFloat(
         initialValue = 0.75f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -388,8 +404,8 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Reverse,
         ),
         label = "connect-ring-breath",
-    )
-    val iconBreath = transition.animateFloat(
+    ) else stillOne
+    val iconBreath = if (styledMotion) transition!!.animateFloat(
         initialValue = 0.8f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -397,8 +413,8 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Reverse,
         ),
         label = "connect-icon-breath",
-    )
-    val cometOrbit = transition.animateFloat(
+    ) else stillOne
+    val cometOrbit = if (styledMotion) transition!!.animateFloat(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
@@ -406,8 +422,8 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Restart,
         ),
         label = "connect-comet-orbit",
-    )
-    val cometSweep = transition.animateFloat(
+    ) else stillZero
+    val cometSweep = if (styledMotion) transition!!.animateFloat(
         initialValue = minOf(sweepLo, sweepHi),
         targetValue = maxOf(sweepLo, sweepHi),
         animationSpec = infiniteRepeatable(
@@ -415,12 +431,7 @@ internal fun ConnectButton(
             repeatMode = RepeatMode.Reverse,
         ),
         label = "connect-comet-sweep",
-    )
-    val connectExit = animateFloatAsState(
-        targetValue = if (styledTokens != null && state == ConnectionState.CONNECTING) 1f else 0f,
-        animationSpec = tween(durationMillis = 300),
-        label = "connect-comet-fade",
-    )
+    ) else stillZero
     val ringBrushes = remember { SweepRingBrushes() }
     val emphasizePersianLabel = isPersian
     val buttonLabel = when (state) {
@@ -449,7 +460,7 @@ internal fun ConnectButton(
         modifier = Modifier
             .size(neonGlowBox?.let { maxOf(diameter + halo, it) } ?: (diameter + halo))
             .then(
-                if (neonTokens != null) {
+                if (neonTokens != null && buttonAlpha != 1f) {
                     Modifier.graphicsLayer {
                         alpha = buttonAlpha
                         clip = false
@@ -490,15 +501,14 @@ internal fun ConnectButton(
                 }
             }
         }
-        val ringBreathing = neonTokens != null && connectExit.value > 0.001f
         Canvas(
             modifier = Modifier
                 .matchParentSize()
                 .then(
-                    if (ringBreathing) {
+                    if (neonTokens != null && cometVisible) {
                         Modifier.graphicsLayer {
                             val exit = connectExit.value
-                            alpha = lerp(1f, ringBreath.value, exit)
+                            alpha = if (exit > 0.001f) lerp(1f, ringBreath.value, exit) else 1f
                             clip = false
                         }
                     } else {
@@ -876,9 +886,10 @@ internal fun ConnectButton(
                     modifier = Modifier
                         .size(diameter * (neonTokens?.iconScale ?: 0.21f))
                         .then(
-                            if (neonTokens != null && connectExit.value > 0.001f) {
+                            if (neonTokens != null && cometVisible) {
                                 Modifier.graphicsLayer {
-                                    alpha = lerp(1f, iconBreath.value, connectExit.value)
+                                    val exit = connectExit.value
+                                    alpha = if (exit > 0.001f) lerp(1f, iconBreath.value, exit) else 1f
                                 }
                             } else {
                                 Modifier
@@ -923,13 +934,7 @@ internal fun ConnectButton(
         }
 
         if (neonTokens != null) {
-            ConnectingComet(
-                tokens = neonTokens,
-                diameter = diameter,
-                orbit = cometOrbit,
-                sweep = cometSweep,
-                fade = connectExit,
-            )
+            ConnectingComet(neonTokens, diameter, cometOrbit, cometSweep, connectExit)
         }
     }
 }
@@ -1773,7 +1778,7 @@ private fun GpuBlurredRing(
 }
 
 @Composable
-private fun BoxScope.ConnectingComet(
+internal fun BoxScope.ConnectingComet(
     tokens: NeonTokens,
     diameter: Dp,
     orbit: State<Float>,
@@ -1781,35 +1786,29 @@ private fun BoxScope.ConnectingComet(
     fade: State<Float>,
 ) {
     val strokes = remember { CometStrokes() }
-    Canvas(Modifier.matchParentSize()) {
+    val visible by remember(fade) { derivedStateOf { fade.value > 0.001f } }
+    val revision = remember { mutableIntStateOf(0) }
+    val handler = remember { Handler(Looper.getMainLooper()) }
+    val worker = remember(visible) {
+        if (visible) CometMaskWorker(onReady = { source ->
+            handler.post { if (!source.isClosed) revision.intValue++ }
+        }) else null
+    }
+    DisposableEffect(worker) { onDispose { worker?.close() } }
+    Canvas(Modifier.matchParentSize().graphicsLayer { clip = false }) {
+        revision.intValue // A completed mask also redraws fixed/paused animation samples.
         val presence = fade.value
         if (presence <= 0.001f) return@Canvas
         val diameterPx = diameter.toPx()
-        val gpu = strokes.drawGpuGlows(this, tokens, diameterPx, orbit, sweep, fade)
-        if (!gpu) {
-            strokes.drawTrailMasked(
-                scope = this,
-                tokens = tokens,
-                diameterPx = diameterPx,
-                orbit = orbit,
-                sweep = sweep,
-                fade = fade,
-                blurPx = tokens.connectFarBlur.dp.toPx(),
-                layerAlpha = tokens.connectFarAlpha,
-            )
-            strokes.drawTrailMasked(
-                scope = this,
-                tokens = tokens,
-                diameterPx = diameterPx,
-                orbit = orbit,
-                sweep = sweep,
-                fade = fade,
-                blurPx = tokens.connectNearBlur.dp.toPx(),
-                layerAlpha = tokens.connectNearAlpha,
-            )
-        }
-        strokes.drawTrail(this, tokens, diameterPx, orbit, sweep, fade, alphaScale = presence)
-        strokes.drawHead(this, tokens, diameterPx, orbit, fade)
+        // All passes of one frame use the same animation sample.
+        val frameOrbit = orbit.value
+        val frameSweep = sweep.value
+        val gpu = strokes.drawGpuGlows(this, tokens, diameterPx, frameOrbit, frameSweep, presence)
+        val displayedSweep = if (!gpu && worker != null) {
+            strokes.drawSoftwareGlowsAsync(this, tokens, diameterPx, frameOrbit, frameSweep, presence, worker)
+        } else frameSweep
+        strokes.drawTrail(this, tokens, diameterPx, frameOrbit, displayedSweep, presence, alphaScale = presence)
+        strokes.drawHead(this, tokens, diameterPx, frameOrbit, presence)
     }
 }
 
@@ -1841,25 +1840,46 @@ private class CometStrokes {
     private var shaderSpan = Float.NaN
     private var shaderStart = 0
     private var shaderEnd = 0
-    private var bitmap: android.graphics.Bitmap? = null
-    private var maskRadius = Float.NaN
-    private var maskFilter: android.graphics.BlurMaskFilter? = null
+    private var farMaskRadius = Float.NaN
+    private var nearMaskRadius = Float.NaN
+    private var farMask: android.graphics.BlurMaskFilter? = null
+    private var nearMask: android.graphics.BlurMaskFilter? = null
+    private var glowGradient: android.graphics.SweepGradient? = null
+    private var glowSource: android.graphics.SweepGradient? = null
+    private val glowMatrix = android.graphics.Matrix()
+    private val glowBoundsRect = android.graphics.RectF()
+    // Each layer owns a small ring of full-resolution alpha masks. A far pass
+    // must never overwrite pixels referenced by the near pass (or vice versa).
+    private val farFrames = Array(3) { MaskFrame() }
+    private val nearFrames = Array(3) { MaskFrame() }
+    private var softwareFrame = 0
+    private var asyncWorker: CometMaskWorker? = null
+    private var asyncRequest: CometMaskRequest? = null
+    private var asyncSlot = 0
     private var farNode: Any? = null
     private var nearNode: Any? = null
     private var farSigma = Float.NaN
     private var nearSigma = Float.NaN
     private var gpuFailed = false
+    private var placedTrail: PlacedTrail? = null
+    private var placedTokens: NeonTokens? = null
+    private var placedDiameter = Float.NaN
+    private var placedWidth = Float.NaN
+    private var placedHeight = Float.NaN
+    private var placedDensity = Float.NaN
+    private var placedSpan = Float.NaN
+    private var placedOrbit = Float.NaN
 
     fun drawGpuGlows(
         scope: androidx.compose.ui.graphics.drawscope.DrawScope,
         tokens: NeonTokens,
         diameterPx: Float,
-        orbit: State<Float>,
-        sweep: State<Float>,
-        fade: State<Float>,
+        orbit: Float,
+        sweep: Float,
+        fade: Float,
     ): Boolean {
         if (gpuFailed || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
-        if (fade.value <= 0.001f) return true
+        if (fade <= 0.001f) return true
         return drawGpuGlows31(scope, tokens, diameterPx, orbit, sweep, fade)
     }
 
@@ -1867,13 +1887,13 @@ private class CometStrokes {
         scope: androidx.compose.ui.graphics.drawscope.DrawScope,
         tokens: NeonTokens,
         diameterPx: Float,
-        orbit: State<Float>,
-        sweep: State<Float>,
-        fade: State<Float>,
+        orbit: Float,
+        sweep: Float,
+        fade: Float,
     ): Boolean {
         return try {
             val placed = place(scope, tokens, diameterPx, orbit, sweep) ?: return true
-            val presence = fade.value
+            val presence = fade
             scope.drawIntoCanvas { canvas ->
                 val native = canvas.nativeCanvas
                 glowNode(
@@ -1939,7 +1959,7 @@ private class CometStrokes {
         recording.drawPath(path, recordPaint)
         recording.restore()
         node.endRecording()
-        val checkpoint = native.saveLayer(0f, 0f, width.toFloat(), height.toFloat(), addPaint)
+        val checkpoint = native.saveLayer(blurredBounds(placed, blurPx, width, height), addPaint)
         native.drawRenderNode(node)
         native.restoreToCount(checkpoint)
     }
@@ -1957,12 +1977,12 @@ private class CometStrokes {
         scope: androidx.compose.ui.graphics.drawscope.DrawScope,
         tokens: NeonTokens,
         diameterPx: Float,
-        orbit: State<Float>,
-        sweep: State<Float>,
-        fade: State<Float>,
+        orbit: Float,
+        sweep: Float,
+        fade: Float,
         alphaScale: Float,
     ) {
-        if (fade.value <= 0.001f || alphaScale <= 0.001f) return
+        if (fade <= 0.001f || alphaScale <= 0.001f) return
         val placed = place(scope, tokens, diameterPx, orbit, sweep) ?: return
         trailPaint.shader = placed.shader
         trailPaint.strokeWidth = placed.stroke
@@ -1974,59 +1994,216 @@ private class CometStrokes {
         }
     }
 
-    fun drawTrailMasked(
+    fun drawSoftwareGlowsAsync(
         scope: androidx.compose.ui.graphics.drawscope.DrawScope,
         tokens: NeonTokens,
         diameterPx: Float,
-        orbit: State<Float>,
-        sweep: State<Float>,
-        fade: State<Float>,
-        blurPx: Float,
-        layerAlpha: Float,
+        orbit: Float,
+        sweep: Float,
+        fade: Float,
+        worker: CometMaskWorker,
+    ): Float {
+        if (asyncWorker !== worker) {
+            asyncWorker = worker
+            asyncRequest = null
+        }
+        if (worker.hasFailed) {
+            drawSoftwareGlows(scope, tokens, diameterPx, orbit, sweep, fade)
+            return sweep
+        }
+        val stroke = with(scope) { tokens.ringWidth.dp.toPx() }
+        if (stroke < 0.5f || diameterPx < 1f) return sweep
+        val farBlur = with(scope) { tokens.connectFarBlur.dp.toPx() }
+        val nearBlur = with(scope) { tokens.connectNearBlur.dp.toPx() }
+        val request = CometMaskRequest(
+            scope.size.width.toInt().coerceAtLeast(1), scope.size.height.toInt().coerceAtLeast(1),
+            diameterPx, stroke, sweep.coerceIn(8f, 350f), farBlur, nearBlur,
+            tokens.connectFarAlpha > 0.001f && farBlur >= 1f,
+            tokens.connectNearAlpha > 0.001f && nearBlur >= 1f,
+        )
+        if (!request.farVisible && !request.nearVisible) return sweep
+        if (asyncRequest?.sameGeometry(request) == false) asyncRequest = null
+        worker.request(request)
+        worker.takeReady()?.let { pixels ->
+            try {
+                val ready = pixels.request
+                if (ready.sameGeometry(request)) {
+                    val slot = softwareFrame
+                    softwareFrame = (softwareFrame + 1) % farFrames.size
+                    if (ready.farVisible) farFrames[slot].upload(ready.width, ready.height, pixels.far!!)
+                    if (ready.nearVisible) nearFrames[slot].upload(ready.width, ready.height, pixels.near!!)
+                    asyncRequest = ready
+                    asyncSlot = slot
+                }
+            } finally {
+                worker.release(pixels)
+            }
+        }
+        val prepared = asyncRequest ?: return sweep
+        val placed = place(scope, tokens, diameterPx, orbit, prepared.span) ?: return sweep
+        if (glowSource !== placed.shader) {
+            glowSource = placed.shader
+            glowGradient = android.graphics.SweepGradient(placed.cx, placed.cy, colors, stops)
+        }
+        glowMatrix.setRotate(placed.spin, placed.cx, placed.cy)
+        glowGradient!!.setLocalMatrix(glowMatrix)
+        val maxBlur = maxOf(farBlur, nearBlur)
+        if (prepared.farVisible) drawPreparedMask(scope, placed, farFrames[asyncSlot],
+            tokens.connectFarAlpha * fade, prepared, maxBlur)
+        if (prepared.nearVisible) drawPreparedMask(scope, placed, nearFrames[asyncSlot],
+            tokens.connectNearAlpha * fade, prepared, maxBlur)
+        return prepared.span
+    }
+
+    private fun drawPreparedMask(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        placed: PlacedTrail,
+        frame: MaskFrame,
+        alpha: Float,
+        request: CometMaskRequest,
+        maxBlur: Float,
     ) {
-        val presence = fade.value
-        if (presence <= 0.001f || layerAlpha <= 0.001f || blurPx < 1f) return
+        val mask = frame.uploadedShader!!
+        mask.setLocalMatrix(glowMatrix)
+        frame.paint.alpha = (alpha.coerceIn(0f, 1f) * 255f).toInt()
+        frame.paint.shader = android.graphics.ComposeShader(
+            glowGradient!!, mask, android.graphics.PorterDuff.Mode.DST_IN,
+        )
+        scope.drawIntoCanvas { canvas ->
+            canvas.nativeCanvas.drawRect(blurredBounds(placed, maxBlur, request.width, request.height), frame.paint)
+        }
+    }
+
+    fun drawSoftwareGlows(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        tokens: NeonTokens,
+        diameterPx: Float,
+        orbit: Float,
+        sweep: Float,
+        fade: Float,
+    ) {
+        if (fade <= 0.001f) return
         val placed = place(scope, tokens, diameterPx, orbit, sweep) ?: return
         val width = scope.size.width.toInt().coerceAtLeast(1)
         val height = scope.size.height.toInt().coerceAtLeast(1)
-        val buffer = bitmap?.takeIf { it.width == width && it.height == height } ?: android.graphics.Bitmap.createBitmap(
-            width,
-            height,
-            android.graphics.Bitmap.Config.ARGB_8888,
-        ).also {
-            bitmap?.recycle()
-            bitmap = it
+        val farBlur = with(scope) { tokens.connectFarBlur.dp.toPx() }
+        val nearBlur = with(scope) { tokens.connectNearBlur.dp.toPx() }
+        if (glowSource !== placed.shader) {
+            glowSource = placed.shader
+            glowGradient = android.graphics.SweepGradient(placed.cx, placed.cy, colors, stops)
         }
-        if (maskRadius != blurPx) {
-            maskFilter = android.graphics.BlurMaskFilter(blurPx, android.graphics.BlurMaskFilter.Blur.NORMAL)
-            maskRadius = blurPx
+        glowMatrix.setRotate(placed.spin, placed.cx, placed.cy)
+        glowGradient!!.setLocalMatrix(glowMatrix)
+        val slot = softwareFrame
+        softwareFrame = (softwareFrame + 1) % farFrames.size
+        val maxBlur = maxOf(farBlur, nearBlur)
+        if (tokens.connectFarAlpha > 0.001f && farBlur >= 1f) {
+            if (farMaskRadius != farBlur) {
+                farMask = android.graphics.BlurMaskFilter(farBlur, android.graphics.BlurMaskFilter.Blur.NORMAL)
+                farMaskRadius = farBlur
+            }
+            drawMask(scope, placed, width, height, farFrames[slot], farMask!!,
+                tokens.connectFarAlpha, fade, maxBlur)
         }
-        buffer.eraseColor(android.graphics.Color.TRANSPARENT)
-        maskPaint.shader = placed.shader
+        if (tokens.connectNearAlpha > 0.001f && nearBlur >= 1f) {
+            if (nearMaskRadius != nearBlur) {
+                nearMask = android.graphics.BlurMaskFilter(nearBlur, android.graphics.BlurMaskFilter.Blur.NORMAL)
+                nearMaskRadius = nearBlur
+            }
+            drawMask(scope, placed, width, height, nearFrames[slot], nearMask!!,
+                tokens.connectNearAlpha, fade, maxBlur)
+        }
+    }
+
+    private fun drawMask(
+        scope: androidx.compose.ui.graphics.drawscope.DrawScope,
+        placed: PlacedTrail,
+        width: Int,
+        height: Int,
+        frame: MaskFrame,
+        filter: android.graphics.BlurMaskFilter,
+        layerAlpha: Float,
+        fade: Float,
+        maxBlur: Float,
+    ) {
+        val buffer = frame.prepare(width, height)
+        maskPaint.shader = null
+        maskPaint.color = android.graphics.Color.WHITE
         maskPaint.strokeWidth = placed.stroke
-        maskPaint.maskFilter = maskFilter
+        maskPaint.maskFilter = filter
         maskPaint.xfermode = null
-        maskPaint.alpha = (layerAlpha.coerceIn(0f, 1f) * presence * 255f).toInt().coerceIn(0, 255)
-        val software = android.graphics.Canvas(buffer)
-        software.save()
-        software.rotate(placed.spin, placed.cx, placed.cy)
-        software.drawPath(path, maskPaint)
-        software.restore()
+        maskPaint.alpha = (layerAlpha.coerceIn(0f, 1f) * fade * 255f).toInt().coerceIn(0, 255)
+        frame.canvas!!.drawPath(path, maskPaint)
+        // A fresh shader is created AFTER the pixels are complete. Reusing a
+        // BitmapShader across generation changes can retain a stale native image.
+        val mask = android.graphics.BitmapShader(
+            buffer, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP,
+        )
+        mask.setLocalMatrix(glowMatrix)
+        frame.paint.alpha = 255
+        frame.paint.shader = android.graphics.ComposeShader(
+            glowGradient!!, mask, android.graphics.PorterDuff.Mode.DST_IN,
+        )
         scope.drawIntoCanvas { canvas ->
-            canvas.nativeCanvas.drawBitmap(buffer, 0f, 0f, addPaint)
+            canvas.nativeCanvas.drawRect(blurredBounds(placed, maxBlur, width, height), frame.paint)
         }
+    }
+
+    private class MaskFrame {
+        private var bitmap: android.graphics.Bitmap? = null
+        var canvas: android.graphics.Canvas? = null
+            private set
+        var uploadedShader: android.graphics.BitmapShader? = null
+            private set
+        val paint = android.graphics.Paint().apply {
+            isFilterBitmap = true
+            xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.ADD)
+        }
+
+        fun upload(width: Int, height: Int, pixels: java.nio.ByteBuffer) {
+            val buffer = prepare(width, height)
+            pixels.rewind()
+            buffer.copyPixelsFromBuffer(pixels)
+            uploadedShader = android.graphics.BitmapShader(
+                buffer, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP,
+            )
+        }
+
+        fun prepare(width: Int, height: Int): android.graphics.Bitmap {
+            var current = bitmap
+            if (current == null || current.width != width || current.height != height) {
+                current?.recycle()
+                current = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ALPHA_8)
+                bitmap = current
+                canvas = android.graphics.Canvas(current)
+            }
+            current.eraseColor(android.graphics.Color.TRANSPARENT)
+            return current
+        }
+    }
+
+    private fun blurredBounds(placed: PlacedTrail, blurPx: Float, width: Int, height: Int): android.graphics.RectF {
+        path.computeBounds(glowBoundsRect, true)
+        glowMatrix.setRotate(placed.spin, placed.cx, placed.cy)
+        glowMatrix.mapRect(glowBoundsRect)
+        // Includes stroke caps and the complete Skia blur kernel, without shading
+        // the transparent remainder of the component's rectangular layer.
+        val padding = placed.stroke / 2f + blurPx * 2f + 4f
+        glowBoundsRect.inset(-padding, -padding)
+        glowBoundsRect.intersect(0f, 0f, width.toFloat(), height.toFloat())
+        return glowBoundsRect
     }
 
     fun drawHead(
         scope: androidx.compose.ui.graphics.drawscope.DrawScope,
         tokens: NeonTokens,
         diameterPx: Float,
-        orbit: State<Float>,
-        fade: State<Float>,
+        orbit: Float,
+        fade: Float,
     ) {
-        val presence = fade.value
+        val presence = fade
         if (presence <= 0.001f) return
-        val orbitDeg = orbit.value
+        val orbitDeg = orbit
         val stroke = with(scope) { tokens.ringWidth.dp.toPx() }
         val radius = diameterPx / 2f + stroke / 2f
         val cx = scope.size.width / 2f
@@ -2061,13 +2238,18 @@ private class CometStrokes {
         scope: androidx.compose.ui.graphics.drawscope.DrawScope,
         tokens: NeonTokens,
         diameterPx: Float,
-        orbit: State<Float>,
-        sweep: State<Float>,
+        orbit: Float,
+        sweep: Float,
     ): PlacedTrail? {
         val stroke = with(scope) { tokens.ringWidth.dp.toPx() }
         if (stroke < 0.5f || diameterPx < 1f) return null
-        val span = sweep.value.coerceIn(8f, 350f)
-        val orbitDeg = orbit.value
+        val span = sweep.coerceIn(8f, 350f)
+        val orbitDeg = orbit
+        val cached = placedTrail
+        if (cached != null && placedTokens === tokens && placedDiameter == diameterPx &&
+            placedWidth == scope.size.width && placedHeight == scope.size.height &&
+            placedDensity == scope.density && placedSpan == span && placedOrbit == orbitDeg
+        ) return cached
         val cx = scope.size.width / 2f
         val cy = scope.size.height / 2f
         val radius = diameterPx / 2f + stroke / 2f
@@ -2076,7 +2258,16 @@ private class CometStrokes {
         path.rewind()
         path.addArc(oval, head - span, span)
         val shader = sweepShader(cx, cy, span, tokens.gradientStart, tokens.gradientEnd)
-        return PlacedTrail(shader, stroke, orbitDeg - head, cx, cy)
+        return PlacedTrail(shader, stroke, orbitDeg - head, cx, cy).also {
+            placedTrail = it
+            placedTokens = tokens
+            placedDiameter = diameterPx
+            placedWidth = scope.size.width
+            placedHeight = scope.size.height
+            placedDensity = scope.density
+            placedSpan = span
+            placedOrbit = orbitDeg
+        }
     }
 
     private fun sweepShader(
@@ -2146,6 +2337,7 @@ private fun colorWithAlpha(color: Color, alpha: Float): Int {
 
 private class NeonGlowBuffer {
     var bitmap: android.graphics.Bitmap? = null
+    val compositePaint = android.graphics.Paint()
     val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
         style = android.graphics.Paint.Style.STROKE
         strokeCap = android.graphics.Paint.Cap.ROUND
@@ -2293,14 +2485,17 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBlurredNeonRing
     val start = gradientStart.toArgb()
     val end = gradientEnd.toArgb()
     val bitmap = if (
-        buffer.matches(width, height, center, radius, stroke, blur, alpha, start, end)
+        buffer.matches(width, height, center, radius, stroke, blur, 255, start, end)
     ) {
         buffer.bitmap!!
     } else {
-        buffer.prepare(width, height, center, radius, stroke, blur, alpha, start, end)
+        buffer.prepare(width, height, center, radius, stroke, blur, 255, start, end)
     }
+    // Gaussian blur is linear in alpha: reuse the full-opacity pixels and
+    // apply the changing opacity at composition, instead of blurring each frame.
+    buffer.compositePaint.alpha = alpha.coerceIn(0, 255)
     drawIntoCanvas { canvas ->
-        canvas.nativeCanvas.drawBitmap(bitmap, 0f, 0f, null)
+        canvas.nativeCanvas.drawBitmap(bitmap, 0f, 0f, buffer.compositePaint)
     }
 }
 

@@ -125,6 +125,7 @@ class PowEngineStore private constructor(context: Context) {
             .putBoolean(KEY_H2_LARGE_WINDOWS, true)
             .putBoolean(KEY_H2_SOCKET_TUNING, true)
             .putBoolean(KEY_H2_SPEED_PICK, true)
+            .putBoolean(KEY_STARTUP_SPEED_TEST, validated.startupSpeedTest)
             .putString(KEY_H2_OBFUSCATION, validated.h2Obfuscation)
             .putInt(KEY_TUN_MTU, validated.tunMtu)
             .putBoolean(KEY_SOCKET_PROTECT, validated.socketProtectEnabled)
@@ -243,6 +244,7 @@ class PowEngineStore private constructor(context: Context) {
         h2LargeWindows = true, // always on (UI toggle removed)
         h2SocketTuning = true, // always on (UI toggle removed)
         h2SpeedPick = true, // always on (UI toggle removed)
+        startupSpeedTest = prefs.getBoolean(KEY_STARTUP_SPEED_TEST, false),
         h2Obfuscation = prefs.getString(KEY_H2_OBFUSCATION, PowEngineSettings.H2_OBFS_UNCHANGED).orEmpty(),
         tunMtu = prefs.getInt(KEY_TUN_MTU, PowEngineSettings.TUN_MTU_DEFAULT),
         h2FragmentMode = prefs.getString(KEY_H2_FRAGMENT_MODE, PowEngineSettings.H2_FRAG_AUTO).orEmpty(),
@@ -290,6 +292,7 @@ class PowEngineStore private constructor(context: Context) {
         private const val KEY_H2_LARGE_WINDOWS = "adv_h2_large_windows"
         private const val KEY_H2_SOCKET_TUNING = "adv_h2_socket_tuning"
         private const val KEY_H2_SPEED_PICK = "adv_h2_speed_pick"
+        private const val KEY_STARTUP_SPEED_TEST = "adv_startup_speed_test"
         private const val KEY_H2_OBFUSCATION = "adv_h2_obfuscation"
         private const val KEY_TUN_MTU = "adv_tun_mtu"
         private const val KEY_H2_FRAGMENT_MODE = "adv_h2_fragment_mode"

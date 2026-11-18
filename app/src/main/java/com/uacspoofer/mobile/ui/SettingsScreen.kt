@@ -88,6 +88,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -122,6 +126,7 @@ import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
+import com.uacspoofer.mobile.settings.LanShareMode
 import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.vpn.AutoConnectCoordinator
@@ -501,13 +506,15 @@ private fun LanShareSettingsRow(showDivider: Boolean) {
     val settings by store.settings.collectAsStateWithLifecycle()
     val connection by ConnectionStateStore.state.collectAsStateWithLifecycle()
     val endpoint by LanShareStatus.endpoint.collectAsStateWithLifecycle()
-    val ip = endpoint.address?.takeIf { endpoint.listening && it.isNotBlank() }
+    val ip = endpoint.address?.takeIf {
+        endpoint.listening && endpoint.mode == settings.lanShareMode && it.isNotBlank()
+    }
     val port = if (endpoint.listening) endpoint.port else LanSharePolicy.PORT
     val ready = ip != null
     val summary = when {
         !settings.lanShare -> homeText("Off", "خاموش")
         connection != ConnectionState.CONNECTED -> homeText("After connect", "بعد از وصل")
-        ready -> "$ip:$port"
+        ready -> (if (settings.lanShareMode == LanShareMode.PLAYSTATION_5) "PS5 · " else "") + "$ip:$port"
         endpoint.detail == "no lan" -> homeText("Needs Wi‑Fi", "وای‌فای لازم است")
         else -> homeText("Starting…", "در حال شروع…")
     }
@@ -517,17 +524,50 @@ private fun LanShareSettingsRow(showDivider: Boolean) {
         summary = summary,
         enabled = settings.lanShare,
         help = homeText(
-            "On the other device, set SOCKS5 to this IP and port. Same Wi‑Fi is enough — hotspot is optional. Trusted networks only, no password.",
-            "روی دستگاه دیگر، پروکسی SOCKS5 را روی همین IP و پورت بگذار. همان وای‌فای کافی است — هات‌اسپات لازم نیست. فقط شبکه مورد اعتماد، بدون رمز.",
+            "Choose SOCKS5 for compatible devices, or PlayStation 5 for the console's HTTP proxy. Both devices must be on the same network. Trusted networks only, no password.",
+            "برای دستگاه‌های سازگار SOCKS5 و برای کنسول PlayStation 5 را انتخاب کن. هر دو دستگاه باید در یک شبکه باشند. فقط شبکهٔ مورد اعتماد، بدون رمز.",
         ),
         extra = if (settings.lanShare) {
             {
-                LanShareEndpointPanel(
-                    ip = ip,
-                    port = port,
-                    connected = connection == ConnectionState.CONNECTED,
-                    needsWifi = endpoint.detail == "no lan",
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        LanShareMode.entries.forEach { mode ->
+                            val selected = settings.lanShareMode == mode
+                            TextButton(
+                                onClick = {
+                                    if (store.snapshot().lanShareMode != mode) {
+                                        store.setLanShareMode(mode)
+                                        VpnController.applyNetworkGuard(context)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                                    .semantics { this.selected = selected; role = Role.RadioButton }
+                                    .background(if (selected) UacColors.ConnectedGreen.copy(alpha = 0.12f) else Color.Transparent, RoundedCornerShape(10.dp))
+                                    .border(1.dp, if (selected) UacColors.ConnectedGreen else UacColors.TextSecondary.copy(alpha = 0.3f), RoundedCornerShape(10.dp)),
+                            ) {
+                                Text(if (mode == LanShareMode.PLAYSTATION_5) "PlayStation 5" else "SOCKS5",
+                                    color = if (selected) UacColors.TextPrimary else UacColors.TextSecondary, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    LanShareEndpointPanel(
+                        ip = ip,
+                        port = port,
+                        connected = connection == ConnectionState.CONNECTED,
+                        needsWifi = endpoint.detail == "no lan",
+                        mode = settings.lanShareMode,
+                    )
+                    if (settings.lanShareMode == LanShareMode.PLAYSTATION_5) {
+                        Text(homeText(
+                            "PS5: Settings → Network → Settings → Set Up Internet Connection → select your network → Advanced Settings → Proxy Server → Use. Enter this IP as Address and enter the port separately.",
+                            "در PS5 به Settings → Network → Settings → Set Up Internet Connection برو؛ روی شبکهٔ خودت Advanced Settings و سپس Proxy Server → Use را انتخاب کن. در Address فقط آی‌پی بالا را بنویس و پورت را جدا وارد کن.",
+                        ), color = UacColors.TextSecondary, fontSize = 11.sp)
+                        Text(homeText(
+                            "HTTP/HTTPS proxy for compatible console services and downloads. UDP game traffic, voice chat and NAT are not tunneled by this mode.",
+                            "پروکسی HTTP/HTTPS برای سرویس‌های سازگار کنسول و دانلود است. ترافیک UDP بازی، چت صوتی و NAT با این حالت تونل نمی‌شوند.",
+                        ), color = UacColors.TextSecondary, fontSize = 11.sp)
+                    }
+                }
             }
         } else null,
         autoExpand = settings.lanShare,
@@ -1033,11 +1073,12 @@ private fun LanShareEndpointPanel(
     port: Int,
     connected: Boolean,
     needsWifi: Boolean,
+    mode: LanShareMode,
 ) {
     val context = LocalContext.current
-    var copied by remember { mutableStateOf(false) }
+    var copied by remember(ip, port, mode) { mutableStateOf(false) }
     val ready = !ip.isNullOrBlank()
-    val copyValue = if (ready) "$ip:$port" else null
+    val copyValue = if (!ready) null else if (mode == LanShareMode.PLAYSTATION_5) ip else "$ip:$port"
     val ipText = ip ?: when {
         !connected -> homeText("Connect VPN first", "اول VPN را وصل کن")
         needsWifi -> homeText("Needs Wi‑Fi", "وای‌فای لازم است")
@@ -1047,7 +1088,7 @@ private fun LanShareEndpointPanel(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        LanShareValueRow(homeText("Type", "نوع"), "SOCKS5", ready = true)
+        LanShareValueRow(homeText("Type", "نوع"), mode.proxyType, ready = true)
         LanShareValueRow(homeText("IP", "آی‌پی"), ipText, ready = ready)
         LanShareValueRow(homeText("Port", "پورت"), port.toString(), ready = true)
         Row(
@@ -1059,7 +1100,7 @@ private fun LanShareEndpointPanel(
                     val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
                         as android.content.ClipboardManager
                     clipboard.setPrimaryClip(
-                        android.content.ClipData.newPlainText("UAC SOCKS5", copyValue),
+                        android.content.ClipData.newPlainText("UAC ${mode.proxyType}", copyValue),
                     )
                     copied = true
                 }
@@ -1077,7 +1118,8 @@ private fun LanShareEndpointPanel(
                 when {
                     !ready -> homeText("IP appears after connect", "آی‌پی بعد از وصل شدن می‌آید")
                     copied -> homeText("Copied $copyValue", "کپی شد $copyValue")
-                    else -> homeText("Copy $copyValue", "کپی $copyValue")
+                    else -> if (mode == LanShareMode.PLAYSTATION_5) homeText("Copy IP $copyValue", "کپی آی‌پی $copyValue")
+                        else homeText("Copy $copyValue", "کپی $copyValue")
                 },
                 color = UacColors.TextPrimary,
                 fontSize = 12.sp,

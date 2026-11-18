@@ -9,6 +9,7 @@ pub mod error;
 mod exitip;
 pub(crate) mod ffi;
 mod fragment;
+mod h2_receive;
 mod lastconn;
 mod masque;
 mod masque_h2;

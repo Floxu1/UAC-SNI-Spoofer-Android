@@ -6,14 +6,14 @@ import java.io.File
 /** Disk state for Auto: per-network ranking and DPI type, ECH keys, and the last good list. */
 class AutoConfigStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val listFile = File(context.applicationContext.filesDir, "auto/patterniha-configs.txt")
+    private val listFile = File(context.applicationContext.filesDir, "auto/${AutoConfigFeed.ID}-configs.txt")
 
     @Synchronized
-    fun ranking(networkKey: String): List<AutoRankedEntry> = AutoRanking.decode(prefs.getString("rank:$networkKey", null))
+    fun ranking(networkKey: String): List<AutoRankedEntry> = AutoRanking.decode(prefs.getString("rank:${AutoConfigFeed.ID}:$networkKey", null))
 
     @Synchronized
     fun saveRanking(networkKey: String, entries: List<AutoRankedEntry>) {
-        prefs.edit().putString("rank:$networkKey", AutoRanking.encode(entries)).apply()
+        prefs.edit().putString("rank:${AutoConfigFeed.ID}:$networkKey", AutoRanking.encode(entries)).apply()
     }
 
     @Synchronized
@@ -28,10 +28,10 @@ class AutoConfigStore(context: Context) {
         return runCatching { DpiType.valueOf(raw.substringBefore('|')) }.getOrNull()?.takeIf { it != DpiType.UNKNOWN }
     }
 
-    fun speedTestedAt(networkKey: String): Long = prefs.getLong("speed_at:$networkKey", 0L)
+    fun speedTestedAt(networkKey: String): Long = prefs.getLong("speed_at:${AutoConfigFeed.ID}:$networkKey", 0L)
 
     fun markSpeedTested(networkKey: String, now: Long) {
-        prefs.edit().putLong("speed_at:$networkKey", now).apply()
+        prefs.edit().putLong("speed_at:${AutoConfigFeed.ID}:$networkKey", now).apply()
     }
 
     fun saveDpi(networkKey: String, dpi: DpiType, now: Long = System.currentTimeMillis()) {
@@ -51,9 +51,9 @@ class AutoConfigStore(context: Context) {
 
     fun cachedList(): String? = listFile.takeIf(File::isFile)?.readText(Charsets.UTF_8)?.takeIf(String::isNotBlank)
 
-    fun listFetchedAt(): Long = prefs.getLong("list_fetched_at", 0L)
+    fun listFetchedAt(): Long = prefs.getLong("list_fetched_at:${AutoConfigFeed.ID}", 0L)
 
-    fun listEtag(url: String): String? = prefs.getString("etag:$url", null)
+    fun listEtag(url: String): String? = prefs.getString("etag:${AutoConfigFeed.ID}:$url", null)
 
     fun saveList(text: String, url: String, etag: String?, now: Long) {
         listFile.parentFile?.mkdirs()
@@ -63,13 +63,13 @@ class AutoConfigStore(context: Context) {
             listFile.writeText(text, Charsets.UTF_8)
             tmp.delete()
         }
-        prefs.edit().putLong("list_fetched_at", now).putString("list_source", url)
-            .apply { if (etag != null) putString("etag:$url", etag) else remove("etag:$url") }
+        prefs.edit().putLong("list_fetched_at:${AutoConfigFeed.ID}", now).putString("list_source:${AutoConfigFeed.ID}", url)
+            .apply { if (etag != null) putString("etag:${AutoConfigFeed.ID}:$url", etag) else remove("etag:${AutoConfigFeed.ID}:$url") }
             .apply()
     }
 
     fun touchList(now: Long) {
-        prefs.edit().putLong("list_fetched_at", now).apply()
+        prefs.edit().putLong("list_fetched_at:${AutoConfigFeed.ID}", now).apply()
     }
 
     companion object {

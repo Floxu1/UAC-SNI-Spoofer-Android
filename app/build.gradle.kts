@@ -75,6 +75,11 @@ android {
                 "proguard-rules.pro",
             )
         }
+        // Release optimization with isolated render fixtures; never shipped as release.
+        create("benchmark") {
+            initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+        }
         create("tv") {
             initWith(getByName("debug"))
             buildConfigField("boolean", "TV_MODE", "true")
@@ -84,6 +89,12 @@ android {
             }
             matchingFallbacks += listOf("debug")
         }
+    }
+
+    sourceSets.getByName("debug").java.srcDir("src/renderBenchmark/java")
+    sourceSets.getByName("benchmark") {
+        java.srcDirs("src/renderBenchmark/java", "src/release/java")
+        manifest.srcFile("src/debug/AndroidManifest.xml")
     }
 
     compileOptions {
@@ -286,6 +297,7 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 listOf("arm64-v8a", "armeabi-v7a", "x86_64").forEach { abi ->
