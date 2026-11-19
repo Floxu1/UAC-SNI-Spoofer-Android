@@ -194,10 +194,36 @@ tasks.matching { it.name == "packageRelease" }.configureEach {
     finalizedBy("signReleaseWithRotation")
 }
 
+val syncReleaseReadmes = tasks.register("syncReleaseReadmes") {
+    group = "documentation"
+    description = "Synchronize the release headings and APK names in both READMEs."
+    doLast {
+        val version = checkNotNull(android.defaultConfig.versionName)
+        val versionLabel = "[0-9]+(?:\\.[0-9]+)+(?:[-+][A-Za-z0-9.+-]+)?"
+        val apkName = Regex("UAC-$versionLabel-(arm64-v8a|armeabi-v7a|x86_64|x86|universal)\\.apk")
+        listOf(
+            Triple("README.md", "تغییرات نسخه", "تغییرات-نسخه"),
+            Triple("README.en.md", "What's new in", "whats-new-in"),
+        ).forEach { (name, title, anchor) ->
+            val readme = rootProject.file(name)
+            val original = readme.readText()
+            val heading = Regex("(?m)^## ${Regex.escape(title)} $versionLabel$")
+            val contentsLink = Regex("(?m)^- \\[${Regex.escape(title)} $versionLabel\\]\\(#$anchor-[^)]*\\)$")
+            val versionAnchor = version.lowercase().replace(Regex("[^a-z0-9-]"), "")
+            val updated = original
+                .replace(heading) { "## $title $version" }
+                .replace(contentsLink) { "- [$title $version](#$anchor-$versionAnchor)" }
+                .replace(apkName) { "UAC-$version-${it.groupValues[1]}.apk" }
+            if (updated != original) readme.writeText(updated)
+        }
+    }
+}
+
 tasks.matching { it.name == "assembleRelease" }.configureEach {
+    dependsOn(syncReleaseReadmes)
     doLast {
         val dir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
-        val version = android.defaultConfig.versionName ?: "2.0.6"
+        val version = checkNotNull(android.defaultConfig.versionName)
         val universal = dir.listFiles()
             ?.filter { it.extension.equals("apk", ignoreCase = true) }
             ?.firstOrNull { it.name.contains("universal", ignoreCase = true) }

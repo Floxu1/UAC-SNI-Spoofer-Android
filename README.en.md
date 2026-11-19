@@ -22,7 +22,7 @@
 ## Table of contents
 
 - [Overview](#overview)
-- [What's new in 2.0.8](#whats-new-in-208)
+- [What's new in 2.1.2](#whats-new-in-212)
 - [Engine 1 — Xray](#engine-1--xray)
 - [Engine 2 — Tor](#engine-2--tor)
 - [Engine 3 — UAC PoW](#engine-3--uac-pow)
@@ -47,7 +47,12 @@ UAC SNI Spoofer is an open-source Android client built on `VpnService` and a nat
 
 The UI is fully Persian / English (RTL / LTR), built with `Jetpack Compose` + `Material 3`.
 
-## What's new in 2.0.8
+## What's new in 2.1.2
+
+See the [latest release notes](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/latest) for the full list of changes.
+
+<details>
+<summary>Highlights from the older 2.0.8 release</summary>
 
 - **Rebuilt Xray engine** with one-tap auto config: operator-aware (MCI vs Irancell/Rightel), ECH support and automatic failover.
 - **Major speed boost:** Iranian sites direct, smart DNS cache, TCP Fast Open, larger buffers, screen-on prewarm and real-speed ranking after connect.
@@ -56,6 +61,8 @@ The UI is fully Persian / English (RTL / LTR), built with `Jetpack Compose` + `M
 - **Instant QUIC fallback** (no more stalls) and **lower battery and memory use** across all engines.
 - **Redesigned UI** with a new animated engine switcher and new icons.
 - **One-time settings reset** when upgrading to 2.0.8; the default engine is now Xray.
+
+</details>
 
 ## Engine 1 — Xray
 
@@ -99,11 +106,11 @@ Download from **[Releases](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/rel
 
 | File | Use it for |
 |---|---|
-| `UAC-2.0.8-arm64-v8a.apk` | **Almost every phone** (recommended) |
-| `UAC-2.0.8-armeabi-v7a.apk` | Old 32-bit phones |
-| `UAC-2.0.8-x86_64.apk` | Emulators on PC (e.g. LDPlayer) |
-| `UAC-2.0.8-x86.apk` | Old 32-bit emulators |
-| `UAC-2.0.8-universal.apk` | Any device (larger file) |
+| `UAC-2.1.2-arm64-v8a.apk` | **Almost every phone** (recommended) |
+| `UAC-2.1.2-armeabi-v7a.apk` | Old 32-bit phones |
+| `UAC-2.1.2-x86_64.apk` | Emulators on PC (e.g. LDPlayer) |
+| `UAC-2.1.2-x86.apk` | Old 32-bit emulators |
+| `UAC-2.1.2-universal.apk` | Any device (larger file) |
 
 ## Quick start
 
