@@ -178,3 +178,17 @@ Connection quality depends on your carrier, network and the moment — no route 
 [![Star on GitHub](https://img.shields.io/github/stars/Floxu1/UAC-SNI-Spoofer-Android?style=social)](https://github.com/Floxu1/UAC-SNI-Spoofer-Android)
 
 </div>
+
+## 📜 License
+
+Licensed under **GNU AGPLv3**.
+
+Use, modification, and redistribution are permitted under the license terms, including applicable source disclosure and copyright notice requirements.
+
+**Original Developer:** [Floxu1](https://github.com/Floxu1)
+
+**Original Project:** [UAC SNI Spoofer](https://github.com/Floxu1/UAC-SNI-Spoofer-Android)
+
+Third-party licenses: [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)
+
+📄 [View License](./LICENSE)
