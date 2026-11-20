@@ -186,3 +186,17 @@ cd UAC-SNI-Spoofer-Android
 [![Star on GitHub](https://img.shields.io/github/stars/Floxu1/UAC-SNI-Spoofer-Android?style=social)](https://github.com/Floxu1/UAC-SNI-Spoofer-Android)
 
 </div>
+
+## 📜 مجوز (License)
+
+این پروژه تحت مجوز **GNU AGPLv3** منتشر شده است.
+
+استفاده، تغییر و انتشار مجدد طبق شرایط AGPLv3 مجاز است. هنگام توزیع نسخه‌های تغییریافته، ارائه سورس متناظر و حفظ اطلاعیه‌های کپی‌رایت الزامی است.
+**توسعه‌دهنده اصلی:** [Floxu1](https://github.com/Floxu1)
+
+**پروژه اصلی:** [UAC SNI Spoofer](https://github.com/Floxu1/UAC-SNI-Spoofer-Android)
+
+مجوز موتورهای جانبی در [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) درج شده است.
+
+📄 [مشاهده لایسنس](./LICENSE)
+
