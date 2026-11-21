@@ -14,7 +14,8 @@ use crate::noize::{self, NoizeConfig};
 use crate::tls::{self, TlsParams};
 use crate::{consts, error::AetherError, error::Result};
 
-const MAX_DATAGRAM_SIZE: usize = 1350;
+pub const MAX_DATAGRAM_SIZE: usize = 1350;
+pub(crate) const H3_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn net_queue() -> usize {
     crate::sysprofile::channel_capacity()
@@ -66,6 +67,7 @@ pub struct TunnelConfig {
     pub tls_curve_preset: crate::TlsCurvePreset,
     pub local_ipv4: Ipv4Addr,
     pub quiet: bool,
+    pub experimental_h3: bool,
 }
 
 fn validation_timeout() -> Duration {
@@ -192,7 +194,12 @@ impl Internals {
     }
 }
 
-type NetPacket = (SocketAddr, SocketAddr, Vec<u8>);
+pub(crate) type NetPacket = (SocketAddr, SocketAddr, Vec<u8>);
+
+enum Network {
+    Native(HashMap<SocketAddr, Arc<UdpSocket>>),
+    Carried(crate::h3_carrier::CarrierSocket),
+}
 
 fn bind_addr_for(peer: &SocketAddr) -> SocketAddr {
     if peer.is_ipv4() {
@@ -251,15 +258,36 @@ fn spawn_reader(
     })
 }
 
+fn carried_path(
+    carrier: &crate::h3_carrier::Carrier,
+    peer: SocketAddr,
+    tx: mpsc::Sender<NetPacket>,
+) -> Result<(SocketAddr, Network)> {
+    // quiche needs a stable path identifier. The carrier owns the actual UDP port.
+    let local = bind_addr_for(&peer);
+    Ok((local, Network::Carried(carrier.open(peer, local, tx)?)))
+}
+
 pub async fn run(
+    cfg: TunnelConfig,
+    internals: Internals,
+    addr_tx: Option<mpsc::Sender<AssignedAddr>>,
+    ready_tx: Option<oneshot::Sender<()>>,
+) -> Result<()> {
+    run_with_carrier(cfg, internals, addr_tx, ready_tx, None).await
+}
+
+pub(crate) async fn run_with_carrier(
     cfg: TunnelConfig,
     mut internals: Internals,
     addr_tx: Option<mpsc::Sender<AssignedAddr>>,
     ready_tx: Option<oneshot::Sender<()>>,
+    carrier: Option<crate::h3_carrier::Carrier>,
 ) -> Result<()> {
     let peer = cfg.peer;
     let quiet = cfg.quiet;
-    let data_check = data_check_enabled();
+    // Experimental H3 checks real traffic on the live netstack after CONNECT-IP.
+    let data_check = !cfg.experimental_h3 && data_check_enabled();
     let tuned = quic_tuned_enabled();
     let mut pacer = Pacer::new(tuned);
     let probe_packet = masque::build_dns_probe_packet(cfg.local_ipv4);
@@ -270,23 +298,27 @@ pub async fn run(
     // Device packets discarded while the tunnel was still being accepted.
     let mut predelivery_drops: u64 = 0;
 
-    let init_sock = bind_udp_fast(bind_addr_for(&peer)).await?;
-    let local = init_sock.local_addr()?;
-    let init_sock = Arc::new(init_sock);
-
     let (net_tx, mut net_rx) = mpsc::channel::<NetPacket>(net_queue());
-
-    let mut sockets: HashMap<SocketAddr, Arc<UdpSocket>> = HashMap::new();
-    sockets.insert(local, init_sock.clone());
     let mut readers = ReaderGuard::default();
-    readers.push(spawn_reader(init_sock, local, net_tx.clone()));
+    let (local, mut network) = if let Some(carrier) = carrier.as_ref() {
+        carried_path(carrier, peer, net_tx.clone())?
+    } else {
+        let sock = bind_udp_fast(bind_addr_for(&peer)).await?;
+        if cfg.experimental_h3 {
+            sock.connect(peer).await?;
+        }
+        let local = sock.local_addr()?;
+        let sock = Arc::new(sock);
+        readers.push(spawn_reader(sock.clone(), local, net_tx.clone()));
+        (local, Network::Native(HashMap::from([(local, sock)])))
+    };
 
     let mut config = tls::build_config(&TlsParams {
         cert_pem: &cfg.cert_pem,
         key_pem: &cfg.key_pem,
         curve_preset: cfg.tls_curve_preset,
-        pin_endpoint: false,
-        expected_pins: &[],
+        pin_endpoint: cfg.experimental_h3,
+        expected_pins: consts::MASQUE_PINS,
     })?;
     if tuned {
         tls::apply_quic_tuning(&mut config);
@@ -320,12 +352,12 @@ pub async fn run(
     let mut established_ever = false;
     let mut ech_retried = false;
 
-    if let Some(sock) = sockets.get(&local) {
-        noize::pre_handshake(sock.as_ref(), peer, &cfg.noize).await;
+    if let Network::Native(sockets) = &network {
+        noize::pre_handshake(&sockets[&local], peer, &cfg.noize).await;
     }
 
     let mut send_buf = vec![0u8; MAX_DATAGRAM_SIZE];
-    flush(&mut conn, &sockets, &mut send_buf, &mut pacer).await?;
+    flush(&mut conn, &network, &mut send_buf, &mut pacer).await?;
 
     let mut out_buf = vec![0u8; 65535];
     let mut keepalive_interval = tokio::time::interval(Duration::from_secs(20));
@@ -336,6 +368,9 @@ pub async fn run(
 
     let mut ctrl_open = true;
     let mut outbound_open = true;
+    let started = Instant::now();
+    let mut stage_deadline = started + H3_STAGE_TIMEOUT;
+    let mut first_payload = false;
 
     loop {
         if data_check && !ready_fired {
@@ -370,10 +405,21 @@ pub async fn run(
         tokio::select! {
             _ = keepalive_interval.tick() => {
                 if conn.is_established() {
+                    if cfg.experimental_h3 && ready_fired {
+                        log_h3_path(peer, "live", &conn);
+                    }
                     if let Err(e) = conn.send_ack_eliciting() {
                         log::debug!("keepalive ping failed: {e}");
                     }
                 }
+            }
+
+            _ = tokio::time::sleep_until(stage_deadline.into()), if cfg.experimental_h3 && !ready_fired => {
+                log_h3_path(peer, "timeout", &conn);
+                let stage = if established_ever { "B CONNECT-IP" } else { "A QUIC handshake" };
+                let _ = conn.close(false, 0, b"startup timeout");
+                let _ = flush(&mut conn, &network, &mut send_buf, &mut pacer).await;
+                return Err(AetherError::Masque(format!("{stage}: timed out after {H3_STAGE_TIMEOUT:?}")));
             }
 
             _ = probe_interval.tick(), if data_check && !ready_fired => {
@@ -390,9 +436,11 @@ pub async fn run(
             }
 
             Some((to_local, from, mut data)) = net_rx.recv() => {
-                let mut hdr_buf = data.clone();
-                if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
-                    log::trace!("recv {} bytes type={:?} version=0x{:x} from {}", data.len(), hdr.ty, hdr.version, from);
+                if log::log_enabled!(log::Level::Trace) {
+                    let mut hdr_buf = data.clone();
+                    if let Ok(hdr) = quiche::Header::from_slice(&mut hdr_buf, quiche::MAX_CONN_ID_LEN) {
+                        log::trace!("recv {} bytes type={:?} version=0x{:x} from {}", data.len(), hdr.ty, hdr.version, from);
+                    }
                 }
                 let info = quiche::RecvInfo { from, to: to_local };
                 if let Err(e) = conn.recv(&mut data, info) {
@@ -419,8 +467,10 @@ pub async fn run(
             ctrl = internals.ctrl_rx.recv(), if ctrl_open => {
                 match ctrl {
                     Some(Control::Migrate) => {
-                        if let Err(e) = do_migrate(&mut conn, peer, &mut sockets, &net_tx, &mut readers).await {
-                            log::warn!("migration failed: {e}");
+                        if let Network::Native(sockets) = &mut network {
+                            if let Err(e) = do_migrate(&mut conn, peer, sockets, &net_tx, &mut readers).await {
+                                log::warn!("migration failed: {e}");
+                            }
                         }
                     }
                     Some(Control::Close) => {
@@ -504,6 +554,14 @@ pub async fn run(
 
         if conn.is_established() && h3_conn.is_none() {
             established_ever = true;
+            if cfg.experimental_h3 {
+                stage_deadline = Instant::now() + H3_STAGE_TIMEOUT;
+                crate::app::h3_diagnostic(format!(
+                    "{peer} A QUIC handshake OK alpn={} elapsed={}ms",
+                    String::from_utf8_lossy(conn.application_proto()),
+                    started.elapsed().as_millis()
+                ));
+            }
             log_or_debug(
                 quiet,
                 format!(
@@ -511,9 +569,21 @@ pub async fn run(
                     String::from_utf8_lossy(conn.application_proto())
                 ),
             );
-            let mut h3c = h3::Connection::with_transport(&mut conn, &h3_config)?;
+            let mut h3c = h3::Connection::with_transport(&mut conn, &h3_config).map_err(|error| {
+                if cfg.experimental_h3 {
+                    AetherError::Masque(format!("B CONNECT-IP: could not initialize HTTP/3: {error}"))
+                } else {
+                    error.into()
+                }
+            })?;
             let headers = masque::connect_ip_request(&cfg.authority, &cfg.path);
-            let sid = h3c.send_request(&mut conn, &headers, false)?;
+            let sid = h3c.send_request(&mut conn, &headers, false).map_err(|error| {
+                if cfg.experimental_h3 {
+                    AetherError::Masque(format!("B CONNECT-IP: could not send request: {error}"))
+                } else {
+                    error.into()
+                }
+            })?;
             log_or_debug(quiet, format!("connect-ip request sent on stream {sid}"));
             req_stream = Some(sid);
             h3_conn = Some(h3c);
@@ -529,11 +599,29 @@ pub async fn run(
 
         let mut connect_ip_ok = false;
         if let (Some(h3c), Some(sid)) = (h3_conn.as_mut(), req_stream) {
-            connect_ip_ok = poll_h3(&mut conn, h3c, sid, &mut capsules, &addr_tx, quiet)?;
+            connect_ip_ok = poll_h3(
+                &mut conn,
+                h3c,
+                sid,
+                &mut capsules,
+                &addr_tx,
+                quiet,
+                cfg.experimental_h3.then_some(peer),
+            )
+            .map_err(|error| {
+                if cfg.experimental_h3 {
+                    let stage = if ready_fired { "C IP payload" } else { "B CONNECT-IP" };
+                    AetherError::Masque(format!("{stage}: {error}"))
+                } else {
+                    error
+                }
+            })?;
         }
         if connect_ip_ok && !data_check && !ready_fired {
             ready_fired = true;
-            crate::ffi::mark_ready();
+            if !cfg.experimental_h3 {
+                crate::ffi::mark_ready();
+            }
             if predelivery_drops > 0 {
                 log_or_debug(
                     quiet,
@@ -548,6 +636,10 @@ pub async fn run(
         }
 
         let got_data = drain_datagrams(&mut conn, req_stream, &internals.inbound_tx, &mut out_buf);
+        if cfg.experimental_h3 && ready_fired && got_data && !first_payload {
+            first_payload = true;
+            log_h3_path(peer, "first IP datagram", &conn);
+        }
 
         if got_data && !ready_fired {
             validate_successes += 1;
@@ -579,7 +671,7 @@ pub async fn run(
             }
         }
 
-        flush(&mut conn, &sockets, &mut send_buf, &mut pacer).await?;
+        flush(&mut conn, &network, &mut send_buf, &mut pacer).await?;
 
         if conn.is_closed() {
             if !established_ever && !ech_retried && current_ech.is_some() {
@@ -603,11 +695,25 @@ pub async fn run(
                     capsules = CapsuleParser::new();
                     // A packet held for the old connection must not leak out.
                     pacer.held_info = None;
-                    flush(&mut conn, &sockets, &mut send_buf, &mut pacer).await?;
+                    flush(&mut conn, &network, &mut send_buf, &mut pacer).await?;
                     continue;
                 }
             }
 
+            if cfg.experimental_h3 {
+                log_h3_path(peer, "closed", &conn);
+                let stage = if ready_fired {
+                    "C IP payload"
+                } else if established_ever {
+                    "B CONNECT-IP"
+                } else {
+                    "A QUIC handshake"
+                };
+                return Err(AetherError::Masque(format!(
+                    "{stage}: {}",
+                    verify_close_reason(&conn, req_stream.is_some())
+                )));
+            }
             log_or_debug(quiet, format!("connection closed: {:?}", conn.stats()));
             if let Some(e) = conn.peer_error() {
                 log_or_debug(
@@ -636,6 +742,24 @@ pub async fn run(
     }
 }
 
+fn log_h3_path(peer: SocketAddr, event: &str, conn: &quiche::Connection) {
+    if let Some(path) = conn.path_stats().find(|path| path.active) {
+        let stats = conn.stats();
+        crate::app::h3_diagnostic(format!(
+            "{peer} {event} quic_rtt={}ms quic_sent={} quic_lost={} quic_spurious_loss={} quic_recv={} datagram_tx={} datagram_rx={} datagram_lost={} datagram_max_payload={:?}",
+            path.rtt.as_millis(),
+            stats.sent,
+            stats.lost,
+            stats.spurious_lost,
+            stats.recv,
+            path.dgram_sent,
+            path.dgram_recv,
+            path.dgram_lost,
+            conn.dgram_max_writable_len(),
+        ));
+    }
+}
+
 async fn sleep_opt(timeout: Option<Duration>) {
     match timeout {
         Some(d) => tokio::time::sleep(d).await,
@@ -658,6 +782,7 @@ fn poll_h3(
     capsules: &mut CapsuleParser,
     addr_tx: &Option<mpsc::Sender<AssignedAddr>>,
     quiet: bool,
+    diagnostic_peer: Option<SocketAddr>,
 ) -> Result<bool> {
     let mut body = vec![0u8; 65535];
     let mut connect_ip_ok = false;
@@ -670,6 +795,12 @@ fn poll_h3(
                 }
                 for h in &list {
                     if h.name() == b":status" {
+                        if let Some(peer) = diagnostic_peer {
+                            crate::app::h3_diagnostic(format!(
+                                "{peer} B CONNECT-IP status={}",
+                                String::from_utf8_lossy(h.value())
+                            ));
+                        }
                         log_or_debug(
                             quiet,
                             format!("connect-ip status: {}", String::from_utf8_lossy(h.value())),
@@ -699,8 +830,12 @@ fn poll_h3(
                 drain_capsules(capsules, addr_tx);
             }
 
-            Ok((_stream_id, h3::Event::Finished)) => {}
-            Ok((_stream_id, h3::Event::Reset(_))) => {}
+            Ok((stream_id, h3::Event::Finished)) if diagnostic_peer.is_some() && stream_id == req_stream => {
+                return Err(AetherError::Masque("CONNECT-IP stream finished".into()));
+            }
+            Ok((stream_id, h3::Event::Reset(code))) if diagnostic_peer.is_some() && stream_id == req_stream => {
+                return Err(AetherError::Masque(format!("CONNECT-IP stream reset: {code}")));
+            }
             Ok(_) => {}
 
             Err(h3::Error::Done) => break,
@@ -797,35 +932,36 @@ fn drain_datagrams(
 /// fresh 1350-byte `Vec` each call put a hot allocation directly in the data
 /// path.
 async fn send_packet(
-    sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    network: &Network,
     data: &[u8],
     send_info: &quiche::SendInfo,
 ) -> Result<()> {
-    if let Some(sock) = sockets.get(&send_info.from) {
-        sock.send_to(data, send_info.to).await?;
-    } else if let Some((_, sock)) = sockets.iter().next() {
-        sock.send_to(data, send_info.to).await?;
+    match network {
+        Network::Native(sockets) => {
+            if let Some(sock) = sockets.get(&send_info.from).or_else(|| sockets.values().next()) {
+                sock.send_to(data, send_info.to).await?;
+            }
+        }
+        Network::Carried(socket) => {
+            socket.send(send_info.to, data).await?;
+        }
     }
     Ok(())
 }
 
 async fn flush(
     conn: &mut quiche::Connection,
-    sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    network: &Network,
     out: &mut [u8],
     pacer: &mut Pacer,
 ) -> Result<()> {
     if pacer.enabled {
-        return flush_paced(conn, sockets, out, pacer).await;
+        return flush_paced(conn, network, out, pacer).await;
     }
     loop {
         match conn.send(out) {
             Ok((write, send_info)) => {
-                if let Some(sock) = sockets.get(&send_info.from) {
-                    sock.send_to(&out[..write], send_info.to).await?;
-                } else if let Some((_, sock)) = sockets.iter().next() {
-                    sock.send_to(&out[..write], send_info.to).await?;
-                }
+                send_packet(network, &out[..write], &send_info).await?;
             }
             Err(quiche::Error::Done) => break,
             Err(e) => return Err(AetherError::Quic(e)),
@@ -841,7 +977,7 @@ async fn flush(
 /// while a packet is parked, which is what spreads a burst over time.
 async fn flush_paced(
     conn: &mut quiche::Connection,
-    sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    network: &Network,
     out: &mut [u8],
     pacer: &mut Pacer,
 ) -> Result<()> {
@@ -851,7 +987,7 @@ async fn flush_paced(
         }
         pacer.held_info = None;
         let len = pacer.held_len;
-        send_packet(sockets, &pacer.held[..len], &info).await?;
+        send_packet(network, &pacer.held[..len], &info).await?;
     }
     loop {
         match conn.send(out) {
@@ -862,7 +998,7 @@ async fn flush_paced(
                     pacer.held_info = Some(send_info);
                     break;
                 }
-                send_packet(sockets, &out[..write], &send_info).await?;
+                send_packet(network, &out[..write], &send_info).await?;
             }
             Err(quiche::Error::Done) => break,
             Err(e) => return Err(AetherError::Quic(e)),
@@ -1253,7 +1389,46 @@ async fn flush_connected(conn: &mut quiche::Connection, sock: &UdpSocket) -> Res
 
 #[cfg(test)]
 mod tests {
-    use super::{data_check_enabled_for, describe_connection_error, quic_tuned_for, tls_alert_name};
+    use super::*;
+
+    #[tokio::test]
+    async fn carrier_preserves_repeated_quic_sized_datagrams_and_filters_the_peer() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (client_ip_tx, server_ip_rx) = mpsc::channel(4);
+            let (server_ip_tx, client_ip_rx) = mpsc::channel(4);
+            let mtu = MAX_DATAGRAM_SIZE + 48;
+            let client = crate::h3_carrier::Carrier::new("10.8.0.2", "", client_ip_tx);
+            let (_addr_tx, addr_rx) = mpsc::channel(1);
+            let client_rx = client.clone();
+            let mut readers = ReaderGuard::default();
+            readers.push(tokio::spawn(async move { let _ = client_rx.receive(client_ip_rx, addr_rx).await; }));
+            let server = crate::netstack::spawn(
+                "10.8.0.3", "", mtu, server_ip_rx, server_ip_tx,
+            ).unwrap();
+            let mut peer_udp = server.open_udp().await.unwrap();
+            let stray = server.open_udp().await.unwrap();
+            let peer = "10.8.0.3:49152".parse().unwrap();
+            let (tx, mut rx) = mpsc::channel(4);
+            let (local, network) = carried_path(&client, peer, tx).unwrap();
+            let mut info = quiche::SendInfo { from: local, to: peer, at: Instant::now() };
+
+            for sequence in 0..64u8 {
+                let mut packet = vec![sequence; MAX_DATAGRAM_SIZE];
+                send_packet(&network, &packet, &info).await.unwrap();
+                let (client_addr, received) = peer_udp.from_stack.recv().await.unwrap();
+                assert_eq!(received, packet);
+                stray.send_to(client_addr, vec![0xa5]).await.unwrap();
+                packet[0] ^= 0xff;
+                peer_udp.send_to(client_addr, packet.clone()).await.unwrap();
+                assert_eq!(rx.recv().await, Some((local, peer, packet)));
+            }
+
+            info.to.set_port(49153);
+            assert!(send_packet(&network, b"wrong peer", &info).await.is_err());
+        })
+        .await
+        .expect("carrier stalled or dropped a datagram");
+    }
 
     #[test]
     fn quic_tuning_is_opt_in() {

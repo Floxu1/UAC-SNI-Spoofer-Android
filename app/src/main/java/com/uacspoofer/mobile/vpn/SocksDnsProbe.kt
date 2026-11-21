@@ -188,8 +188,8 @@ class SocksDnsProbe {
         )
     }
 
-    private fun buildDnsQuery(transactionId: Int): ByteArray {
-        val labels = PROBE_HOST.split('.')
+    internal fun buildDnsQuery(transactionId: Int, host: String = PROBE_HOST): ByteArray {
+        val labels = host.split('.')
         val size = 12 + labels.sumOf { it.toByteArray(Charsets.US_ASCII).size + 1 } + 1 + 4
         val buffer = ByteBuffer.allocate(size).order(ByteOrder.BIG_ENDIAN)
         buffer.putShort(transactionId.toShort())

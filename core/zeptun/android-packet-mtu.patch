@@ -1,0 +1,13 @@
+diff --git a/src/device/android.zig b/src/device/android.zig
+--- a/src/device/android.zig
++++ b/src/device/android.zig
+@@ -23,7 +23,8 @@ pub fn capabilities(mtu: u32) device.Capabilities {
+         .uso = false,
+         .csum_offload = false,
+         .af_prefix = sys.is_darwin,
+-        .jumbo_tx = sys.is_linux,
++        // Android's borrowed packet FD receives MTU-sized IP packets without offload metadata.
++        .jumbo_tx = false,
+         .mtu = mtu,
+         .queues = 1,
+     };

@@ -1,16 +1,16 @@
 package com.uacspoofer.mobile.engine.pow
 
-import android.content.Context
+import android.net.VpnService
 import android.os.ParcelFileDescriptor
-import android.os.SystemClock
-import com.uacspoofer.mobile.engine.tor.HevSocks5Tunnel
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
+import com.uacspoofer.mobile.settings.TunBackend
+import com.uacspoofer.mobile.vpn.SocksTunRelay
 import com.uacspoofer.mobile.vpn.TunStats
-import java.io.File
 
 object PowTun2Socks {
-    private const val NATIVE_EXIT_GRACE_MS = 5_000L
+    private val relay = SocksTunRelay()
+    private var relayDescriptor: ParcelFileDescriptor? = null
 
     data class PrivateAddress(
         val ipAddress: String,
@@ -24,7 +24,7 @@ object PowTun2Socks {
         private set
 
     val isRunning: Boolean
-        get() = runCatching { HevSocks5Tunnel.TProxyIsRunning() }.getOrDefault(false)
+        get() = relay.isRunning()
 
     fun selectPrivateAddress(): PrivateAddress {
         val selected = defaultPrivateAddress()
@@ -38,33 +38,27 @@ object PowTun2Socks {
 
     @Synchronized
     fun start(
-        context: Context,
+        service: VpnService,
         tunFd: ParcelFileDescriptor,
         socksProxyPort: Int,
         mtu: Int,
-        address: PrivateAddress = privateAddress,
+        address: PrivateAddress,
+        backend: TunBackend,
+        udp: Boolean,
     ): Boolean {
         if (socksProxyPort <= 0) return false
         stopLocked()
-        val yaml = PowTunRelayConfig.yaml(
-            mtu = mtu,
-            socksPort = socksProxyPort,
-            tunIpv4 = address.ipAddress,
-            mapDns = address.router,
-        )
-        val configFile = File(context.applicationContext.filesDir, "uac-pow/hev.yml")
-        configFile.parentFile?.mkdirs()
-        configFile.writeText(yaml)
-        val started = runCatching {
-            HevSocks5Tunnel.TProxyStartService(configFile.absolutePath, tunFd.fd)
-        }.getOrElse { error ->
-            AppLogRepository.warning(LogSource.POW, "tun2socks library failed to load: ${error.message}")
-            stopLocked()
-            return false
-        }
-        if (!started || !isRunning) {
-            stopLocked()
-            AppLogRepository.warning(LogSource.POW, "tun2socks did not enter running state")
+        try {
+            relay.start(
+                service, backend, tunFd, SocksTunRelay.Config(
+                    socksProxyPort, mtu, udp, address.router, PowTunRelayConfig.MAPDNS_CACHE_SIZE,
+                ),
+            ) {
+                "uac-pow/hev.yml" to PowTunRelayConfig.yaml(mtu, socksProxyPort, address.ipAddress, address.router)
+            }
+            relayDescriptor = tunFd
+        } catch (error: Throwable) {
+            if (backend == TunBackend.ZEPTUN) throw error
             return false
         }
         AppLogRepository.info(
@@ -75,31 +69,16 @@ object PowTun2Socks {
     }
 
     @Synchronized
-    fun stats(): TunStats {
-        if (!isRunning) return TunStats.ZERO
-        val values = runCatching { HevSocks5Tunnel.TProxyGetStats() }.getOrNull()
-            ?: return TunStats.ZERO
-        if (values.size < 4) return TunStats.ZERO
-        return TunStats(
-            txPackets = values[0].coerceAtLeast(0L),
-            txBytes = values[1].coerceAtLeast(0L),
-            rxPackets = values[2].coerceAtLeast(0L),
-            rxBytes = values[3].coerceAtLeast(0L),
-        )
-    }
+    fun stats(): TunStats = relay.stats()
 
     @Synchronized
-    fun stop() = stopLocked()
-
-    fun awaitNativeExit(timeoutMs: Long = NATIVE_EXIT_GRACE_MS) {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (isRunning && SystemClock.elapsedRealtime() < deadline) {
-            runCatching { Thread.sleep(50L) }
-        }
+    fun stop(expected: ParcelFileDescriptor? = null) {
+        if (expected == null || relayDescriptor === expected) stopLocked()
     }
 
     private fun stopLocked() {
-        runCatching { HevSocks5Tunnel.TProxyStopService() }
+        runCatching { relay.stop() }
+        relayDescriptor = null
     }
 
     private fun defaultPrivateAddress() =

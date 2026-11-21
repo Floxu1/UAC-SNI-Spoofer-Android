@@ -1,13 +1,15 @@
 package com.uacspoofer.mobile.location
 
 import android.content.Context
+import com.uacspoofer.mobile.BuildConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class GpsSpoofStore private constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    private val mutableEnabled = MutableStateFlow(prefs.getBoolean(KEY_ENABLED, false))
+    private val enabledKey = if (BuildConfig.GPS_MOCK_TEST) "test_enabled" else KEY_ENABLED
+    private val mutableEnabled = MutableStateFlow(prefs.getBoolean(enabledKey, BuildConfig.GPS_MOCK_TEST))
     val enabled: StateFlow<Boolean> = mutableEnabled.asStateFlow()
 
     fun snapshot(): Boolean = mutableEnabled.value
@@ -15,7 +17,7 @@ class GpsSpoofStore private constructor(context: Context) {
     @Synchronized
     fun setEnabled(enabled: Boolean) {
         if (enabled == mutableEnabled.value) return
-        prefs.edit().putBoolean(KEY_ENABLED, enabled).apply()
+        prefs.edit().putBoolean(enabledKey, enabled).apply()
         mutableEnabled.value = enabled
     }
 

@@ -39,12 +39,30 @@ x86_64      494154A10429A43494D14AC1A78F44870206121D6E8AFBEE6ED94CF3CF68999A
 - Bundled license: `third_party/hev-socks5-tunnel-LICENSE.txt`
 - Upstream: https://github.com/heiher/hev-socks5-tunnel
 
+## Zeptun
+
+- Version: `1.1.3` at `32f5dde141b125ec0aea732b1c55937e7993b189`
+- Purpose: optional native TUN-to-SOCKS processing for Android VPN sessions
+- License: MIT
+- Bundled license: `third_party/zeptun-LICENSE.txt`
+- Build instructions: [Zeptun on Android](core/zeptun/README.md)
+- Upstream: https://github.com/Noisemux/zeptun
+
 ## UAC PoW · WARP core (vendored)
 
 - Purpose: outer WARP / MASQUE / WireGuard hop for the UAC PoW engine
 - License: GNU Affero GPL v3
 - Bundled license and trademark notice: `core/aether/LICENSE` and `core/aether/TRADEMARK.md`
 - Location: `core/aether/` (plus `core/quiche/` for QUIC)
+
+## UAC Direct Core
+
+- Artifact: `libDirect.so` for Engine 4, with a separate Android JNI bridge
+- Source attribution: includes transport primitives adapted from the Aether project
+- Modifications: separated the Engine 4 route and Android entry point on 2026-11-21
+- License: AGPL-3.0-only, full text in `core/direct/LICENSE`
+- Corresponding source: `core/direct/`, shared transport sources in `core/aether/`,
+  and the Android build scripts `core/build-android.ps1` and `core/build-android.sh`
 
 ## Cloudflare quiche
 
@@ -63,8 +81,13 @@ x86_64      494154A10429A43494D14AC1A78F44870206121D6E8AFBEE6ED94CF3CF68999A
 
 ## Engine 4 (UAC Direct) method
 
-The serverless direct-fragment approach of engine 4 (TLS ClientHello split 6/98/1 or 0/104/1, second-stage split, UDP noise, unfiltered DoH) is adapted from the public "Serverless-for-Iran" Xray configs by @patterniha (https://github.com/patterniha/Serverless-for-Iran). The config is generated in Kotlin; no file from that project is bundled.
+The manual ClientHello fragmentation presets are adapted from [patterniha/Serverless-for-Iran](https://github.com/patterniha/Serverless-for-Iran). The app generates the Xray config in Kotlin.
 
-## Engine 4 MITM Domain Fronting
+## ByeDPI
 
-Google / ECH MITM re-pack follows the public MITM-DomainFronting Xray pattern by @patterniha (https://github.com/patterniha/MITM-DomainFronting). The app generates its own per-install CA; no files from that repo are bundled.
+- Version: `v0.17.3` at `7efde1b1296eaaa187b70e951894dde17527489c`
+- Purpose: optional loopback SOCKS outbounds for OOB and SNI-aware TLS record fragmentation in UAC Direct
+- License: MIT
+- Bundled license: `app/src/main/assets/byedpi-LICENSE.txt`
+- Build script: `scripts/vendor-byedpi.ps1`
+- Upstream: https://github.com/hufrea/byedpi

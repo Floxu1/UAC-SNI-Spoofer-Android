@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -30,8 +32,11 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -76,12 +81,13 @@ internal fun ToolPageScaffold(
     accent: Color,
     header: @Composable () -> Unit,
     verticalSpacing: Dp = 12.dp,
+    listState: LazyListState = rememberLazyListState(),
+    textStyle: TextStyle = homeLocalizedTextStyle(),
     content: LazyListScope.() -> Unit,
 ) {
     val wide = LocalWideShell.current
-    val localizedTextStyle = homeLocalizedTextStyle()
     ToolPageBackground(accent) {
-        CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
+        CompositionLocalProvider(LocalTextStyle provides textStyle) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -102,6 +108,7 @@ internal fun ToolPageScaffold(
                 contentAlignment = Alignment.TopCenter,
             ) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxHeight()
                         .fillMaxWidth()
@@ -192,6 +199,9 @@ internal fun SectionLabel(text: String, modifier: Modifier = Modifier) {
 }
 
 internal val ToolCardShape = RoundedCornerShape(20.dp)
-internal val ToolCardBrush = Brush.linearGradient(
-    listOf(Color(0xE6142231), Color(0xD90B1724)),
-)
+private val DefaultToolCardBrush = Brush.linearGradient(listOf(Color(0xE6142231), Color(0xD90B1724)))
+internal val ToolCardBrush: Brush
+    get() {
+        val custom = UacColors.SurfaceOverride
+        return if (custom.isSpecified) SolidColor(custom) else DefaultToolCardBrush
+    }

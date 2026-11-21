@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.vpn
 
 import android.content.Context
+import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
@@ -13,15 +14,20 @@ import com.uacspoofer.mobile.mci.MciNativeXrayConfig
 import com.uacspoofer.mobile.mci.MciXrayRuntimeOptions
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
+import com.uacspoofer.mobile.settings.TunBackend
 import go.Seq
 import libv2ray.CoreCallbackHandler
 import libv2ray.CoreController
 import libv2ray.Libv2ray
+import java.net.InetAddress
+import java.net.ServerSocket
 
 
-class XrayNativeTunEngine(private val context: Context) {
+class XrayNativeTunEngine(private val context: VpnService) {
     private var descriptor: ParcelFileDescriptor? = null
     private var controller: CoreController? = null
+    private val socksTun = SocksTunRelay()
+    private var socksTunPort: Int? = null
     private var totalUplink = 0L
     private var totalDownlink = 0L
     private var totalProbeUplink = 0L
@@ -34,6 +40,7 @@ class XrayNativeTunEngine(private val context: Context) {
         profile: ProxyProfile = ProxyProfile.ADVANCED_SETTINGS_TEMPLATE,
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
         aiRoute: AiRoutePlan? = null,
+        backend: TunBackend = TunBackend.HEV,
         establishTun: () -> ParcelFileDescriptor?,
     ) {
         stopLocked()
@@ -56,11 +63,22 @@ class XrayNativeTunEngine(private val context: Context) {
         totalProbeUplink = 0L
         totalProbeDownlink = 0L
         try {
+            val port = if (backend == TunBackend.ZEPTUN) {
+                ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+            } else null
+            socksTunPort = port
             core.startLoop(
-                MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions, aiRoute),
-                tun.fd,
+                MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions, aiRoute, port),
+                if (port == null) tun.fd else 0,
             )
             check(core.isRunning) { "Native Xray core did not enter running state" }
+            if (port != null) {
+                socksTun.start(context, backend, tun, SocksTunRelay.Config(port, settings.tunMtu, udp = true)) {
+                    error("Xray HEV selection uses Xray's built-in TUN")
+                }
+            } else {
+                AppLogRepository.info(LogSource.TUN, "[TUN] Active backend: Xray native (stable selection)")
+            }
             AppLogRepository.info(
                 LogSource.TUN,
                 "Xray Native TUN started for ${edge.role} (MTU ${settings.tunMtu})" +
@@ -75,6 +93,7 @@ class XrayNativeTunEngine(private val context: Context) {
 
     @Synchronized
     fun stats(): TunStats {
+        if (socksTunPort != null) return socksTun.stats()
         val core = controller ?: return TunStats.ZERO
         totalUplink += query(core, "proxy", "uplink")
         totalDownlink += query(core, "proxy", "downlink")
@@ -119,7 +138,8 @@ class XrayNativeTunEngine(private val context: Context) {
             }
         })
         controller = core
-        val configJson = MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions, aiRoute)
+        val port = socksTunPort
+        val configJson = MciNativeXrayConfig.build(edge, settings, profile, runtimeOptions, aiRoute, port)
         val paused = com.uacspoofer.mobile.vpn.VpnPauseStore.isPaused()
         val dnsQueryDirect = configJson.contains("\"inboundTag\":[\"dns-query\"],\"outboundTag\":\"direct\"")
         val allDirect = configJson.contains("\"outboundTag\":\"direct\"")
@@ -131,7 +151,7 @@ class XrayNativeTunEngine(private val context: Context) {
         if (paused && !pauseOk) {
             error("Pause config missing all-direct / dns-query-direct rules")
         }
-        core.startLoop(configJson, tun.fd)
+        core.startLoop(configJson, if (port == null) tun.fd else 0)
         check(core.isRunning) { "Native Xray core did not enter running state after reload" }
         AppLogRepository.info(
             LogSource.TUN,
@@ -140,12 +160,15 @@ class XrayNativeTunEngine(private val context: Context) {
     }
 
     @Synchronized
-    fun isRunning(): Boolean = controller?.isRunning == true
+    fun isRunning(): Boolean = controller?.isRunning == true &&
+        (socksTunPort == null || socksTun.isRunning())
 
     @Synchronized
     fun stop() = stopLocked()
 
     private fun stopLocked() {
+        socksTun.stop()
+        socksTunPort = null
         val hadCore = controller != null
         val core = controller
         controller = null

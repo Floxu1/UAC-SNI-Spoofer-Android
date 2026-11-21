@@ -1,0 +1,145 @@
+diff --git a/src/device/android.zig b/src/device/android.zig
+--- a/src/device/android.zig
++++ b/src/device/android.zig
+@@ -40,4 +41,6 @@ pub fn Queue(comptime W: type) type {
+ 
+ pub fn queueOptions(fd: sys.fd_t, mtu: u32) linux.QueueOptions {
++    const os_linux = std.os.linux;
++    const socket_type = if (sys.is_android) sys.getsockoptInt(fd, os_linux.SOL.SOCKET, os_linux.SO.TYPE) else -1;
+     return .{
+         .fd = fd,
+@@ -47,4 +50,6 @@ pub fn queueOptions(fd: sys.fd_t, mtu: u32) linux.QueueOptions {
+         .coalesce = false,
+         .owns_fd = false,
++        .retry_packet_writes = sys.is_android and
++            (socket_type == os_linux.SOCK.SEQPACKET or socket_type == os_linux.SOCK.DGRAM),
+     };
+ }
+diff --git a/src/device/linux.zig b/src/device/linux.zig
+index 7972e29..42f8a84 100644
+--- a/src/device/linux.zig
++++ b/src/device/linux.zig
+@@ -225,4 +225,5 @@ pub const QueueOptions = struct {
+     owns_fd: bool = false,
+     ring: bool = true,
++    retry_packet_writes: bool = false,
+ };
+ 
+@@ -255,4 +256,6 @@ pub fn Queue(comptime W: type) type {
+         coalesce_enabled: bool,
+         completion: bool,
++        retry_packet_writes: bool,
++        deferred_writes: u32 = 0,
+         running: bool = false,
+         owns_fd: bool,
+@@ -290,4 +293,5 @@ pub fn Queue(comptime W: type) type {
+                 .coalesce_enabled = options.coalesce and options.caps.gsoWrite(),
+                 .completion = completion,
++                .retry_packet_writes = options.retry_packet_writes,
+                 .owns_fd = options.owns_fd,
+                 .ring_bufs = ring_bufs,
+@@ -330,4 +334,7 @@ pub fn Queue(comptime W: type) type {
+             }
+             if (q.ring_c.isActive()) q.worker.loop.cancel(&q.ring_c);
++            if (comptime @hasDecl(Loop, "submitOrderedWrite")) {
++                if (q.deferred_writes != 0) q.worker.loop.cancelFd(q.fd);
++            }
+             q.flush();
+         }
+@@ -594,4 +601,5 @@ pub fn Queue(comptime W: type) type {
+                 const slot: *Slot = @alignCast(@fieldParentPtr("c", c));
+                 const q: *Self = @ptrCast(@alignCast(ud.?));
++                if (!q.completion) q.deferred_writes -= 1;
+                 q.finishSlot(slot, result);
+                 return .disarm;
+@@ -600,14 +608,23 @@ pub fn Queue(comptime W: type) type {
+ 
+         fn dispatchSlot(q: *Self, slot: *Slot) void {
++            if (!q.completion and q.deferred_writes == 0) {
++                const r = sys.writev(q.fd, slot.iov[0..slot.niov]);
++                if (!@hasDecl(Loop, "submitOrderedWrite") or !q.retry_packet_writes or
++                    !q.running or r != sys.Errno.again.result())
++                {
++                    q.finishSlot(slot, r);
++                    return;
++                }
++            }
++            slot.c = .{
++                .op = .{ .writev = .{ .fd = q.fd, .iov = slot.iov[0..slot.niov] } },
++                .userdata = q,
++                .callback = SlotCtx.callback,
++            };
+             if (q.completion) {
+-                slot.c = .{
+-                    .op = .{ .writev = .{ .fd = q.fd, .iov = slot.iov[0..slot.niov] } },
+-                    .userdata = q,
+-                    .callback = SlotCtx.callback,
+-                };
+                 q.worker.loop.submit(&slot.c);
+-            } else {
+-                const r = sys.writev(q.fd, slot.iov[0..slot.niov]);
+-                q.finishSlot(slot, r);
++            } else if (comptime @hasDecl(Loop, "submitOrderedWrite")) {
++                q.deferred_writes += 1;
++                q.worker.loop.submitOrderedWrite(&slot.c);
+             }
+         }
+@@ -649,4 +666,9 @@ pub fn Queue(comptime W: type) type {
+             if (vh.isGso()) w.counters.inc(.gso_tx_packets);
+             const slot = q.tx.get() orelse {
++                if (q.deferred_writes != 0) {
++                    w.counters.inc(.tx_dropped);
++                    w.pool.put(b);
++                    return;
++                }
+                 const r = sys.write(q.fd, b.bytes());
+                 if (r < 0) w.counters.inc(.tx_dropped) else {
+@@ -672,4 +694,8 @@ pub fn Queue(comptime W: type) type {
+             if (vh.isGso()) w.counters.inc(.gso_tx_packets);
+             const slot = q.tx.get() orelse {
++                if (q.deferred_writes != 0) {
++                    w.counters.inc(.tx_dropped);
++                    return;
++                }
+                 var hdr_buf: [device.header_capacity]u8 = undefined;
+                 var iov: [device.max_iov]sys.iovec_const = undefined;
+diff --git a/src/io/epoll.zig b/src/io/epoll.zig
+index 488d077..1212399 100644
+--- a/src/io/epoll.zig
++++ b/src/io/epoll.zig
+@@ -161,4 +161,13 @@ pub fn Impl(comptime Outer: type) type {
+ 
+         pub fn submit(loop: *Loop, c: *Completion) void {
++            loop.submitImpl(c, false);
++        }
++
++        pub fn submitOrderedWrite(loop: *Loop, c: *Completion) void {
++            std.debug.assert(c.op == .writev);
++            loop.submitImpl(c, true);
++        }
++
++        fn submitImpl(loop: *Loop, c: *Completion, comptime ordered_write: bool) void {
+             std.debug.assert(c.state == .idle);
+             c.state = .active;
+@@ -179,4 +188,8 @@ pub fn Impl(comptime Outer: type) type {
+                 },
+                 else => {
++                    if (ordered_write and loop.state(c.op.fd()).writers.head != null) {
++                        loop.wait(c);
++                        return;
++                    }
+                     const r = attempt(c);
+                     if (r == sys.Errno.again.result()) {
+diff --git a/src/io/linux_loop.zig b/src/io/linux_loop.zig
+index 1b0186f..2def057 100644
+--- a/src/io/linux_loop.zig
++++ b/src/io/linux_loop.zig
+@@ -120,4 +120,8 @@ pub const Loop = struct {
+     }
+ 
++    pub inline fn submitOrderedWrite(loop: *Loop, c: *Completion) void {
++        if (loop.isUring()) loop.uring.submit(c) else loop.epoll.submitOrderedWrite(c);
++    }
++
+     pub inline fn cancel(loop: *Loop, c: *Completion) void {
+         if (loop.isUring()) loop.uring.cancel(c) else loop.epoll.cancel(c);

@@ -21,6 +21,7 @@ import com.uacspoofer.mobile.mci.DomesticDirect
 import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsData
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
+import com.uacspoofer.mobile.settings.TunBackend
 import com.uacspoofer.mobile.vpn.TunStats
 import com.uacspoofer.mobile.vpn.VpnPauseStore
 import java.net.InetSocketAddress
@@ -54,6 +55,7 @@ class PowConnectionCoordinator(
     private val service: VpnService,
 ) {
     private val appContext = service.applicationContext
+    private var tunBackend = TunBackend.HEV
     private val store = PowEngineStore.get(appContext)
     private val lifecycle = Mutex()
     private val retuneMutex = Mutex()
@@ -205,9 +207,11 @@ class PowConnectionCoordinator(
 
     suspend fun connect(
         settings: AdvancedSettingsData,
+        backend: TunBackend,
         establishTun: (PowTun2Socks.PrivateAddress, Int) -> ParcelFileDescriptor?,
     ) {
         lifecycle.withLock { stopLocked() }
+        tunBackend = backend
         DomesticDirect.ensure(appContext)
         val iranOn = NetworkGuardStore.get(appContext).snapshot().iranDirect
         DomesticDirect.applyEnabled(iranOn)
@@ -259,12 +263,11 @@ class PowConnectionCoordinator(
                 PowStatusStore.update(PowPhase.STARTING, 5, "Starting UAC PoW")
                 if (!proxyMode) {
                     PowTun2Socks.selectPrivateAddress()
-                    val powMtu = store.snapshot().tunMtu
-                    sessionMtu = if (powMtu > 0) {
-                        PowTunRelayConfig.mtuForChain(powMtu, underlyingLinkMtu(), PowTunRelayConfig.MAX_CUSTOM_MTU)
-                    } else {
-                        PowTunRelayConfig.mtuForChain(settings.tunMtu, underlyingLinkMtu())
-                    }
+                    sessionMtu = PowTunRelayConfig.mtuForChain(
+                        currentSettings.tunMtu,
+                        underlyingLinkMtu(),
+                        PowTunRelayConfig.MAX_CUSTOM_MTU,
+                    )
                 }
                 psiphonOnly = currentSettings.exitMode == PowEngineSettings.EXIT_PSIPHON
                 val outer = if (psiphonOnly) {
@@ -277,7 +280,11 @@ class PowConnectionCoordinator(
                     )
                 }
                 val chain = currentSettings.chainPsiphon
-                if (!chain && outer == null) {
+                val carriedH3 = currentSettings.linkRecipe == PowCoreConfig.RECIPE_MASQUE_H3_OVER_H2
+                val experimentalH3 = carriedH3 ||
+                    currentSettings.linkRecipe == PowCoreConfig.RECIPE_MASQUE_H3_EXPERIMENTAL
+                val h3Path = if (carriedH3) "encapsulated H3 over H2" else "native H3"
+                if (outer == null && (!chain || (experimentalH3 && !psiphonOnly))) {
                     error("WARP did not come up")
                 }
                 val outerName: String
@@ -316,7 +323,13 @@ class PowConnectionCoordinator(
                 try {
                     withTimeout(INNER_CONNECT_TIMEOUT_MS) { connected.await() }
                 } catch (timeout: TimeoutCancellationException) {
+                    if (experimentalH3 && !directPsiphon) {
+                        AppLogRepository.warning(LogSource.POW, "H3 diagnostic: D Psiphon timed out after H3 payload validation")
+                    }
                     error("Psiphon did not connect in time")
+                }
+                if (experimentalH3 && !directPsiphon) {
+                    AppLogRepository.info(LogSource.POW, "H3 diagnostic: D Psiphon connected through $h3Path")
                 }
                 ensureActive()
                 selectStartupDownloadPath()
@@ -329,11 +342,13 @@ class PowConnectionCoordinator(
                         error("Could not start whole-device routing")
                     }
                     if (!PowTun2Socks.start(
-                            appContext,
+                            service,
                             fd,
                             PowCoreConfig.TUN_SOCKS_PORT,
                             sessionMtu,
                             tunAddress,
+                            tunBackend,
+                            udp = false,
                         )
                     ) {
                         PowSocksConnectOnly.stop()
@@ -427,9 +442,10 @@ class PowConnectionCoordinator(
         val client = psiphon
         val fd = if (ownsTun) tunFd else null
         val reaper = Thread({
-            runCatching { PowTun2Socks.stop() }
-            runCatching { PowTun2Socks.awaitNativeExit(FORCE_NATIVE_EXIT_MS) }
-            runCatching { fd?.close() }
+            fd?.let { staleTun ->
+                runCatching { PowTun2Socks.stop(staleTun) }
+                runCatching { staleTun.close() }
+            }
             // Anything after the wait must not touch a session the user started meanwhile.
             if (forcedSession != sessionGeneration.get()) return@Thread
             runCatching { PowSocksConnectOnly.stop() }
@@ -770,6 +786,7 @@ class PowConnectionCoordinator(
 
     private fun stageLine(message: String): String? = when {
         message.startsWith("Key:") -> message.removePrefix("Key:").trim().let { "Key $it" }
+        message.startsWith("${PowCoreConfig.H3_NEW_METHOD_LABEL}: ") -> message
         message.startsWith("Clean HTTP/2 list:") -> message
         message.startsWith("Clean HTTP/2 list is empty. Starting") -> "Clean list empty. HTTP/2 scan is starting."
         message.startsWith("Trying saved clean address") -> message
@@ -816,11 +833,13 @@ class PowConnectionCoordinator(
                         if (line.startsWith("Scan ")) {
                             PowStatusStore.scan(line, line.substringAfterLast(' '))
                         } else {
+                            val h3Stage = line.startsWith("${PowCoreConfig.H3_NEW_METHOD_LABEL}: ")
                             val failed = line.startsWith("Every saved") ||
                                 line.startsWith("Tunnel did not") ||
                                 line.startsWith("UDP/1701 did not") ||
-                                line.startsWith("No usable MASQUE")
-                            PowStatusStore.note(line, failed)
+                                line.startsWith("No usable MASQUE") ||
+                                (h3Stage && line.endsWith("No usable IP found"))
+                            PowStatusStore.note(line, failed, outerStage = h3Stage)
                         }
                     }
                 }
@@ -874,14 +893,15 @@ class PowConnectionCoordinator(
             coroutineContext.ensureActive()
             if (stopRequested.get()) return null
             val label = PowCoreConfig.outerLabel(protocol)
-            val attemptScan = if (!retune && offset == 0 && protocol == "masque") {
+            val scansCarriedH3 = protocol == "masque" && plan.masqueTransport == PowCoreConfig.NATIVE_H3_OVER_H2
+            val attemptScan = if (!scansCarriedH3 && !retune && offset == 0 && protocol == "masque") {
                 PowCoreConfig.SCAN_THOROUGH
             } else {
                 scanMode
             }
-            val budget = if (forcedPeer != null) 12_000L else PowCoreConfig.outerBudgetMs(
+            val budget = if (forcedPeer != null && !scansCarriedH3) 12_000L else PowCoreConfig.outerBudgetMs(
                 protocol,
-                retune = retune,
+                retune = retune && !scansCarriedH3,
                 scanMode = attemptScan,
             )
             if (AetherNative.isRunning()) {
@@ -1072,7 +1092,7 @@ class PowConnectionCoordinator(
         } else {
             val fd = tunFd ?: error("VPN interface missing")
             PowStatusStore.update(PowPhase.BRIDGING, 90, "Routing device traffic through WARP")
-            if (!PowTun2Socks.start(appContext, fd, warpSocks, sessionMtu, tunAddress)) {
+            if (!PowTun2Socks.start(service, fd, warpSocks, sessionMtu, tunAddress, tunBackend, udp = true)) {
                 error("Could not start whole-device routing")
             }
             routing = true
@@ -1465,7 +1485,6 @@ class PowConnectionCoordinator(
             client?.close()
             psiphon = null
             PowTun2Socks.stop()
-            PowTun2Socks.awaitNativeExit()
             PowSocksConnectOnly.stop()
             stopOuterLeg()
             AetherNative.detach()

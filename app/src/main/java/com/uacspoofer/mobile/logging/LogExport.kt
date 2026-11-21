@@ -16,7 +16,7 @@ object LogExport {
 
     fun snapshot(context: Context): Snapshot {
         val entries = AppLogRepository.entries.value
-        val body = AppLogRepository.snapshotText()
+        val body = AppLogRepository.snapshotText(entries)
         val text = buildString {
             append(header(context, entries.size))
             append('\n')
@@ -38,6 +38,7 @@ object LogExport {
         return buildString {
             appendLine("===== UAC SNI Spoofer log =====")
             appendLine("App:      ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+            appendLine("Log format: 2")
             appendLine("Android:  ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("Device:   ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("ABI:      ${Build.SUPPORTED_ABIS.firstOrNull().orEmpty()}")

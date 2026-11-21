@@ -47,13 +47,19 @@ internal class ConnectPanelStore private constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val statusFlow = MutableStateFlow(read(KEY_STATUS))
     private val stepsFlow = MutableStateFlow(read(KEY_STEPS))
+    private val directStatusFlow = MutableStateFlow(read(KEY_DIRECT_STATUS, ConnectPanelMode.OPEN))
+    private val directStepsFlow = MutableStateFlow(read(KEY_DIRECT_STEPS, ConnectPanelMode.OPEN))
 
     val status: StateFlow<ConnectPanelMode> = statusFlow.asStateFlow()
     val steps: StateFlow<ConnectPanelMode> = stepsFlow.asStateFlow()
+    val directStatus: StateFlow<ConnectPanelMode> = directStatusFlow.asStateFlow()
+    val directSteps: StateFlow<ConnectPanelMode> = directStepsFlow.asStateFlow()
 
-    fun setStatus(mode: ConnectPanelMode) = write(KEY_STATUS, mode, statusFlow)
+    fun setStatus(mode: ConnectPanelMode, direct: Boolean = false) =
+        if (direct) write(KEY_DIRECT_STATUS, mode, directStatusFlow) else write(KEY_STATUS, mode, statusFlow)
 
-    fun setSteps(mode: ConnectPanelMode) = write(KEY_STEPS, mode, stepsFlow)
+    fun setSteps(mode: ConnectPanelMode, direct: Boolean = false) =
+        if (direct) write(KEY_DIRECT_STEPS, mode, directStepsFlow) else write(KEY_STEPS, mode, stepsFlow)
 
     private fun write(key: String, mode: ConnectPanelMode, flow: MutableStateFlow<ConnectPanelMode>) {
         if (flow.value == mode) return
@@ -61,15 +67,17 @@ internal class ConnectPanelStore private constructor(context: Context) {
         flow.value = mode
     }
 
-    private fun read(key: String): ConnectPanelMode {
-        val stored = prefs.getString(key, ConnectPanelMode.COLLAPSED.name)
-        return ConnectPanelMode.entries.firstOrNull { it.name == stored } ?: ConnectPanelMode.COLLAPSED
+    private fun read(key: String, default: ConnectPanelMode = ConnectPanelMode.COLLAPSED): ConnectPanelMode {
+        val stored = prefs.getString(key, default.name)
+        return ConnectPanelMode.entries.firstOrNull { it.name == stored } ?: default
     }
 
     companion object {
         const val PREFS = "uac_connect_panels"
         const val KEY_STATUS = "status"
         const val KEY_STEPS = "steps"
+        private const val KEY_DIRECT_STATUS = "direct_status"
+        private const val KEY_DIRECT_STEPS = "direct_steps"
 
         @Volatile
         private var instance: ConnectPanelStore? = null

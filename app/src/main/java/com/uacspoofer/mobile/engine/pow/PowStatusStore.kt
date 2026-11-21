@@ -101,10 +101,11 @@ object PowStatusStore {
         mutableStatus.value = current.copy(steps = steps.takeLast(24))
     }
 
-    fun note(text: String, failed: Boolean = false) {
+    fun note(text: String, failed: Boolean = false, outerStage: Boolean = false) {
         val clean = text.trim().take(180)
         if (clean.isEmpty()) return
         val current = mutableStatus.value
+        if (outerStage && current.phase != PowPhase.OUTER) return
         val steps = current.steps.toMutableList()
         val last = steps.lastOrNull()
         if (last != null && last.text == clean) return
@@ -112,7 +113,10 @@ object PowStatusStore {
             steps[steps.lastIndex] = last.copy(state = PowStepState.DONE)
         }
         steps += PowStep(clean, if (failed) PowStepState.FAILED else PowStepState.RUNNING)
-        mutableStatus.value = current.copy(steps = steps.takeLast(24))
+        mutableStatus.value = current.copy(
+            detail = if (outerStage) clean else current.detail,
+            steps = steps.takeLast(24),
+        )
     }
 
     private fun finish(state: PowStepState) {

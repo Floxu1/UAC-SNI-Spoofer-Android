@@ -977,6 +977,11 @@ fn service_udp(s: &mut NetStack) -> bool {
         };
 
         let to_app = s.udp_conns[&id].to_app.clone();
+        if to_app.is_closed() {
+            s.udp_conns.remove(&id);
+            s.sockets.remove(handle);
+            continue;
+        }
         let mut delivered = 0;
 
         while delivered < MAX_RECV_CHUNKS {

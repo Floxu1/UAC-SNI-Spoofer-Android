@@ -46,7 +46,7 @@ object AppLogRepository {
         synchronized(lock) { mutableEntries.value = emptyList() }
     }
 
-    fun snapshotText(): String = entries.value.joinToString(separator = "\n") { entry ->
+    fun snapshotText(snapshot: List<AppLogEntry> = entries.value): String = snapshot.joinToString(separator = "\n") { entry ->
         "${entry.timestamp}  ${entry.level.label.padEnd(5)}  ${entry.source.label.padEnd(7)}  ${entry.message}"
     }
 
@@ -67,6 +67,7 @@ object AppLogRepository {
         if (source == LogSource.POW && powLogcatMirror) mirrorToLogcat(level, message)
         if (source == LogSource.TOR && torLogcatMirror) mirrorToLogcat(level, message, TOR_LOGCAT_TAG)
         if (source == LogSource.ADAPTIVE && adaptLogcatMirror) mirrorToLogcat(level, message, ADAPT_LOGCAT_TAG)
+        if (source == LogSource.TUN && message.startsWith("[TUN]")) mirrorToLogcat(level, message, "UAC-TUN")
 
         val entry = AppLogEntry(
             id = sequence.incrementAndGet(),

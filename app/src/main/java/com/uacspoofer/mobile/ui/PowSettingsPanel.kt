@@ -105,6 +105,7 @@ import com.uacspoofer.mobile.engine.pow.PowStatusStore
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.ui.theme.orDefault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -122,8 +123,8 @@ internal val PowGap = 10.dp
 internal val PowHintSize = 12.sp
 internal val PowHintLine = 17.sp
 internal val PowBorder = Color.White.copy(alpha = 0.08f)
-internal val PowSheetColor = Color(0xFF101C29)
-internal val PowCardBrush = Brush.linearGradient(listOf(Color(0xE6142231), Color(0xD90B1724)))
+internal val PowSheetColor get() = UacColors.SurfaceOverride.orDefault(Color(0xFF101C29))
+internal val PowCardBrush get() = ToolCardBrush
 
 @Composable
 internal fun PowSettingsScreen(onBack: () -> Unit) {
@@ -245,16 +246,9 @@ private fun PowSettingsPanel() {
     )
     val recipes = listOf(
         PowCoreConfig.RECIPE_AUTO to homeText("Automatic", "خودکار"),
-        PowCoreConfig.RECIPE_WARP_V6 to homeLtr("WireGuard · IPv6"),
-        PowCoreConfig.RECIPE_WARP_ANY to homeLtr("WireGuard · IPv4 + IPv6"),
-        PowCoreConfig.RECIPE_WOW_V6 to homeLtr("WARP-in-WARP · IPv6"),
-        PowCoreConfig.RECIPE_WOW_ANY to homeLtr("WARP-in-WARP · IPv4 + IPv6"),
         PowCoreConfig.RECIPE_MASQUE_H2 to homeLtr("MASQUE · HTTP/2"),
-        PowCoreConfig.RECIPE_MASQUE_H2_SAVED to
-            homeText("MASQUE · HTTP/2 · saved only", "${homeLtr("MASQUE · HTTP/2")} · فقط ذخیره‌شده"),
         PowCoreConfig.RECIPE_MASQUE_H3 to homeLtr("MASQUE · HTTP/3"),
-        PowCoreConfig.RECIPE_MASQUE_H2_SPLIT to
-            homeText("MASQUE · HTTP/2 · split hello", "${homeLtr("MASQUE · HTTP/2")} · تکه‌تکه"),
+        PowCoreConfig.RECIPE_MASQUE_H3_OVER_H2 to homeLtr(PowCoreConfig.H3_NEW_METHOD_LABEL),
     ).map { (id, title) -> PowMenuChoice(id, title, recipeHint(id)) }
     val scans = listOf(
         PowMenuChoice(
@@ -386,6 +380,7 @@ private fun PowSettingsPanel() {
                     sheetTitle = homeText("Connection method", "روش اتصال"),
                     choices = recipes,
                     selectedId = settings.linkRecipe,
+                    unlistedTitle = homeText("Saved method", "روش ذخیره‌شده"),
                     accent = accent,
                     onSelect = { store.save(settings.copy(linkRecipe = it)) },
                 )
@@ -509,14 +504,13 @@ private fun PowAdvancedCard(
         PowMenuChoice("both", homeText("Both", "هر دو"), homeText("Tries both", "هر دو رو امتحان می‌کنه")),
     )
     val mtus = listOf(
-        PowMenuChoice(
-            PowEngineSettings.TUN_MTU_DEFAULT.toString(),
-            homeText("Default", "پیش‌فرض"),
-            homeText("The app's MTU, capped at 1280.", "MTU خود برنامه، حداکثر ۱۲۸۰."),
-        ),
         PowMenuChoice("1280", homeLtr("1280"), homeText("Safest on every network.", "امن‌ترین روی همه شبکه‌ها.")),
         PowMenuChoice("1350", homeLtr("1350"), homeText("Bigger packets, less overhead.", "بسته‌های بزرگ‌تر، سربار کمتر.")),
-        PowMenuChoice("1400", homeLtr("1400"), homeText("Largest; may break on some lines.", "بزرگ‌ترین؛ روی بعضی خطوط مشکل دارد.")),
+        PowMenuChoice(
+            PowEngineSettings.TUN_MTU_DEFAULT.toString(),
+            homeLtr(PowEngineSettings.TUN_MTU_DEFAULT.toString()),
+            homeText("Default tunnel MTU.", "MTU پیش‌فرض تونل."),
+        ),
     ).let { list ->
         val id = settings.tunMtu.toString()
         if (list.none { it.id == id }) {
@@ -790,6 +784,14 @@ private fun recipeHint(recipe: String): String = when (recipe) {
         "MASQUE over HTTP/3 and IPv4.",
         "MASQUE روی HTTP/3 و IPv4.",
     )
+    PowCoreConfig.RECIPE_MASQUE_H3_EXPERIMENTAL -> homeText(
+        "Requires native QUIC and verifies traffic before starting Psiphon.",
+        "به QUIC نیاز دارد و پیش از شروع Psiphon، عبور ترافیک را بررسی می‌کند.",
+    )
+    PowCoreConfig.RECIPE_MASQUE_H3_OVER_H2 -> homeText(
+        "A new MASQUE connection method for HTTP/3.",
+        "روش جدید MASQUE برای اتصال HTTP/3.",
+    )
     PowCoreConfig.RECIPE_MASQUE_H2_SPLIT -> homeText(
         "MASQUE over HTTP/2 with a split ClientHello.",
         "MASQUE روی HTTP/2 با ClientHello تکه‌تکه.",
@@ -901,13 +903,15 @@ internal fun PowSwitchRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                subtitle,
-                color = UacColors.TextSecondary,
-                fontSize = 11.5.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    subtitle,
+                    color = UacColors.TextSecondary,
+                    fontSize = 11.5.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         // The row handles the tap, so the switch skips its 48dp touch box.
         Switch(
@@ -933,9 +937,12 @@ internal fun PowPickerRow(
     onSelect: (String) -> Unit,
     tileTint: Color = accent,
     subtitle: String? = null,
+    unlistedTitle: String? = null,
 ) {
     var open by remember { mutableStateOf(false) }
-    val selected = choices.firstOrNull { it.id == selectedId } ?: choices.first()
+    val selected = choices.firstOrNull { it.id == selectedId }
+        ?: unlistedTitle?.let { PowMenuChoice(selectedId, it) }
+        ?: choices.first()
     Row(
         modifier = Modifier
             .fillMaxWidth()

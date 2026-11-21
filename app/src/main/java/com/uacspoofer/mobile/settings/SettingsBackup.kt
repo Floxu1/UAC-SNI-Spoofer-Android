@@ -1,5 +1,7 @@
 package com.uacspoofer.mobile.settings
 
+import com.uacspoofer.mobile.vpn.LanSharePolicy
+
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -13,6 +15,7 @@ import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.canChangeEngineMode
 import com.uacspoofer.mobile.engine.direct.DirectEngineSettings
 import com.uacspoofer.mobile.engine.direct.DirectEngineStore
+import com.uacspoofer.mobile.engine.direct.DirectScanMode
 import com.uacspoofer.mobile.engine.pow.PowAdaptiveObfuscation
 import com.uacspoofer.mobile.engine.pow.PowCoreConfig
 import com.uacspoofer.mobile.engine.pow.PowEngineSettings
@@ -178,6 +181,7 @@ object SettingsBackup {
         settings.putTyped(AUTO, "bool", guard.autoConnect)
         settings.putTyped(LAN, "bool", guard.lanShare)
         settings.putTyped(LAN_MODE, "string", guard.lanShareMode.id)
+        settings.putTyped(LAN_PORT, "int", guard.lanSharePort)
         settings.putTyped(DNS, "bool", guard.dnsSinkhole)
         settings.putTyped(WEBRTC, "bool", guard.webRtcBlock)
         settings.putTyped(QUIC, "bool", guard.quicBlock)
@@ -236,7 +240,7 @@ object SettingsBackup {
         val panelModes = ConnectPanelMode.entries.map { it.name }.toSet()
         val routingNow = AppRoutingPreferences.snapshot(app)
 
-        val theme = bag.choice(THEME, themeNow.name, AppTheme.NEON.name, AppTheme.entries.map { it.name }.toSet(), lower = false)
+        val theme = bag.choice(THEME, themeNow.name, AppTheme.CLASSIC.name, AppTheme.entries.map { it.name }.toSet(), lower = false)
         val language = bag.choice(LANGUAGE, languageNow.name, DrawerLanguage.PERSIAN.name, setOf("PERSIAN", "ENGLISH"), lower = false)
         val engine = bag.engine(ENGINE, engineNow)
         val guard = NetworkGuardSettings(
@@ -245,6 +249,7 @@ object SettingsBackup {
             lanShare = bag.bool(LAN, guardNow.lanShare),
             lanShareMode = LanShareMode.fromId(bag.choice(LAN_MODE, guardNow.lanShareMode.id,
                 LanShareMode.SOCKS5.id, LanShareMode.entries.map { it.id }.toSet())),
+            lanSharePort = bag.num(LAN_PORT, guardNow.lanSharePort, guardNow.lanSharePort, LanSharePolicy::isValidPort),
             dnsSinkhole = bag.bool(DNS, guardNow.dnsSinkhole),
             webRtcBlock = bag.bool(WEBRTC, guardNow.webRtcBlock),
             quicBlock = bag.bool(QUIC, guardNow.quicBlock),
@@ -335,9 +340,9 @@ object SettingsBackup {
     private fun defaults(): Planned {
         val sni = SniMakerController
         return Planned(
-            theme = AppTheme.NEON,
+            theme = AppTheme.CLASSIC,
             language = DrawerLanguage.PERSIAN,
-            engine = EngineMode.XRAY_CF,
+            engine = EngineMode.UAC_DIRECT,
             guard = NetworkGuardSettings(),
             domains = emptyList(),
             gps = false,
@@ -537,6 +542,8 @@ object SettingsBackup {
     }
 
     private class Bag(private val settings: JSONObject, private val tally: Tally) {
+        fun has(key: String): Boolean = settings.has(key)
+
         fun bool(key: String, current: Boolean): Boolean {
             if (!settings.has(key)) return current
             return when (val entry = read(settings, key)) {
@@ -888,9 +895,19 @@ object SettingsBackup {
             val normalized = raw.split(',', ' ', ';').map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
             cleaned.takeIf { normalized.isNotEmpty() && cleaned == normalized }
         } ?: fallback
+        val scanMode = if (bag.has("${p}scanMode") || !bag.has("${p}scanRangesByLatency")) {
+            DirectScanMode.fromStored(bag.choice(
+                "${p}scanMode", current.scanMode.id, d.scanMode.id, DirectScanMode.entries.map { it.id }.toSet(),
+            ))
+        } else {
+            val legacy = bag.bool("${p}scanRangesByLatency", current.scanMode == DirectScanMode.DEEP)
+            DirectScanMode.fromStored(null, legacy)
+        }
         return DirectEngineSettings(
-            googleFronting = bag.bool("${p}googleFronting", current.googleFronting),
-            echEnabled = bag.bool("${p}echEnabled", current.echEnabled),
+            wireGuardOverDirect = current.wireGuardOverDirect,
+            scanMode = scanMode,
+            autoSelectDns = bag.bool("${p}autoSelectDns", current.autoSelectDns),
+            exitCountryCode = bag.country("${p}exitCountryCode", current.exitCountryCode, PowRegions::normalize),
             fragmentEnabled = bag.bool("${p}fragmentEnabled", current.fragmentEnabled),
             variant = bag.choice("${p}variant", current.variant, d.variant, setOf(DirectEngineSettings.VARIANT_A, DirectEngineSettings.VARIANT_B), lower = false),
             helloLengths = lengths("${p}helloLengths", current.helloLengths, d.helloLengths),
@@ -1033,8 +1050,11 @@ object SettingsBackup {
 
     private fun putDirect(settings: JSONObject, value: DirectEngineSettings) {
         val p = DIRECT
-        settings.putTyped("${p}googleFronting", "bool", value.googleFronting)
-        settings.putTyped("${p}echEnabled", "bool", value.echEnabled)
+        settings.putTyped("${p}adaptiveClientHello", "bool", value.adaptiveClientHello)
+        settings.putTyped("${p}wireGuardOverDirect", "bool", value.wireGuardOverDirect)
+        settings.putTyped("${p}scanMode", "string", value.scanMode.id)
+        settings.putTyped("${p}autoSelectDns", "bool", value.autoSelectDns)
+        settings.putTyped("${p}exitCountryCode", "string", value.exitCountryCode)
         settings.putTyped("${p}fragmentEnabled", "bool", value.fragmentEnabled)
         settings.putTyped("${p}variant", "string", value.variant)
         settings.putTyped("${p}helloLengths", "string", value.helloLengths)
@@ -1097,6 +1117,7 @@ object SettingsBackup {
     private const val AUTO = "network_guard_v1/auto_connect"
     private const val LAN = "network_guard_v1/lan_share"
     private const val LAN_MODE = "network_guard_v1/lan_share_mode"
+    private const val LAN_PORT = "network_guard_v1/lan_share_port"
     private const val DNS = "network_guard_v1/dns_sinkhole"
     private const val WEBRTC = "network_guard_v1/webrtc_block"
     private const val QUIC = "network_guard_v1/quic_block_v2"
@@ -1115,7 +1136,7 @@ object SettingsBackup {
     private const val PANEL_STEPS = "uac_connect_panels/steps"
 
     private val KNOWN = setOf(
-        THEME, LANGUAGE, ENGINE, KILL, AUTO, LAN, LAN_MODE, DNS, WEBRTC, QUIC, IPV6, IRAN, DOMAINS, GPS,
+        THEME, LANGUAGE, ENGINE, KILL, AUTO, LAN, LAN_MODE, LAN_PORT, DNS, WEBRTC, QUIC, IPV6, IRAN, DOMAINS, GPS,
         PROFILES, SELECTED, ADAPTIVE, SNI_URL, SNI_WORKERS, SNI_TIMEOUT, AI, PANEL_STATUS, PANEL_STEPS,
         "${ADV}connectionMode", "${ADV}primaryAddress", "${ADV}primaryPort", "${ADV}primaryMaxSplit",
         "${ADV}irancellAddress", "${ADV}irancellPort", "${ADV}irancellMaxSplit",
@@ -1146,7 +1167,9 @@ object SettingsBackup {
         "${TOR}bridge_refresh", "${TOR}bridge_refresh_url", "${TOR}logcat_mirror",
         "${TOR}dual_guards", "${TOR}throughput_scoring", "${TOR}big_buffers", "${TOR}fast_relays",
         "${TOR}multi_circuit", "${TOR}slow_circuit_swap", "${TOR}tun_mtu",
-        "${DIRECT}googleFronting", "${DIRECT}echEnabled", "${DIRECT}fragmentEnabled",
+        "${DIRECT}adaptiveClientHello", "${DIRECT}wireGuardOverDirect", "${DIRECT}exitCountryCode",
+        "${DIRECT}scanMode", "${DIRECT}scanRangesByLatency", "${DIRECT}autoSelectDns",
+        "${DIRECT}fragmentEnabled",
         "${DIRECT}variant", "${DIRECT}helloLengths", "${DIRECT}helloDelays", "${DIRECT}helloMaxSplit",
         "${DIRECT}secondStageEnabled", "${DIRECT}secondLengths", "${DIRECT}secondDelays",
         "${DIRECT}secondMaxSplit", "${DIRECT}tcpFragmentEnabled", "${DIRECT}tcpLengths",

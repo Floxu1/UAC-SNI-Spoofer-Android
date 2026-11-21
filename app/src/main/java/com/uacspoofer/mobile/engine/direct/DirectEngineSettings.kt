@@ -1,15 +1,25 @@
 package com.uacspoofer.mobile.engine.direct
 
-/**
- * Engine 4 (UAC Direct): serverless. Layers (all local, no owned server / worker):
- * 1) Google MITM domain-fronting (SNI www.google.com) for Google/YouTube — needs user CA.
- * 2) Cloudflare ECH (outer SNI cloudflare-ech.com) for CF-hosted sites — needs user CA.
- * 3) Optional ClientHello fragment (off by default: MCI drops fragmented hellos).
- * 4) Direct path for Iranian / private destinations.
- */
+import com.uacspoofer.mobile.engine.pow.PowRegions
+
+enum class DirectScanMode(val id: String, internal val startupTimeoutMs: Long) {
+    TURBO("turbo", 75_000),
+    BALANCED("balanced", 90_000),
+    DEEP("thorough", 105_000);
+
+    companion object {
+        fun fromStored(id: String?, legacyRangeScan: Boolean = false): DirectScanMode =
+            entries.firstOrNull { it.id == id } ?: if (legacyRangeScan) DEEP else BALANCED
+    }
+}
+
+/** Engine 4 connects directly to the original destination and preserves end-to-end TLS. */
 data class DirectEngineSettings(
-    val googleFronting: Boolean = true,
-    val echEnabled: Boolean = true,
+    val adaptiveClientHello: Boolean = true,
+    val wireGuardOverDirect: Boolean = true,
+    val scanMode: DirectScanMode = DirectScanMode.BALANCED,
+    val autoSelectDns: Boolean = true,
+    val exitCountryCode: String = "",
     val fragmentEnabled: Boolean = false,
     val variant: String = VARIANT_A,
     val helloLengths: String = HELLO_LENGTHS_A,
@@ -31,8 +41,10 @@ data class DirectEngineSettings(
     val domesticDns: String = DEFAULT_DOMESTIC_DNS,
 ) {
     fun validated(): DirectEngineSettings = copy(
+        exitCountryCode = PowRegions.normalize(exitCountryCode),
         variant = if (variant == VARIANT_B) VARIANT_B else VARIANT_A,
-        helloLengths = cleanList(helloLengths, HELLO_LENGTHS_A),
+        helloLengths = cleanList(helloLengths, HELLO_LENGTHS_A)
+            .split(',').joinToString(",") { if (it.startsWith("0") && it.substringBefore('-').toInt() == 0) "1" else it },
         helloDelays = cleanList(helloDelays, "0"),
         helloMaxSplit = helloMaxSplit.coerceIn(0, 1000),
         secondLengths = cleanList(secondLengths, "114,1"),
@@ -42,7 +54,7 @@ data class DirectEngineSettings(
         tcpDelays = cleanList(tcpDelays, "1"),
         tcpMaxSplit = tcpMaxSplit.coerceIn(0, 1000),
         unfilteredDns = unfilteredDns.trim().takeIf {
-            it.startsWith("https://") || it.startsWith("h2c://") || it.startsWith("tcp://") || it.isIpLiteral()
+            it != LEGACY_UNFILTERED_DNS && (it.startsWith("https://") || it.startsWith("tcp://") || it.isIpLiteral())
         } ?: DEFAULT_UNFILTERED_DNS,
         domesticDns = domesticDns.trim().ifBlank { DEFAULT_DOMESTIC_DNS },
     )
@@ -56,16 +68,10 @@ data class DirectEngineSettings(
         const val VARIANT_A = "A"
         const val VARIANT_B = "B"
         const val HELLO_LENGTHS_A = "6,98,1"
-        const val HELLO_LENGTHS_B = "0,104,1"
-        /** DoH that MITM will front through Google/Microsoft SNI. */
-        const val DEFAULT_UNFILTERED_DNS = "h2c://1.1.1.1/dns-query"
+        const val HELLO_LENGTHS_B = "1,103,1"
+        private const val LEGACY_UNFILTERED_DNS = "https://cloudflare-dns.com/dns-query"
+        const val DEFAULT_UNFILTERED_DNS = "https://1.1.1.1/dns-query"
         const val DEFAULT_DOMESTIC_DNS = "localhost"
-        /**
-         * Cloudflare ECH config list (HTTPS RR of cloudflare-ech.com, public_name=cloudflare-ech.com).
-         * Hardcoded so ECH works without foreign DNS. Refresh periodically from a fronted DoH path.
-         */
-        const val CLOUDFLARE_ECH_CONFIG_LIST =
-            "AEX+DQBBfwAgACB2BqvhWR0vj3W6kSImwai9TTXubeU10aiaBaAZ27u6EAAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA="
         val DEFAULT = DirectEngineSettings()
 
         internal fun cleanList(raw: String, fallback: String): String {

@@ -140,4 +140,5 @@ private fun Char.isAsciiLetterOrDigit(): Boolean =
     this in 'A'..'Z' || this in 'a'..'z' || this in '0'..'9'
 
 private fun Char.isAsciiTechnicalChar(): Boolean =
-    isAsciiLetterOrDigit() || this in "/+_#@%&=\\|-()[]{}'\""
+    // Paired brackets must stay together in the surrounding paragraph's bidi run.
+    isAsciiLetterOrDigit() || this in "/+_#@%&=\\|-'\""

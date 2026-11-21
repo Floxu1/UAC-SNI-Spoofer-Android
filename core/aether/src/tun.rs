@@ -589,6 +589,7 @@ mod tests {
         assert!(tcp_checksum_valid(&pkt));
     }
 
+    #[cfg(unix)]
     mod exit_probe {
         use super::super::exitprobe::ExitProbe;
         use std::net::Ipv4Addr;

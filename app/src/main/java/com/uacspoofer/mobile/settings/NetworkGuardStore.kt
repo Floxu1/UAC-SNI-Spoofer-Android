@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.settings
 
 import android.content.Context
+import com.uacspoofer.mobile.vpn.LanSharePolicy
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +16,7 @@ data class NetworkGuardSettings(
     val ipv6Block: Boolean = true,
     val iranDirect: Boolean = true,
     val lanShareMode: LanShareMode = LanShareMode.SOCKS5,
+    val lanSharePort: Int = LanSharePolicy.PORT,
 )
 
 class NetworkGuardStore private constructor(context: Context) {
@@ -48,6 +50,11 @@ class NetworkGuardStore private constructor(context: Context) {
     @Synchronized
     fun setLanShareMode(mode: LanShareMode) {
         persist(mutableSettings.value.copy(lanShareMode = mode))
+    }
+
+    @Synchronized
+    fun setLanSharePort(port: Int) {
+        persist(mutableSettings.value.copy(lanSharePort = port))
     }
 
     @Synchronized
@@ -92,14 +99,18 @@ class NetworkGuardStore private constructor(context: Context) {
         ipv6Block = prefs.getBoolean(KEY_IPV6_BLOCK, true),
         iranDirect = prefs.getBoolean(KEY_IRAN_DIRECT, true),
         lanShareMode = LanShareMode.fromId(prefs.getString(KEY_LAN_MODE, null)),
+        lanSharePort = prefs.getInt(KEY_LAN_PORT, LanSharePolicy.PORT)
+            .takeIf(LanSharePolicy::isValidPort) ?: LanSharePolicy.PORT,
     )
 
     private fun persist(value: NetworkGuardSettings) {
+        require(LanSharePolicy.isValidPort(value.lanSharePort))
         prefs.edit()
             .putBoolean(KEY_KILL_SWITCH, value.killSwitch)
             .putBoolean(KEY_AUTO_CONNECT, value.autoConnect)
             .putBoolean(KEY_LAN_SHARE, value.lanShare)
             .putString(KEY_LAN_MODE, value.lanShareMode.id)
+            .putInt(KEY_LAN_PORT, value.lanSharePort)
             .putBoolean(KEY_DNS_SINKHOLE, value.dnsSinkhole)
             .putBoolean(KEY_WEBRTC_BLOCK, value.webRtcBlock)
             .putBoolean(KEY_QUIC_BLOCK, value.quicBlock)
@@ -115,6 +126,7 @@ class NetworkGuardStore private constructor(context: Context) {
         private const val KEY_AUTO_CONNECT = "auto_connect"
         private const val KEY_LAN_SHARE = "lan_share"
         private const val KEY_LAN_MODE = "lan_share_mode"
+        private const val KEY_LAN_PORT = "lan_share_port"
         private const val KEY_DNS_SINKHOLE = "dns_sinkhole"
         private const val KEY_WEBRTC_BLOCK = "webrtc_block"
         private const val KEY_QUIC_BLOCK = "quic_block_v2"

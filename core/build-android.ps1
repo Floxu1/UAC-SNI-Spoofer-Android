@@ -2,7 +2,9 @@
 param(
     [ValidateSet('arm64-v8a', 'armeabi-v7a', 'x86_64')]
     [string]$Abi = 'arm64-v8a',
-    [int]$Api = 24
+    [int]$Api = 24,
+    [ValidateSet('Pow', 'Direct')]
+    [string]$Core = 'Pow'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,7 +109,7 @@ $env:CLANG_PATH = (Join-Path $bin 'clang.exe').Replace('\', '/')
 
 $rustEnvSuffix = $targetTriple.ToUpper().Replace('-', '_')
 $rustTargetSuffix = $targetTriple.Replace('-', '_')
-Set-Item "Env:CARGO_TARGET_${rustEnvSuffix}_LINKER" (Join-Path $bin "$clangPrefix$Api-clang.cmd").Replace('\', '/')
+Set-Item "Env:CARGO_TARGET_${rustEnvSuffix}_LINKER" (Join-Path $bin 'clang.exe').Replace('\', '/')
 Set-Item "Env:CARGO_TARGET_${rustEnvSuffix}_AR" (Join-Path $bin 'llvm-ar.exe').Replace('\', '/')
 Set-Item "Env:AR_$rustTargetSuffix" (Get-Item "Env:CARGO_TARGET_${rustEnvSuffix}_AR").Value.Replace('\', '/')
 Set-Item "Env:CC_$rustTargetSuffix" (Join-Path $bin 'clang.exe').Replace('\', '/')
@@ -116,22 +118,28 @@ Set-Item "Env:CFLAGS_$rustTargetSuffix" "--target=$clangPrefix$Api"
 Set-Item "Env:CXXFLAGS_$rustTargetSuffix" "--target=$clangPrefix$Api"
 Set-Item "Env:BINDGEN_EXTRA_CLANG_ARGS_$rustTargetSuffix" "--target=$clangPrefix$Api --sysroot=$sysroot -I$sysroot/usr/include/$includeArch"
 
-$env:RUSTFLAGS = "$env:RUSTFLAGS -C link-arg=-Wl,-soname,libaether.so -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384".Trim()
+$env:RUSTFLAGS = "$env:RUSTFLAGS -C link-arg=--target=$clangPrefix$Api -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384".Trim()
 
 Push-Location $crate
 try {
-    cargo build --release --lib --target $targetTriple
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed for $Abi"
+    if ($Core -eq 'Direct') {
+        & cargo rustc --manifest-path ../direct/Cargo.toml --locked --release --lib --target $targetTriple -- '-C' 'link-arg=-Wl,-soname,libDirect.so'
+        $fileName = 'libDirect.so'
+    } else {
+        & cargo rustc --locked --release --lib --target $targetTriple -- '-C' 'link-arg=-Wl,-soname,libaether.so'
+        $fileName = 'libaether.so'
     }
-    $library = (Join-Path $target "$targetTriple/release/libaether.so").Replace('\', '/')
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed for $Core on $Abi"
+    }
+    $library = (Join-Path $target "$targetTriple/release/$fileName").Replace('\', '/')
     foreach ($destination in @(
         (Join-Path $root "core/android-libs/$Abi"),
         (Join-Path $root "app/src/main/jniLibs/$Abi")
     )) {
         $destPath = $destination.Replace('\', '/')
         New-Item -ItemType Directory -Path $destPath -Force | Out-Null
-        Copy-Item -LiteralPath $library -Destination (Join-Path $destPath 'libaether.so').Replace('\', '/') -Force
+        Copy-Item -LiteralPath $library -Destination (Join-Path $destPath $fileName).Replace('\', '/') -Force
     }
 }
 finally {

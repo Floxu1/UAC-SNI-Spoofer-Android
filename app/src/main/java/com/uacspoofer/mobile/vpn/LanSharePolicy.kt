@@ -6,6 +6,9 @@ import com.uacspoofer.mobile.settings.LanShareMode
 object LanSharePolicy {
     const val PORT = 18_080
     const val MAX_STREAMS = 24
+    const val PORT_UNAVAILABLE = "port unavailable"
+
+    fun isValidPort(port: Int): Boolean = port in 1..65535
 
     fun acceptClient(hostAddress: String?): Boolean {
         val ip = hostAddress?.substringBefore('%')?.trim().orEmpty()
@@ -16,7 +19,7 @@ object LanSharePolicy {
 
     fun endpoint(ip: String?, port: Int = PORT): String? {
         val host = ip?.trim().orEmpty()
-        if (host.isBlank() || port <= 0) return null
+        if (host.isBlank() || !isValidPort(port)) return null
         return "$host:$port"
     }
 }

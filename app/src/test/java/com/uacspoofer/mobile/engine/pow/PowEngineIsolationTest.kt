@@ -1,6 +1,7 @@
 package com.uacspoofer.mobile.engine.pow
 
 import com.uacspoofer.mobile.engine.EngineMode
+import com.uacspoofer.mobile.ui.PowStatusCopy
 import com.uacspoofer.mobile.vpn.ExitIpInfoRepository
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -9,6 +10,50 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PowEngineIsolationTest {
+    @Test
+    fun encapsulatedH3KeepsItsOwnTransportLabelAndSelection() {
+        val recipe = PowCoreConfig.RECIPE_MASQUE_H3_OVER_H2
+        val settings = PowEngineSettings(linkRecipe = recipe).validated()
+        val plan = PowCoreConfig.outerPlan(settings, mci = true)
+        assertEquals(recipe, settings.linkRecipe)
+        assertEquals(listOf("masque"), plan.protocols)
+        assertEquals("h3-over-h2", plan.masqueTransport)
+        assertEquals("h2", PowCoreConfig.outerPlan(PowEngineSettings.DEFAULT, mci = true).masqueTransport)
+    }
+
+    @Test
+    fun h3ScanStagesAppearInTheTimelineAndOuterConnectionHint() {
+        val stage = "H3 New Method: Testing tunnel traffic"
+        try {
+            PowStatusStore.update(PowPhase.OUTER, 20, "Connecting MASQUE")
+            PowStatusStore.note(stage, outerStage = true)
+            val scanning = PowStatusStore.status.value
+            assertEquals(stage, scanning.detail)
+            assertEquals(PowStep(stage, PowStepState.RUNNING), scanning.steps.last())
+            assertEquals("در حال آزمایش ترافیک تونل", PowStatusCopy.h3ScanStage(true, stage))
+            assertEquals("Testing tunnel traffic", PowStatusCopy.h3ScanStage(false, stage))
+
+            PowStatusStore.update(PowPhase.CONNECTED, 100, "UAC PoW ready")
+            val connected = PowStatusStore.status.value
+            PowStatusStore.note("H3 New Method: Scanning IP addresses", outerStage = true)
+            assertEquals(connected, PowStatusStore.status.value)
+        } finally {
+            PowStatusStore.reset()
+        }
+    }
+
+    @Test
+    fun experimentalH3IsAnExplicitMasqueOnlyRecipe() {
+        val recipe = PowCoreConfig.RECIPE_MASQUE_H3_EXPERIMENTAL
+        val settings = PowEngineSettings(linkRecipe = recipe).validated()
+        val plan = PowCoreConfig.outerPlan(settings, mci = true)
+        assertEquals(recipe, settings.linkRecipe)
+        assertEquals(listOf("masque"), PowCoreConfig.keyProtocols(recipe))
+        assertEquals(listOf("masque"), plan.protocols)
+        assertEquals("h3", plan.masqueTransport)
+        assertEquals("h2", PowCoreConfig.outerPlan(PowEngineSettings.DEFAULT, mci = true).masqueTransport)
+    }
+
     @Test
     fun powNeverSharesFlagsWithXrayOrTor() {
         val pow = EngineMode.UAC_POW
@@ -289,6 +334,21 @@ class PowStickyRouteTest {
 }
 
 class PowTunRelayConfigTest {
+    @Test
+    fun powUses1400ByDefaultAndKeepsExplicitMtu() {
+        assertEquals(1_400, PowEngineSettings.DEFAULT.tunMtu)
+        assertEquals(1_400, PowEngineSettings(tunMtu = 0).validated().tunMtu)
+        assertEquals(1_350, PowEngineSettings(tunMtu = 1_350).validated().tunMtu)
+        assertEquals(
+            1_400,
+            PowTunRelayConfig.mtuForChain(
+                PowEngineSettings.DEFAULT.tunMtu,
+                networkMtu = 1_500,
+                ceiling = PowTunRelayConfig.MAX_CUSTOM_MTU,
+            ),
+        )
+    }
+
     @Test
     fun chainMtuCapsAt1280AndFloorsAt1200() {
         assertEquals(1_280, PowTunRelayConfig.mtuForChain(1_500))

@@ -1,6 +1,8 @@
 package com.uacspoofer.mobile.engine.tor
 
-import android.content.Context
+import android.net.VpnService
+import com.uacspoofer.mobile.settings.TunBackend
+import com.uacspoofer.mobile.vpn.SocksTunRelay
 import android.os.ParcelFileDescriptor
 import com.uacspoofer.mobile.logging.AppLogRepository
 import com.uacspoofer.mobile.logging.LogSource
@@ -20,15 +22,15 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 
 class TorConnectionCoordinator(
-    context: Context,
+    private val service: VpnService,
     private val daemon: TorDaemon,
     private val engineStore: TorEngineStore,
     private val fingerprintResolver: NetworkFingerprintResolver,
 ) {
-    private val appContext = context.applicationContext
-    private val tunRelay = TorTunRelay(appContext)
+    private val appContext = service.applicationContext
+    private val tunRelay = SocksTunRelay()
     private val scoreStore = TorBridgeScoreStore(appContext)
-    @Volatile private var ownsTunRelay = false
+    @Volatile private var tunDescriptor: ParcelFileDescriptor? = null
     @Volatile private var lastBridges: List<WebTunnelBridge> = emptyList()
     @Volatile private var fragmentProxy: TorFragmentProxy? = null
     @Volatile private var sessionNetworkKey: String = ""
@@ -56,6 +58,7 @@ class TorConnectionCoordinator(
 
     suspend fun connect(
         settings: AdvancedSettingsData,
+        backend: TunBackend,
         establishTun: (AdvancedSettingsData) -> ParcelFileDescriptor?,
     ) {
         TorLiveFlow.reset()
@@ -110,24 +113,40 @@ class TorConnectionCoordinator(
         if (settings.connectionMode != CONNECTION_MODE_PROXY) {
             TorStatusStore.update(TorPhase.BRIDGING, 100, "Routing device traffic through Tor")
             TorLiveFlow.start(TorFlowStageId.TUN)
-            tunRelay.start(
-                yaml = TorTunRelayConfig.yaml(
-                    mtu = torSettings.effectiveMtu(settings.tunMtu),
-                    socksPort = torSettings.socksPort,
-                    tunIpv4 = settings.tunAddress,
-                    blockUdp = torSettings.blockUdp,
-                    bigBuffers = torSettings.bigBuffers,
-                ),
-                establishTun = { establishTun(settings) },
-            )
-            ownsTunRelay = true
+            val mtu = torSettings.effectiveMtu(settings.tunMtu)
+            val backendSettings = if (backend == TunBackend.ZEPTUN) {
+                settings.copy(tunMtu = mtu)
+            } else settings
+            val tun = checkNotNull(establishTun(backendSettings)) { "Android could not establish the VPN interface" }
+            tunDescriptor = tun
+            try {
+                tunRelay.start(
+                    service, backend, tun,
+                    SocksTunRelay.Config(
+                        torSettings.socksPort, mtu, udp = false, fakeDns = TorTunRelayConfig.MAP_DNS,
+                    ),
+                ) {
+                    "tor/hev.yml" to TorTunRelayConfig.yaml(
+                        mtu = mtu,
+                        socksPort = torSettings.socksPort,
+                        tunIpv4 = settings.tunAddress,
+                        blockUdp = torSettings.blockUdp,
+                        bigBuffers = torSettings.bigBuffers,
+                    )
+                }
+            } catch (error: Throwable) {
+                tunDescriptor = null
+                runCatching { tun.close() }
+                throw error
+            }
             TorLiveFlow.done(
                 TorFlowStageId.TUN,
-                "tun2socks",
+                backend.label,
                 listOf(
                     "MTU" to torSettings.effectiveMtu(settings.tunMtu).toString(),
                     "buffers" to if (torSettings.bigBuffers) "256 KB" else "64 KB",
-                    "UDP" to if (torSettings.blockUdp) "blocked (1 s)" else "open",
+                    "UDP" to if (backend == TunBackend.ZEPTUN) "DNS only (Tor SOCKS is TCP)" else
+                        if (torSettings.blockUdp) "blocked (1 s)" else "open",
                 ),
             )
         } else {
@@ -297,7 +316,7 @@ class TorConnectionCoordinator(
 
     /** True when TUN byte counters grew since the previous tick (user traffic is flowing). */
     private fun tunTrafficGrew(): Boolean {
-        if (!ownsTunRelay) return false
+        if (tunDescriptor == null) return false
         val stats = runCatching { tunRelay.stats() }.getOrNull() ?: return false
         val total = stats.txBytes + stats.rxBytes
         val prev = lastTunBytes
@@ -397,9 +416,10 @@ class TorConnectionCoordinator(
 
     fun stop() {
         DomesticSocksSplit.stop()
-        if (ownsTunRelay) {
+        tunDescriptor?.let { descriptor ->
             runCatching { tunRelay.stop() }
-            ownsTunRelay = false
+            tunDescriptor = null
+            runCatching { descriptor.close() }
         }
         daemon.stop()
         stopFragmentProxy()

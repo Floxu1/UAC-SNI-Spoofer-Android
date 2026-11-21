@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.direct.DirectStatusStore
 import com.uacspoofer.mobile.engine.pow.PowLiveExit
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.logging.AppLogRepository
@@ -93,6 +94,7 @@ internal fun ConnectionAwareFeatureCard(
     val exitInfoRepository = remember(context) { ExitIpInfoRepository.get(context) }
     val rawExitInfoState by exitInfoRepository.state.collectAsStateWithLifecycle()
     val powWarpOnly by PowLiveExit.warpOnlyState.collectAsStateWithLifecycle()
+    val directStatus by DirectStatusStore.status.collectAsStateWithLifecycle()
     val lookupId = ExitIpInfoRepository.lookupId(
         profile.id,
         torEngine = engineMode.isTor,
@@ -104,6 +106,7 @@ internal fun ConnectionAwareFeatureCard(
         },
         powEngine = engineMode.isPow,
         powWarpOnly = engineMode.isPow && powWarpOnly,
+        directModeKey = directStatus.exitLookupKey.takeIf { engineMode.isDirect },
     )
     val exitInfoState = if (rawExitInfoState.profileId == lookupId) {
         rawExitInfoState
@@ -115,8 +118,9 @@ internal fun ConnectionAwareFeatureCard(
             ?.let { CountryMetadata.resolve(it.countryCode, it.country) }
             ?.takeIf { it.isKnown }
     }
-    val displayedCountry = resolvedExitCountry
-        ?: if (engineMode.isTor || engineMode.isPow) CountryMetadata.UNKNOWN else profile.country
+    val directExit = directStatus.exitCountryCode.takeIf { engineMode.isDirect && it.isNotEmpty() }
+    val displayedCountry = directExit?.let { CountryMetadata.resolve(it, null) } ?: resolvedExitCountry
+        ?: if (engineMode.isXray) profile.country else CountryMetadata.UNKNOWN
     val errorCount = remember(entries) { entries.count { it.level == LogLevel.ERROR } }
     val scope = rememberCoroutineScope()
     var activeDialog by remember { mutableStateOf<HomeMetricDialog?>(null) }

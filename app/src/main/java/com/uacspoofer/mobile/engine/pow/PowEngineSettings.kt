@@ -56,11 +56,7 @@ data class PowEngineSettings(
             keyFetch = if (fetch in PowCoreConfig.KEY_FETCHES) fetch else PowCoreConfig.KEY_AUTO,
             h2Obfuscation = h2Obfuscation.trim().lowercase().let { if (it in H2_OBFS_CHOICES) it else H2_OBFS_UNCHANGED },
             exitMode = exitMode.trim().lowercase().let { if (it in EXIT_MODES) it else EXIT_CHAIN },
-            tunMtu = when {
-                tunMtu == TUN_MTU_DEFAULT -> TUN_MTU_DEFAULT
-                tunMtu in TUN_MTU_MIN..TUN_MTU_MAX -> tunMtu
-                else -> TUN_MTU_DEFAULT
-            },
+            tunMtu = tunMtu.takeIf { it in TUN_MTU_MIN..TUN_MTU_MAX } ?: TUN_MTU_DEFAULT,
             h2FragmentMode = h2FragmentMode.trim().lowercase().let { if (it in H2_FRAG_CHOICES) it else H2_FRAG_AUTO },
             h2Fingerprint = h2Fingerprint.trim().lowercase().let { if (it in H2_FP_CHOICES) it else H2_FP_DEFAULT },
             masqueIpVersion = masqueIpVersion.trim().lowercase().let { if (it in MASQUE_IP_CHOICES) it else MASQUE_IP_AUTO },
@@ -77,8 +73,7 @@ data class PowEngineSettings(
         val DEFAULT = PowEngineSettings()
         const val H2_OBFS_UNCHANGED = "unchanged"
         val H2_OBFS_CHOICES = setOf(H2_OBFS_UNCHANGED, "light", "off")
-        /** 0 = the app's own MTU (clamped to 1280 as before). */
-        const val TUN_MTU_DEFAULT = 0
+        const val TUN_MTU_DEFAULT = 1_400
         const val TUN_MTU_MIN = 1_000
         const val TUN_MTU_MAX = 1_500
         const val EXIT_CHAIN = "chain"
@@ -89,7 +84,7 @@ data class PowEngineSettings(
         const val H2_FRAG_ON = "on"
         const val H2_FRAG_OFF = "off"
         val H2_FRAG_CHOICES = setOf(H2_FRAG_AUTO, H2_FRAG_ON, H2_FRAG_OFF)
-        val TUN_MTU_CHOICES = setOf(TUN_MTU_DEFAULT, 1280, 1350, 1400)
+        val TUN_MTU_CHOICES = setOf(1280, 1350, TUN_MTU_DEFAULT)
         const val H2_FP_DEFAULT = "default"
         val H2_FP_CHOICES = listOf(H2_FP_DEFAULT, "chrome", "firefox", "safari", "android", "random")
         const val MASQUE_IP_AUTO = "auto"

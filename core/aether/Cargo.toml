@@ -6,6 +6,11 @@ rust-version = "1.88"
 license = "AGPL-3.0-only"
 autobins = false
 
+[features]
+default = ["pow"]
+pow = []
+direct-support = []
+
 [lib]
 crate-type = ["rlib", "cdylib"]
 

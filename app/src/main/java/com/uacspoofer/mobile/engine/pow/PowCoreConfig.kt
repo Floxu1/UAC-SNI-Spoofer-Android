@@ -13,6 +13,9 @@ object PowCoreConfig {
     const val OUTER_AUTO = "auto"
     const val DISCOVERY_CACHE = "cache"
     const val DISCOVERY_FRESH = "fresh"
+    internal const val NATIVE_H3_EXPERIMENTAL = "h3-experimental"
+    internal const val NATIVE_H3_OVER_H2 = "h3-over-h2"
+    internal const val H3_NEW_METHOD_LABEL = "H3 New Method"
     const val SCAN_TURBO = "turbo"
     const val SCAN_BALANCED = "balanced"
     const val SCAN_THOROUGH = "thorough"
@@ -87,7 +90,11 @@ object PowCoreConfig {
             "endpoint_discovery",
             if (settings.linkRecipe == RECIPE_MASQUE_H2_SAVED) "clean" else discovery,
         )
-        put("masque_transport", if (protocol == "masque") plan.masqueTransport else "h3")
+        put("masque_transport", when {
+            protocol != "masque" -> "h3"
+            settings.linkRecipe == RECIPE_MASQUE_H3_EXPERIMENTAL -> NATIVE_H3_EXPERIMENTAL
+            else -> plan.masqueTransport
+        })
         put("obfuscation_profile", obfuscationFor(settings, protocol, plan))
         put("retry_obfuscation_profiles", true)
         put("tls_curve_preset", "chrome")
@@ -194,6 +201,8 @@ object PowCoreConfig {
     const val RECIPE_WOW_ANY = "wow-any"
     const val RECIPE_MASQUE_H2 = "masque-h2"
     const val RECIPE_MASQUE_H3 = "masque-h3"
+    const val RECIPE_MASQUE_H3_EXPERIMENTAL = "masque-h3-experimental"
+    const val RECIPE_MASQUE_H3_OVER_H2 = "masque-h3-over-h2"
     const val RECIPE_MASQUE_H2_SPLIT = "masque-h2-split"
     const val RECIPE_MASQUE_H2_SAVED = "masque-h2-saved"
     val RECIPES = setOf(
@@ -204,6 +213,8 @@ object PowCoreConfig {
         RECIPE_WOW_ANY,
         RECIPE_MASQUE_H2,
         RECIPE_MASQUE_H3,
+        RECIPE_MASQUE_H3_EXPERIMENTAL,
+        RECIPE_MASQUE_H3_OVER_H2,
         RECIPE_MASQUE_H2_SPLIT,
         RECIPE_MASQUE_H2_SAVED,
     )
@@ -218,7 +229,8 @@ object PowCoreConfig {
 
     fun keyProtocols(recipe: String): List<String> = when (recipe) {
         RECIPE_WOW_V6, RECIPE_WOW_ANY -> listOf("wireguard", "gool")
-        RECIPE_MASQUE_H2, RECIPE_MASQUE_H3, RECIPE_MASQUE_H2_SPLIT, RECIPE_MASQUE_H2_SAVED -> listOf("masque")
+        RECIPE_MASQUE_H2, RECIPE_MASQUE_H3, RECIPE_MASQUE_H3_EXPERIMENTAL,
+        RECIPE_MASQUE_H2_SPLIT, RECIPE_MASQUE_H2_SAVED, RECIPE_MASQUE_H3_OVER_H2 -> listOf("masque")
         RECIPE_WARP_V6, RECIPE_WARP_ANY -> listOf("wireguard")
         else -> listOf("wireguard", "gool", "masque")
     }
@@ -258,6 +270,10 @@ object PowCoreConfig {
             RECIPE_WOW_ANY -> PowOuterPlan(listOf("gool"), "both", "h3", false, true, "WARP-in-WARP any IP")
             RECIPE_MASQUE_H2 -> PowOuterPlan(listOf("masque"), "both", "h2", false, true, "MASQUE HTTP/2")
             RECIPE_MASQUE_H3 -> PowOuterPlan(listOf("masque"), "v4", "h3", false, true, "MASQUE HTTP/3")
+            RECIPE_MASQUE_H3_EXPERIMENTAL ->
+                PowOuterPlan(listOf("masque"), "v4", "h3", false, true, "MASQUE HTTP/3 experimental")
+            RECIPE_MASQUE_H3_OVER_H2 ->
+                PowOuterPlan(listOf("masque"), "v4", NATIVE_H3_OVER_H2, false, true, H3_NEW_METHOD_LABEL)
             RECIPE_MASQUE_H2_SPLIT -> PowOuterPlan(listOf("masque"), "v4", "h2", true, true, "MASQUE HTTP/2 split hello")
             RECIPE_MASQUE_H2_SAVED -> PowOuterPlan(listOf("masque"), "both", "h2", false, true, "MASQUE HTTP/2 saved IPs")
             else -> if (mci) {

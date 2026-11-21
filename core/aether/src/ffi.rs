@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::{c_char, CStr, CString};
 use std::net::SocketAddr;
@@ -69,7 +70,7 @@ static PREPARE_NOTIFY: OnceLock<Notify> = OnceLock::new();
 /// `getaddrinfo` behind `lookup_host` on a filtered network); this caps it.
 const RUNTIME_SHUTDOWN_GRACE: Duration = Duration::from_millis(1_500);
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_set_event_callback(callback: Option<EventCallback>) {
     *EVENT_CALLBACK.write().unwrap() = callback;
 }
@@ -109,6 +110,8 @@ struct NativeStartOptions {
     wireguard_config_path: Option<String>,
     masque_config_path: Option<String>,
     forced_peer: Option<String>,
+    #[cfg(feature = "direct-support")]
+    direct_retry_skip_ip: Option<std::net::IpAddr>,
     scan_mode: String,
     ip_scan: String,
     obfuscation_profile: Option<String>,
@@ -171,6 +174,8 @@ impl Default for NativeStartOptions {
             wireguard_config_path: None,
             masque_config_path: None,
             forced_peer: None,
+            #[cfg(feature = "direct-support")]
+            direct_retry_skip_ip: None,
             scan_mode: "balanced".into(),
             ip_scan: "v4".into(),
             obfuscation_profile: None,
@@ -229,6 +234,10 @@ impl TryFrom<NativeStartOptions> for StartOptions {
             .forced_peer
             .map(|peer| parse_address("forced_peer", &peer))
             .transpose()?;
+        #[cfg(feature = "direct-support")]
+        {
+            options.direct_retry_skip_ip = value.direct_retry_skip_ip;
+        }
         options.scan_mode = ScanMode::parse(&value.scan_mode);
         options.ip_scan = IpScan::parse(&value.ip_scan);
         options.obfuscation_profile = value.obfuscation_profile;
@@ -331,7 +340,7 @@ fn persist_log_line(line: &str) {
         });
 }
 
-pub(crate) fn record_log(message: impl ToString) {
+pub fn record_log(message: impl ToString) {
     let text = message.to_string().replace('\0', " ");
     emit_event(Event::Log {
         message: text.clone(),
@@ -416,13 +425,13 @@ impl Drop for RunningGuard {
 /// Returns 0 when the tunnel exits normally, -1 for invalid input, -2 for a
 /// runtime/tunnel error, and -3 if a panic was contained at the FFI boundary.
 /// The Android caller must invoke this on a worker thread.
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub unsafe extern "C" fn aether_start_json(json: *const c_char) -> i32 {
     unsafe { aether_start_json_inner(json, None) }
 }
 
 /// Starts Aether in Android TUN mode. The caller retains ownership of `tun_fd`.
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub unsafe extern "C" fn aether_start_json_with_tun(json: *const c_char, tun_fd: i32) -> i32 {
     if tun_fd < 0 {
         set_last_error("TUN file descriptor is invalid");
@@ -432,6 +441,19 @@ pub unsafe extern "C" fn aether_start_json_with_tun(json: *const c_char, tun_fd:
 }
 
 unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i32 {
+    unsafe { run_session(json, tun_fd, "Aether", crate::start) }
+}
+
+/// The caller owns a valid NUL-terminated UTF-8 configuration until this call returns.
+pub unsafe fn run_session<F>(
+    json: *const c_char,
+    tun_fd: Option<i32>,
+    core_name: &str,
+    start: impl FnOnce(StartOptions) -> F,
+) -> i32
+where
+    F: std::future::Future<Output = crate::error::Result<()>>,
+{
     let result = catch_unwind(AssertUnwindSafe(|| {
         let mut options = match unsafe { options_from_json(json) } {
             Ok(options) => options,
@@ -446,7 +468,7 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            set_last_error("Aether tunnel already running");
+            set_last_error(format!("{core_name} tunnel already running"));
             return -2;
         }
         let _running = RunningGuard;
@@ -470,7 +492,7 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
 
         let code = runtime.block_on(async {
             tokio::select! {
-                result = crate::start(options) => match result {
+                result = start(options) => match result {
                     Ok(()) => 0,
                     Err(error) => {
                         set_last_error(error);
@@ -488,14 +510,14 @@ unsafe fn aether_start_json_inner(json: *const c_char, tun_fd: Option<i32>) -> i
     match result {
         Ok(code) => code,
         Err(_) => {
-            set_last_error("panic in Aether native core");
+            set_last_error(format!("panic in {core_name} native core"));
             -3
         }
     }
 }
 
 /// Loads or provisions account identity and stores JSON addresses in last_result.
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let options = match unsafe { options_from_json(json) } {
@@ -543,6 +565,8 @@ pub unsafe extern "C" fn aether_prepare_json(json: *const c_char) -> i32 {
                     "ipv6": ipv6,
                     "gateway_proxy": gateway_proxy,
                     "organization": organization,
+                    "h3_experimental": options.masque_transport == MasqueTransport::H3Experimental,
+                    "h3_over_h2": options.masque_transport == MasqueTransport::H3OverH2,
                 }));
                 0
             }
@@ -578,7 +602,7 @@ unsafe fn required_text(value: *const c_char, name: &str) -> Result<String, Stri
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub unsafe extern "C" fn aether_zt_request_email_code(
     team: *const c_char,
     email: *const c_char,
@@ -625,7 +649,7 @@ pub unsafe extern "C" fn aether_zt_request_email_code(
     })
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub unsafe extern "C" fn aether_zt_confirm_email_code(code: *const c_char) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
         let code = match unsafe { required_text(code, "code") } {
@@ -664,33 +688,40 @@ pub unsafe extern "C" fn aether_zt_confirm_email_code(code: *const c_char) -> i3
 }
 
 /// Returns the most recent native error. Copy it before another native call.
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_last_error() -> *const c_char {
     LAST_ERROR.lock().unwrap().as_ptr()
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_last_result() -> *const c_char {
     LAST_RESULT.lock().unwrap().as_ptr()
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_last_log() -> *const c_char {
-    LAST_LOG.lock().unwrap().as_ptr()
+    thread_local! {
+        static SNAPSHOT: RefCell<CString> = RefCell::new(CString::default());
+    }
+    // JNI copies the pointer after this call returns, while other threads can append logs.
+    SNAPSHOT.with(|snapshot| {
+        snapshot.replace(LAST_LOG.lock().unwrap().clone());
+        snapshot.borrow().as_ptr()
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_version() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_set_socket_protector(protector: Option<platform::SocketProtector>) {
     platform::set_socket_protector(protector);
 }
 
 /// Requests shutdown of the active native tunnel. Returns 1 if running, else 0.
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_stop() -> i32 {
     if !RUNNING.load(Ordering::Acquire) {
         return 0;
@@ -705,7 +736,7 @@ pub extern "C" fn aether_stop() -> i32 {
 /// `aether_stop` only reaches a RUNNING tunnel, and prepare runs before that,
 /// so a disconnect during key/cert work used to wait for it to finish.
 /// Returns 1 if a prepare was in flight, else 0.
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_cancel_prepare() -> i32 {
     if PREPARE_ACTIVE.load(Ordering::Acquire) == 0 {
         return 0;
@@ -715,24 +746,43 @@ pub extern "C" fn aether_cancel_prepare() -> i32 {
     1
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_is_running() -> i32 {
     i32::from(RUNNING.load(Ordering::Acquire))
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "pow", no_mangle)]
 pub extern "C" fn aether_is_ready() -> i32 {
     i32::from(READY.load(Ordering::Acquire))
 }
 
-pub(crate) fn mark_ready() {
+pub fn mark_ready() {
     READY.store(true, Ordering::Release);
     emit_status("connected", None);
+}
+
+pub(crate) fn clear_ready() -> bool {
+    READY.swap(false, Ordering::AcqRel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn experimental_h3_requires_explicit_selection() {
+        let experimental = serde_json::from_str::<NativeStartOptions>(
+            r#"{"config_path":"aether.toml","protocol":"masque","masque_transport":"h3-experimental"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            StartOptions::try_from(experimental).unwrap().masque_transport,
+            MasqueTransport::H3Experimental
+        );
+        assert_eq!(MasqueTransport::parse("h3"), MasqueTransport::H3);
+        assert_eq!(MasqueTransport::parse("h2"), MasqueTransport::H2);
+        assert_eq!(MasqueTransport::parse("h3-over-h2"), MasqueTransport::H3OverH2);
+    }
 
     #[test]
     fn parses_android_start_options() {

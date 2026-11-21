@@ -21,7 +21,6 @@ import com.uacspoofer.mobile.R
 import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.core.VpnController
-import com.uacspoofer.mobile.engine.Engine4UnlockStore
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeChangeResult
 import com.uacspoofer.mobile.engine.EngineModeStore
@@ -115,9 +114,6 @@ class UacHomeWidgetProvider : AppWidgetProvider() {
                 EngineModeStore.get(app).mode.collect { updateAll(app) }
             }
             scope.launch {
-                Engine4UnlockStore.get(app).unlocked.collect { updateAll(app) }
-            }
-            scope.launch {
                 TrafficStatsStore.stats.collect { pushMeters(app) }
             }
             scope.launch {
@@ -152,7 +148,6 @@ class UacHomeWidgetProvider : AppWidgetProvider() {
         private fun render(context: Context, manager: AppWidgetManager, widgetId: Int): RemoteViews {
             val state = ConnectionStateStore.state.value
             val engine = EngineModeStore.get(context).snapshot()
-            val directUnlocked = Engine4UnlockStore.get(context).snapshot()
             val face = face(state)
             val density = context.resources.displayMetrics.density.coerceAtMost(2f)
             val (widthPx, heightPx) = widgetPixels(context, manager, widgetId)
@@ -217,24 +212,19 @@ class UacHomeWidgetProvider : AppWidgetProvider() {
                 44f,
                 13,
             )
-            if (directUnlocked || engine.isDirect) {
-                views.setViewVisibility(R.id.widget_engine_direct, View.VISIBLE)
-                paintEngine(
-                    views,
-                    R.id.widget_engine_direct,
-                    R.id.widget_engine_direct_bg,
-                    R.id.widget_engine_direct_label,
-                    EngineMode.UAC_DIRECT,
-                    engine,
-                    face.accent,
-                    context,
-                    density,
-                    58f,
-                    14,
-                )
-            } else {
-                views.setViewVisibility(R.id.widget_engine_direct, View.GONE)
-            }
+            paintEngine(
+                views,
+                R.id.widget_engine_direct,
+                R.id.widget_engine_direct_bg,
+                R.id.widget_engine_direct_label,
+                EngineMode.UAC_DIRECT,
+                engine,
+                face.accent,
+                context,
+                density,
+                58f,
+                14,
+            )
             return views
         }
 

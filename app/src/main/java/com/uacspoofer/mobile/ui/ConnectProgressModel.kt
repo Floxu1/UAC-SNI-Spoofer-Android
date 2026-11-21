@@ -99,29 +99,30 @@ object ConnectProgressModel {
         MiniStep(stage.key, stage.english, stage.persian, state, snap.details[stage].orEmpty())
     }
 
-    private val directOrder = listOf(DirectPhase.BUILDING, DirectPhase.STARTING, DirectPhase.CHECKING)
-    private val directLabels = listOf(
-        Triple("config", "Config", "کانفیگ"),
-        Triple("core", "Core", "هسته"),
-        Triple("check", "Check", "بررسی"),
+    private val directStages = listOf(
+        DirectPhase.BUILDING to Triple("config", "Prepare", "آماده‌سازی"),
+        DirectPhase.SCANNING to Triple("scan", "Check IPs", "بررسی IP"),
+        DirectPhase.STARTING to Triple("core", "Connect", "اتصال"),
+        DirectPhase.CHECKING to Triple("check", "Verify", "تأیید"),
     )
 
     /** Engine 4 (UAC Direct) steps. */
-    fun directSteps(phase: DirectPhase, lastActive: DirectPhase): List<MiniStep> {
+    fun directSteps(phase: DirectPhase, lastActive: DirectPhase, scanIps: Boolean): List<MiniStep> {
+        val stages = directStages.filter { scanIps || it.first != DirectPhase.SCANNING }
         val failed = phase == DirectPhase.FAILED
         val pos = when (val p = if (failed) lastActive else phase) {
-            DirectPhase.CONNECTED -> directOrder.size
+            DirectPhase.CONNECTED -> stages.size
             DirectPhase.IDLE, DirectPhase.FAILED -> 0
-            else -> directOrder.indexOf(p).coerceAtLeast(0)
+            else -> stages.indexOfFirst { it.first == p }.coerceAtLeast(0)
         }
-        return directLabels.mapIndexed { i, (k, en, fa) ->
+        return stages.mapIndexed { i, (_, label) ->
             val st = when {
                 i < pos -> MiniStepState.DONE
                 i == pos && failed -> MiniStepState.FAILED
                 i == pos -> MiniStepState.RUNNING
                 else -> MiniStepState.PENDING
             }
-            MiniStep(k, en, fa, st)
+            MiniStep(label.first, label.second, label.third, st)
         }
     }
 

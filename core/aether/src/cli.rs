@@ -33,6 +33,9 @@ Obfuscation:
   --noize <profile>        obfuscation profile (off, light/firewall, balanced, gfw/aggressive, ...)
 
 MASQUE transport:
+  --h3-experimental        require native H3 and validate the live tunnel's IP traffic
+  --h3-over-h2 <ip:port>   H2 carrier peer for encapsulated H3 (requires --peer)
+  --carrier-config <path>  optional separate WARP enrollment for the H2 carrier
   --h2, --http2            use HTTP/2 (TCP) instead of HTTP/3 (QUIC)
   --h2-peer <ip:port>      override the peer used for the HTTP/2 transport
   --ech <auto|base64>      enable Encrypted Client Hello
@@ -125,6 +128,9 @@ pub fn parse_args(args: Vec<String>) -> crate::error::Result<()> {
         }
 
         match arg {
+            "--h3-experimental" => set("AETHER_H3_EXPERIMENTAL", "1"),
+            "--h3-over-h2" => set("AETHER_H3_OVER_H2", next_value!()),
+            "--carrier-config" => set("AETHER_H3_CARRIER_CONFIG", next_value!()),
             "-v" | "--version" => {
                 println!("aether {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);

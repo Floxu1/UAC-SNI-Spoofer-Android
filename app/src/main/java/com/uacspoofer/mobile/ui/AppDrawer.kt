@@ -41,6 +41,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ListAlt
+import androidx.compose.material.icons.outlined.BatteryChargingFull
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
@@ -55,7 +56,8 @@ import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SupportAgent
 import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.ui.res.painterResource
+import com.uacspoofer.mobile.R
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -73,6 +75,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +84,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.ui.theme.UacThemeState
 import com.uacspoofer.mobile.update.AppUpdateManager
 import kotlinx.coroutines.delay
 
@@ -91,6 +95,7 @@ internal enum class DrawerDestination {
     ROUTE_SPEED_TEST,
     LIVE_LOGS,
     APP_BYPASS,
+    BATTERY,
     SETTINGS,
     ADVANCED_SETTINGS,
     POW_SETTINGS,
@@ -110,10 +115,10 @@ private data class DrawerItem(
     val icon: ImageVector,
 )
 
-private val DrawerBlue = Color(0xFF299EFF)
-private val DrawerText = Color(0xFFE7EEF8)
-private val DrawerMuted = Color(0xFF98A9BF)
-private val DrawerDivider = Color(0x263E5874)
+private val DrawerBlue get() = if (UacThemeState.isNeon) UacColors.DisconnectedBlue else Color(0xFF299EFF)
+private val DrawerText get() = if (UacThemeState.isNeon) UacColors.TextPrimary else Color(0xFFE7EEF8)
+private val DrawerMuted get() = if (UacThemeState.isNeon) UacColors.TextSecondary else Color(0xFF98A9BF)
+private val DrawerDivider get() = if (UacThemeState.isNeon) UacColors.Divider else Color(0x263E5874)
 
 internal fun DrawerDestination.visibleFor(mode: EngineMode): Boolean = when (this) {
     DrawerDestination.SNI_MAKER,
@@ -138,6 +143,7 @@ private fun drawerItemsFor(mode: EngineMode): List<DrawerItem> = buildList {
     }
     add(DrawerItem(DrawerDestination.LIVE_LOGS, "Logs", Icons.AutoMirrored.Outlined.ListAlt))
     add(DrawerItem(DrawerDestination.APP_BYPASS, "App Bypass", Icons.Outlined.Block))
+    add(DrawerItem(DrawerDestination.BATTERY, "Battery Management", Icons.Outlined.BatteryChargingFull))
     add(DrawerItem(DrawerDestination.SETTINGS, "General settings", Icons.Outlined.Settings))
     when {
         mode.isPow -> add(DrawerItem(DrawerDestination.POW_SETTINGS, "PoW settings", Icons.Outlined.Tune))
@@ -245,7 +251,9 @@ internal fun AppDrawer(
             .clip(panelShape)
             .background(
                 Brush.verticalGradient(
-                    colors = if (com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon) {
+                    colors = if (UacColors.DrawerSurface.isSpecified) {
+                        listOf(UacColors.DrawerSurface, UacColors.DrawerSurface)
+                    } else if (UacThemeState.isNeon) {
                         listOf(
                             com.uacspoofer.mobile.ui.theme.UacColors.BackgroundTop,
                             com.uacspoofer.mobile.ui.theme.UacColors.BackgroundMiddle,
@@ -369,9 +377,9 @@ private fun DrawerHeader(compact: Boolean, engineMode: EngineMode) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Icon(
-            imageVector = Icons.Outlined.VerifiedUser,
+            painter = painterResource(R.drawable.ic_uac_drawer_shield),
             contentDescription = null,
-            tint = DrawerBlue,
+            tint = engineMode.identityAccent(),
             modifier = Modifier.size(if (compact) 28.dp else 38.dp),
         )
         Spacer(Modifier.height(if (compact) 4.dp else 9.dp))
@@ -456,7 +464,7 @@ private fun DrawerNavItem(
             Icon(
                 imageVector = item.icon,
                 contentDescription = null,
-                tint = if (selected) Color(0xFFAAD7FF) else Color(0xFF95A9C4),
+                tint = if (selected) DrawerBlue else DrawerMuted,
                 modifier = Modifier.size(if (compact) 18.dp else 22.dp),
             )
             Spacer(Modifier.width(if (compact) 11.dp else 14.dp))
@@ -470,6 +478,7 @@ private fun DrawerNavItem(
                         DrawerDestination.ROUTE_SPEED_TEST -> "تست سرعت مسیر"
                         DrawerDestination.LIVE_LOGS -> "لاگ‌ها"
                         DrawerDestination.APP_BYPASS -> "عبور انتخابی برنامه‌ها"
+                        DrawerDestination.BATTERY -> "مدیریت مصرف باتری"
                         DrawerDestination.SETTINGS -> "تنظیمات کلی"
                         DrawerDestination.ADVANCED_SETTINGS -> "تنظیمات Xray"
                         DrawerDestination.POW_SETTINGS -> "تنظیمات PoW"
@@ -478,7 +487,7 @@ private fun DrawerNavItem(
                         DrawerDestination.SUPPORT -> "پشتیبانی"
                     },
                 ),
-                color = if (selected) DrawerText else Color(0xFFC2CEE0),
+                color = if (selected) DrawerText else DrawerMuted,
                 fontSize = if (compact) 12.5.sp else 14.sp,
                 fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                 fontFamily = homeLocalizedFont(),
