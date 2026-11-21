@@ -18,6 +18,11 @@ val signingProperties = Properties().apply {
 val releaseSigningAvailable = signingPropertiesFile.isFile &&
     signingProperties.getProperty("storeFile").orEmpty().isNotBlank()
 
+val gpsMockTest = providers.gradleProperty("uacGpsMockTest").orNull == "true"
+if (gpsMockTest) {
+    layout.buildDirectory.set(rootProject.layout.buildDirectory.dir("gps-mock-test/app"))
+}
+
 android {
     namespace = "com.uacspoofer.mobile"
     compileSdk = 35
@@ -28,10 +33,11 @@ android {
         applicationId = "com.uacspoofer.mobile"
         minSdk = 24
         targetSdk = 35
-        versionCode = 588
-        versionName = "2.1.2"
+        versionCode = 590
+        versionName = "2.1.4"
 
         buildConfigField("boolean", "TV_MODE", "false")
+        buildConfigField("boolean", "GPS_MOCK_TEST", "false")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -56,6 +62,9 @@ android {
 
     buildTypes {
         debug {
+            if (gpsMockTest) {
+                buildConfigField("boolean", "GPS_MOCK_TEST", "true")
+            }
             if (releaseSigningAvailable) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -92,6 +101,9 @@ android {
     }
 
     sourceSets.getByName("debug").java.srcDir("src/renderBenchmark/java")
+    if (gpsMockTest) {
+        sourceSets.getByName("debug").manifest.srcFile("src/gpsMockTest/AndroidManifest.xml")
+    }
     sourceSets.getByName("benchmark") {
         java.srcDirs("src/renderBenchmark/java", "src/release/java")
         manifest.srcFile("src/debug/AndroidManifest.xml")
@@ -143,14 +155,16 @@ android.applicationVariants.configureEach {
     outputs.configureEach {
         val apkOutput = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
         val abi = apkOutput.getFilter("ABI") ?: "universal"
-        if (buildType.name == "release") {
+        if (gpsMockTest && buildType.name == "debug") {
+            apkOutput.outputFileName = "UAC-${version}-gps-mock-test-${abi}.apk"
+        } else if (buildType.name == "release") {
             apkOutput.outputFileName = "UAC-${version}-${abi}.apk"
         }
     }
 }
 
 tasks.register("signReleaseWithRotation") {
-    val apkDir = layout.buildDirectory.dir("outputs/apk/release")
+    val apkDir = layout.buildDirectory.dir(if (gpsMockTest) "outputs/apk/debug" else "outputs/apk/release")
     val apksignerJar = android.sdkDirectory.resolve("build-tools/${android.buildToolsVersion}/lib/apksigner.jar")
     val lineage = rootProject.file("signing/rotation-lineage")
     val newSigningFile = rootProject.file("signing/new-signing.properties")
@@ -160,8 +174,9 @@ tasks.register("signReleaseWithRotation") {
         val rotated = Properties().apply { newSigningFile.inputStream().use { load(it) } }
         val oldStore = signingPropertiesFile.parentFile.resolve(signingProperties.getProperty("storeFile"))
         val newStore = newSigningFile.parentFile.resolve(rotated.getProperty("storeFile"))
+        val version = checkNotNull(android.defaultConfig.versionName)
         val apks = apkDir.get().asFile.listFiles { file ->
-            file.isFile && file.name.startsWith("UAC-") && file.extension.equals("apk", ignoreCase = true)
+            file.isFile && file.name.startsWith("UAC-$version-") && file.extension.equals("apk", ignoreCase = true)
         }.orEmpty()
         check(apks.isNotEmpty()) { "No release APKs to rotate in ${apkDir.get().asFile}" }
         apks.forEach { apk ->
@@ -190,7 +205,7 @@ tasks.register("signReleaseWithRotation") {
     }
 }
 
-tasks.matching { it.name == "packageRelease" }.configureEach {
+tasks.matching { it.name == if (gpsMockTest) "packageDebug" else "packageRelease" }.configureEach {
     finalizedBy("signReleaseWithRotation")
 }
 
@@ -224,12 +239,7 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
     doLast {
         val dir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
         val version = checkNotNull(android.defaultConfig.versionName)
-        val universal = dir.listFiles()
-            ?.filter { it.extension.equals("apk", ignoreCase = true) }
-            ?.firstOrNull { it.name.contains("universal", ignoreCase = true) }
-        if (universal != null) {
-            universal.copyTo(dir.resolve("app-release.apk"), overwrite = true)
-        }
+        dir.resolve("UAC-$version-universal.apk").copyTo(dir.resolve("app-release.apk"), overwrite = true)
         dir.resolve("WHICH-APK.txt").writeText(
             """
             UAC SNI Spoofer $version
@@ -326,25 +336,62 @@ dependencies {
     testImplementation("org.json:json:20240303")
 }
 
-listOf("arm64-v8a", "armeabi-v7a", "x86_64").forEach { abi ->
-    val output = file("src/main/jniLibs/$abi/libaether.so")
-    if (output.isFile) return@forEach
-    val taskName = "buildUacPowCore${abi.split('-').joinToString("") { it.replaceFirstChar(Char::uppercase) }}"
-    tasks.register<Exec>(taskName) {
-        group = "build"
-        description = "Build UAC PoW WARP core for $abi"
-        val buildScript = rootProject.file("core/build-android.ps1")
-        commandLine(
-            "powershell.exe",
-            "-ExecutionPolicy", "Bypass",
-            "-File", buildScript.absolutePath,
-            "-Abi", abi,
-        )
-        environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
-        inputs.dir(rootProject.file("core/aether/src"))
-        inputs.file(rootProject.file("core/aether/Cargo.toml"))
-        inputs.file(buildScript)
-        outputs.file(output)
+val nativeCoreAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val coreLibraries = mapOf("Pow" to "libaether.so", "Direct" to "libDirect.so")
+val nativeNoticeAssets = layout.buildDirectory.dir("generated/nativeCoreNotices/assets")
+val copyNativeCoreNotices = tasks.register<Sync>("copyNativeCoreNotices") {
+    from(rootProject.file("THIRD_PARTY_NOTICES.md"))
+    from(rootProject.file("core/direct/LICENSE")) { rename { "AGPL-3.0.txt" } }
+    from(rootProject.file("core/aether/TRADEMARK.md")) { rename { "AETHER-TRADEMARK.md" } }
+    into(nativeNoticeAssets.map { it.dir("licenses") })
+}
+android.sourceSets.getByName("main").assets.srcDir(nativeNoticeAssets)
+tasks.named("preBuild").configure { dependsOn(copyNativeCoreNotices) }
+
+for ((core, library) in coreLibraries) {
+    for (abi in nativeCoreAbis) {
+        val output = file("src/main/jniLibs/$abi/$library")
+        if (output.isFile) continue
+        val suffix = abi.split('-').joinToString("") { it.replaceFirstChar(Char::uppercase) }
+        val task = tasks.register<Exec>("buildUac${core}Core$suffix") {
+            group = "build"
+            description = "Build the UAC $core native core for $abi"
+            val windows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+            val script = rootProject.file(if (windows) "core/build-android.ps1" else "core/build-android.sh")
+            val command = if (windows) {
+                listOf("powershell.exe", "-ExecutionPolicy", "Bypass", "-File", script.absolutePath)
+            } else {
+                listOf("bash", script.absolutePath)
+            }
+            commandLine(command + listOf("-Abi", abi, "-Core", core))
+            environment("ANDROID_HOME", android.sdkDirectory.absolutePath)
+            inputs.dir(rootProject.file("core/aether/src"))
+            inputs.files(rootProject.file("core/aether/Cargo.toml"), rootProject.file("core/aether/Cargo.lock"), script)
+            if (core == "Direct") {
+                inputs.dir(rootProject.file("core/direct/src"))
+                inputs.files(rootProject.file("core/direct/Cargo.toml"), rootProject.file("core/direct/Cargo.lock"))
+            }
+            outputs.file(output)
+        }
+        tasks.named("preBuild").configure { dependsOn(task) }
     }
-    tasks.named("preBuild").configure { dependsOn(taskName) }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    doLast {
+        for ((core, library) in coreLibraries) {
+            for (abi in nativeCoreAbis) {
+                val binary = file("src/main/jniLibs/$abi/$library")
+                val contents = if (binary.isFile) binary.readText(Charsets.ISO_8859_1) else ""
+                val correctCore = if (core == "Direct") {
+                    contents.contains("direct_start") && contents.contains("Direct IP sweep ") && !contents.contains("aether_start_json")
+                } else {
+                    contents.contains("aether_start_json") && !contents.contains("Direct IP sweep ")
+                }
+                check(correctCore) {
+                    "Rebuild $library for $abi with core/build-android.ps1 -Abi $abi -Core $core."
+                }
+            }
+        }
+    }
 }

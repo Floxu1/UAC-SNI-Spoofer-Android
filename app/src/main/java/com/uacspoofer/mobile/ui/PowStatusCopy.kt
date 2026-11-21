@@ -1,8 +1,24 @@
 package com.uacspoofer.mobile.ui
 
+import com.uacspoofer.mobile.engine.pow.PowCoreConfig
 import com.uacspoofer.mobile.engine.pow.PowPhase
 
 internal object PowStatusCopy {
+    fun h3ScanStage(persian: Boolean, text: String): String? {
+        val stage = text.removePrefix("${PowCoreConfig.H3_NEW_METHOD_LABEL}: ")
+        if (stage == text) return null
+        if (!persian) return stage
+        return when {
+            stage == "Scanning IP addresses" -> "در حال جست‌وجوی آی‌پی"
+            stage == "Testing tunnel traffic" -> "در حال آزمایش ترافیک تونل"
+            stage == "Comparing responsive IPs" -> "در حال مقایسهٔ آی‌پی‌های پاسخ‌گو"
+            stage.startsWith("Selected IP ") ->
+                "آی‌پی انتخاب شد ${homeLtr(stage.removePrefix("Selected IP "))}"
+            stage == "No usable IP found" -> "آی‌پی قابل استفاده پیدا نشد"
+            else -> null
+        }
+    }
+
     fun connectingHint(
         persian: Boolean,
         percent: Int,
@@ -11,6 +27,7 @@ internal object PowStatusCopy {
         showRouteProgress: Boolean,
     ): String {
         val trimmed = detail.trim()
+        h3ScanStage(persian, trimmed)?.let { return it }
         if (persian) return persianDetail(trimmed, phase, percent, showRouteProgress)
         if (trimmed.isNotEmpty()) return trimmed
         return when (phase) {

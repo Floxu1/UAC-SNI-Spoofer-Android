@@ -89,6 +89,7 @@ import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.core.VpnController
 import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.pow.PowEngineStore
+import com.uacspoofer.mobile.engine.direct.DirectEngineStore
 import com.uacspoofer.mobile.engine.pow.PowRegions
 import com.uacspoofer.mobile.engine.tor.TorEngineStore
 import com.uacspoofer.mobile.engine.tor.TorExitCountry
@@ -99,13 +100,14 @@ import com.uacspoofer.mobile.profiles.ProfileCountryRepository
 import com.uacspoofer.mobile.profiles.ProfileEndpoint
 import com.uacspoofer.mobile.profiles.ProxyProfile
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
-import com.uacspoofer.mobile.ui.debug.NeonHomeTuner
+import com.uacspoofer.mobile.settings.BatterySettingsStore
 import com.uacspoofer.mobile.ui.theme.AppTheme
 import com.uacspoofer.mobile.ui.theme.styleTokens
 import com.uacspoofer.mobile.ui.theme.UacColors
 import com.uacspoofer.mobile.ui.theme.UacSniSpooferTheme
 import com.uacspoofer.mobile.ui.theme.colorsFor
 import com.uacspoofer.mobile.ui.theme.neonDp
+import com.uacspoofer.mobile.ui.theme.orDefault
 import com.uacspoofer.mobile.update.AppRelease
 import com.uacspoofer.mobile.update.AppUpdateManager
 import com.uacspoofer.mobile.update.UpdateCheckResult
@@ -130,6 +132,8 @@ fun MainScreen(
     val profileLatencyCache = remember(context) { ProfileLatencyCache(context) }
     val countryRepository = remember(context) { ProfileCountryRepository.get(context) }
     val advancedSettings = remember(context) { AdvancedSettingsStore(context) }
+    val batteryStore = remember(context) { BatterySettingsStore.get(context) }
+    val batterySettings by batteryStore.settings.collectAsStateWithLifecycle()
     val engineModeStore = remember(context) { EngineModeStore.get(context) }
     val engineMode by engineModeStore.mode.collectAsStateWithLifecycle()
     val torEngineStore = remember(context) { TorEngineStore.get(context) }
@@ -140,6 +144,8 @@ fun MainScreen(
     val routeSpeedTestController = remember(context.applicationContext) { RouteSpeedTestController.get(context) }
     val updateManager = remember(context.applicationContext) { AppUpdateManager(context.applicationContext) }
     var selectedDestination by rememberSaveable { mutableStateOf(DrawerDestination.HOME) }
+    var themeEditorEnabled by remember { mutableStateOf(false) }
+    var openThemeEditor by remember { mutableStateOf(false) }
     // Where Back from PoW settings returns: Settings when opened from there, else the dashboard.
     var powSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
     var torSettingsBack by rememberSaveable { mutableStateOf(DrawerDestination.SETTINGS) }
@@ -161,6 +167,7 @@ fun MainScreen(
     var homeConfigsVisible by remember { mutableStateOf(false) }
     var homeTorCountriesVisible by remember { mutableStateOf(false) }
     var homePowCountriesVisible by remember { mutableStateOf(false) }
+    var directOptionsUnlocked by rememberSaveable { mutableStateOf(false) }
     var homeConfigsLibrary by remember { mutableStateOf(profileStore.snapshot()) }
     var homeConfigLatencies by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
@@ -352,7 +359,7 @@ fun MainScreen(
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = true,
-        scrimColor = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.66f),
+        scrimColor = Color.Black.copy(alpha = 0.66f * UacColors.DrawerSurface.orDefault(Color.Black).alpha),
         drawerContent = {
             AppDrawer(
                 selectedDestination = selectedDestination,
@@ -417,8 +424,14 @@ fun MainScreen(
                 )
                 DrawerDestination.LIVE_LOGS -> LiveLogsScreen(onMenuClick = openDrawer)
                 DrawerDestination.APP_BYPASS -> AppBypassScreen(onMenuClick = openDrawer)
+                DrawerDestination.BATTERY -> BatteryManagementScreen(engineMode, onMenuClick = openDrawer)
                 DrawerDestination.SETTINGS -> SettingsScreen(
                     onMenuClick = openDrawer,
+                    themeEditorEnabled = themeEditorEnabled,
+                    onEditTheme = {
+                        themeEditorEnabled = true
+                        openThemeEditor = true
+                    },
                     onAdvancedSettingsClick = {
                         xraySettingsBack = DrawerDestination.SETTINGS
                         selectedDestination = DrawerDestination.ADVANCED_SETTINGS
@@ -447,6 +460,8 @@ fun MainScreen(
                 )
                 DrawerDestination.DIRECT_SETTINGS -> DirectSettingsScreen(
                     onBack = { selectedDestination = directSettingsBack },
+                    unlocked = directOptionsUnlocked,
+                    onUnlock = { directOptionsUnlocked = true },
                 )
                 DrawerDestination.SUPPORT -> SupportScreen(
                     onMenuClick = openDrawer,
@@ -457,7 +472,7 @@ fun MainScreen(
                 else -> HomeScreenContent(
                         state = state,
                         profile = if (homeCountry.isKnown) homeProfile.copy(country = homeCountry) else homeProfile,
-                        motionEnabled = homeMotionEnabled,
+                        motionEnabled = homeMotionEnabled && !batterySettings.staticHomeEffects,
                         onPrimaryAction = when (state) {
                             ConnectionState.CONNECTED -> onDisconnect
                             ConnectionState.CONNECTING -> onDisconnect
@@ -466,13 +481,13 @@ fun MainScreen(
                             ConnectionState.ERROR -> onConnect
                         },
                         onMenuClick = openDrawer,
+                        showProfileSelector = !engineMode.isDirect || directOptionsUnlocked,
                         onConfigClick = {
                             when {
                                 engineMode.isTor -> homeTorCountriesVisible = true
                                 engineMode.isPow -> homePowCountriesVisible = true
                                 engineMode.isDirect -> {
-                                    directSettingsBack = DrawerDestination.HOME
-                                    selectedDestination = DrawerDestination.DIRECT_SETTINGS
+                                    if (directOptionsUnlocked) homePowCountriesVisible = true
                                 }
                                 else -> {
                                     val latestLibrary = profileStore.snapshot()
@@ -505,8 +520,15 @@ fun MainScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(WindowInsets.safeDrawing.asPaddingValues())
-                        .padding(top = 58.dp, start = 16.dp, end = 16.dp)
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 58.dp)
                         .zIndex(30f),
+                    directDetailsModifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(WindowInsets.safeDrawing.asPaddingValues())
+                        .padding(horizontal = 18.dp)
+                        .padding(bottom = 10.dp)
+                        .zIndex(29f),
                 )
             }
             TorLiveFlowDialog(
@@ -581,35 +603,52 @@ fun MainScreen(
                 },
                 onDismissRequest = { homeTorCountriesVisible = false },
             )
+            val directStore = remember(context) { DirectEngineStore.get(context) }
+            val directSettings by directStore.settings.collectAsStateWithLifecycle()
+            val directStatus by com.uacspoofer.mobile.engine.direct.DirectStatusStore.status.collectAsStateWithLifecycle()
+            val directExitActive = directStatus.usingWireGuard &&
+                directStatus.exitCountryCode.equals(directSettings.exitCountryCode, ignoreCase = true)
             HomePowCountryDialog(
-                visible = homePowCountriesVisible && engineMode.isPow,
-                selectedCode = powSettings.exitCountryCode,
-                connected = state == ConnectionState.CONNECTED,
+                visible = homePowCountriesVisible && (engineMode.isPow || (engineMode.isDirect && directOptionsUnlocked)),
+                selectedCode = if (engineMode.isDirect) directSettings.exitCountryCode else powSettings.exitCountryCode,
+                connected = state == ConnectionState.CONNECTED && (!engineMode.isDirect || directExitActive),
                 onSelect = { code ->
-                    val next = powEngineStore.snapshot().copy(exitCountryCode = code)
-                    val changed = next.exitCountryCode != powSettings.exitCountryCode
-                    if (changed) {
-                        powEngineStore.save(next)
-                        if (
-                            state == ConnectionState.CONNECTED ||
-                            state == ConnectionState.CONNECTING
-                        ) {
+                    if (engineMode.isDirect) {
+                        VpnController.selectDirectExit(context, code)
+                    } else {
+                        val next = powEngineStore.snapshot().copy(exitCountryCode = code)
+                        if (next.exitCountryCode != powSettings.exitCountryCode) {
+                            powEngineStore.save(next)
                             VpnController.applyPowExit(context)
                         }
                     }
                     homePowCountriesVisible = false
                 },
-                onManage = {
-                    homePowCountriesVisible = false
-                    selectedDestination = DrawerDestination.CONFIGS
+                onManage = if (engineMode.isDirect) null else {
+                    {
+                        homePowCountriesVisible = false
+                        selectedDestination = DrawerDestination.CONFIGS
+                    }
                 },
                 onDismissRequest = { homePowCountriesVisible = false },
+                direct = engineMode.isDirect,
             )
             if (updateDialogVisible) {
                 AppUpdateDialog(
                     state = updateState,
                     onUpdate = beginUpdate,
                     onDismiss = { updateDialogVisible = false },
+                )
+            }
+            if (themeEditorEnabled) {
+                NeonHomeTuner(
+                    onHome = selectedDestination == DrawerDestination.HOME,
+                    openRequested = openThemeEditor,
+                    onRequestHandled = { openThemeEditor = false },
+                    onDisable = {
+                        openThemeEditor = false
+                        themeEditorEnabled = false
+                    },
                 )
             }
             DoubleBackPrompt(
@@ -716,6 +755,7 @@ private fun HomeScreenContent(
     motionEnabled: Boolean = true,
     onPrimaryAction: () -> Unit,
     onMenuClick: () -> Unit,
+    showProfileSelector: Boolean = true,
     onConfigClick: () -> Unit = {},
 ) {
     val stateColors = colorsFor(state)
@@ -894,13 +934,15 @@ private fun HomeScreenContent(
                                 }
                                 Spacer(Modifier.height(if (tight) 4.dp else if (compact) 7.dp else 11.dp))
                                 ConnectionStatus(state = state, accent = stateColors.accent)
-                                Spacer(Modifier.height(if (tight) 2.dp else if (compact) 5.dp else 7.dp))
-                                SelectedProfileRow(
-                                    profile = profile,
-                                    onClick = onConfigClick,
-                                    maxWidth = selectorMaxWidth,
-                                    modifier = Modifier.onGloballyPositioned { countryLayout = it },
-                                )
+                                if (showProfileSelector) {
+                                    Spacer(Modifier.height(if (tight) 2.dp else if (compact) 5.dp else 7.dp))
+                                    SelectedProfileRow(
+                                        profile = profile,
+                                        onClick = onConfigClick,
+                                        maxWidth = selectorMaxWidth,
+                                        modifier = Modifier.onGloballyPositioned { countryLayout = it },
+                                    )
+                                }
                             }
                             Spacer(Modifier.height(if (compact) 6.dp else 9.dp))
                             TrafficStatsRow(
@@ -987,11 +1029,6 @@ private fun HomeScreenContent(
                 },
             )
         }
-        if (com.uacspoofer.mobile.ui.theme.UacThemeState.theme == AppTheme.NEON ||
-            com.uacspoofer.mobile.ui.theme.UacThemeState.theme == AppTheme.SOLARIS
-        ) {
-            NeonHomeTuner()
-        }
     }
     }
 }
@@ -1010,6 +1047,8 @@ private fun SelectedProfileRow(
     val torSettings by torStore.settings.collectAsStateWithLifecycle()
     val powStore = remember(context) { PowEngineStore.get(context) }
     val powSettings by powStore.settings.collectAsStateWithLifecycle()
+    val directStore = remember(context) { DirectEngineStore.get(context) }
+    val directSettings by directStore.settings.collectAsStateWithLifecycle()
     val isPersian = LocalHomePersian.current
     val neonRow = styleTokens()
     val nameLocale = if (isPersian) Locale("fa") else Locale.ENGLISH
@@ -1024,13 +1063,17 @@ private fun SelectedProfileRow(
         } else {
             PowRegions.name(powSettings.exitCountryCode, nameLocale)
         }
-        engineMode.isDirect -> homeText("Direct · no server", "مستقیم · بدون سرور")
+        engineMode.isDirect -> when {
+            !directSettings.wireGuardOverDirect -> homeText("Direct", "مستقیم")
+            directSettings.exitCountryCode.isEmpty() -> homeText("Automatic", "خودکار")
+            else -> PowRegions.name(directSettings.exitCountryCode, nameLocale)
+        }
         else -> profile.name
     }
     val selectionKey = when {
         engineMode.isTor -> "tor:${torSettings.exitCountryCode}"
         engineMode.isPow -> "pow:${powSettings.exitCountryCode}"
-        engineMode.isDirect -> "direct"
+        engineMode.isDirect -> "direct:${directSettings.wireGuardOverDirect}:${directSettings.exitCountryCode}"
         else -> profile.id
     }
     val interactionSource = remember { MutableInteractionSource() }

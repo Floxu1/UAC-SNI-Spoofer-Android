@@ -22,7 +22,7 @@
 ## Table of contents
 
 - [Overview](#overview)
-- [What's new in 2.1.2](#whats-new-in-212)
+- [What's new in 2.1.4](#whats-new-in-214)
 - [Engine 1 — Xray](#engine-1--xray)
 - [Engine 2 — Tor](#engine-2--tor)
 - [Engine 3 — UAC PoW](#engine-3--uac-pow)
@@ -37,7 +37,7 @@
 
 ## Overview
 
-UAC SNI Spoofer is an open-source Android client built on `VpnService` and a native `TUN` bridge (`hev-socks5-tunnel`). It ships three independent engines. Only one runs at a time, and switching engines while connected disconnects cleanly first.
+UAC SNI Spoofer is an open-source Android client built on `VpnService` and native TUN processing. Under **General Settings → TUN Engine**, Xray, Tor, and UAC PoW can use the stable setting or experimental Zeptun. A selection takes effect on the next VPN connection. The stable setting keeps HEV for Tor and PoW and uses Xray's built-in TUN for Xray.
 
 | | Engine 1 — `Xray` | Engine 2 — `Tor` | Engine 3 — `UAC PoW` |
 |---|---|---|---|
@@ -47,7 +47,7 @@ UAC SNI Spoofer is an open-source Android client built on `VpnService` and a nat
 
 The UI is fully Persian / English (RTL / LTR), built with `Jetpack Compose` + `Material 3`.
 
-## What's new in 2.1.2
+## What's new in 2.1.4
 
 See the [latest release notes](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/latest) for the full list of changes.
 
@@ -106,11 +106,11 @@ Download from **[Releases](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/rel
 
 | File | Use it for |
 |---|---|
-| `UAC-2.1.2-arm64-v8a.apk` | **Almost every phone** (recommended) |
-| `UAC-2.1.2-armeabi-v7a.apk` | Old 32-bit phones |
-| `UAC-2.1.2-x86_64.apk` | Emulators on PC (e.g. LDPlayer) |
-| `UAC-2.1.2-x86.apk` | Old 32-bit emulators |
-| `UAC-2.1.2-universal.apk` | Any device (larger file) |
+| `UAC-2.1.4-arm64-v8a.apk` | **Almost every phone** (recommended) |
+| `UAC-2.1.4-armeabi-v7a.apk` | Old 32-bit phones |
+| `UAC-2.1.4-x86_64.apk` | Emulators on PC (e.g. LDPlayer) |
+| `UAC-2.1.4-x86.apk` | Old 32-bit emulators |
+| `UAC-2.1.4-universal.apk` | Any device (larger file) |
 
 ## Quick start
 
@@ -138,7 +138,7 @@ cd UAC-SNI-Spoofer-Android
 # -> app\build\outputs\apk\release\UAC-<version>-<abi>.apk
 ```
 
-A release build needs `signing.properties` (see `signing.properties.example`). `preBuild` builds the Rust `libaether.so` for every ABI.
+A release build needs `signing.properties` (see `signing.properties.example`). `preBuild` builds missing native cores for the supported Android ABIs. Engine 3 uses `libaether.so` and Engine 4 uses [`libDirect.so`](core/direct/README.md).
 
 ## FAQ
 

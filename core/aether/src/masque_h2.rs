@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use boring::pkey::PKey;
@@ -24,6 +25,60 @@ const CHROME_GROUPS: &str = "P-256:X25519:P-384";
 static H2_FALLBACK: AtomicBool = AtomicBool::new(false);
 static H2_PREFERRED: AtomicBool = AtomicBool::new(false);
 static H2_EXTENDED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum CarrierStartupStage {
+    CertificatePrecheck,
+    TlsSetup,
+    TcpConnect,
+    TlsHandshake,
+    Http2Handshake,
+    MasqueConnectIp,
+    MasqueDataValidation,
+    WireGuardRelay,
+    WireGuardValidation,
+    Ready,
+}
+
+#[derive(Default)]
+pub struct CarrierStartupTrace {
+    stage: AtomicU8,
+    http_status: AtomicU16,
+}
+
+impl CarrierStartupTrace {
+    pub fn advance(&self, stage: CarrierStartupStage) {
+        // Both TLS variants can run at once. A later poll must never move the trace backwards.
+        self.stage.fetch_max(stage as u8, Ordering::Relaxed);
+    }
+
+    pub fn stage(&self) -> &'static str {
+        use CarrierStartupStage::*;
+        match self.stage.load(Ordering::Relaxed) {
+            x if x == CertificatePrecheck as u8 => "certificate_precheck",
+            x if x == TlsSetup as u8 => "tls_setup",
+            x if x == TcpConnect as u8 => "tcp_connect",
+            x if x == TlsHandshake as u8 => "tls_handshake",
+            x if x == Http2Handshake as u8 => "http2_handshake",
+            x if x == MasqueConnectIp as u8 => "masque_connect_ip",
+            x if x == MasqueDataValidation as u8 => "masque_data_validation",
+            x if x == WireGuardRelay as u8 => "wireguard_relay",
+            x if x == WireGuardValidation as u8 => "wireguard_validation",
+            _ => "ready",
+        }
+    }
+
+    pub fn http_status(&self) -> u16 {
+        self.http_status.load(Ordering::Relaxed)
+    }
+}
+
+fn advance_startup(trace: Option<&CarrierStartupTrace>, stage: CarrierStartupStage) {
+    if let Some(trace) = trace {
+        trace.advance(stage);
+    }
+}
 
 // ---- TLS ClientHello fingerprint for MASQUE over HTTP/2 -----------------
 //
@@ -326,7 +381,7 @@ fn h2_keepalive_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-async fn connect_tcp(peer: SocketAddr) -> Result<TcpStream> {
+pub async fn connect_tcp(peer: SocketAddr) -> Result<TcpStream> {
     let socket = if peer.is_ipv4() {
         TcpSocket::new_v4()
     } else {
@@ -579,13 +634,14 @@ pub fn connect_request_for_test(cfg: &H2TunnelConfig) -> Result<http::Request<()
 /// both, and do not require ECH.
 async fn connect_tls(
     cfg: &H2TunnelConfig,
+    trace: Option<&CarrierStartupTrace>,
 ) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
     let fragmented = FragmentConfig::from_env();
     if !fragmented.enabled {
-        return connect_tls_once(cfg, FragmentConfig::disabled()).await;
+        return connect_tls_once(cfg, FragmentConfig::disabled(), trace).await;
     }
-    let plain = connect_tls_once(cfg, FragmentConfig::disabled());
-    let split = connect_tls_once(cfg, fragmented);
+    let plain = connect_tls_once(cfg, FragmentConfig::disabled(), trace);
+    let split = connect_tls_once(cfg, fragmented, trace);
     tokio::pin!(plain);
     tokio::pin!(split);
     let mut plain_err: Option<AetherError> = None;
@@ -612,11 +668,15 @@ async fn connect_tls(
 async fn connect_tls_once(
     cfg: &H2TunnelConfig,
     fragment: FragmentConfig,
+    trace: Option<&CarrierStartupTrace>,
 ) -> Result<tokio_boring::SslStream<FragmentingStream<TcpStream>>> {
+    advance_startup(trace, CarrierStartupStage::TlsSetup);
     let tls_config = build_tls(cfg)?;
+    advance_startup(trace, CarrierStartupStage::TcpConnect);
     let tcp = connect_tcp(cfg.peer).await?;
     let _ = tcp.set_nodelay(socket_tuning());
     let stream = FragmentingStream::new(tcp, fragment);
+    advance_startup(trace, CarrierStartupStage::TlsHandshake);
     match tokio::time::timeout(
         Duration::from_secs(8),
         tokio_boring::connect(tls_config, &cfg.sni, stream),
@@ -672,7 +732,7 @@ async fn verify_h2_shape(
     let data_check = data_check_enabled();
 
     let attempt = async {
-        let tls = connect_tls(cfg).await?;
+        let tls = connect_tls(cfg, None).await?;
         let builder = h2_builder();
         let (h2, connection) = builder.handshake(tls)
             .await
@@ -787,6 +847,17 @@ pub async fn run(
     addr_tx: Option<mpsc::Sender<AssignedAddr>>,
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
+    run_with_readiness(cfg, internals, addr_tx, ready_tx, true, None).await
+}
+
+pub(crate) async fn run_with_readiness(
+    cfg: H2TunnelConfig,
+    internals: Internals,
+    addr_tx: Option<mpsc::Sender<AssignedAddr>>,
+    ready_tx: Option<oneshot::Sender<()>>,
+    publish_ready: bool,
+    trace: Option<&CarrierStartupTrace>,
+) -> Result<()> {
     let (outbound_rx, inbound_tx, mut ctrl_rx) = internals.into_parts();
     let quiet = cfg.quiet;
     let data_check = data_check_enabled();
@@ -796,7 +867,7 @@ pub async fn run(
     let mut validate_successes: u32 = 0;
 
     log_or_debug(quiet, format!("[h2] connecting tcp to {}", cfg.peer));
-    let tls = connect_tls(&cfg).await?;
+    let tls = connect_tls(&cfg, trace).await?;
     log_or_debug(
         quiet,
         format!(
@@ -805,6 +876,7 @@ pub async fn run(
         ),
     );
 
+    advance_startup(trace, CarrierStartupStage::Http2Handshake);
     let builder = h2_builder();
     let (h2, mut connection) = builder.handshake(tls)
         .await
@@ -826,6 +898,7 @@ pub async fn run(
         .await
         .map_err(|e| AetherError::Masque(format!("h2 ready: {e}")))?;
 
+    advance_startup(trace, CarrierStartupStage::MasqueConnectIp);
     let req = build_connect_request(&cfg)?;
 
     let (resp_fut, mut send_stream) = h2
@@ -840,6 +913,9 @@ pub async fn run(
         .await
         .map_err(|e| AetherError::Masque(format!("await response: {e}")))?;
     let status = response.status();
+    if let Some(trace) = trace {
+        trace.http_status.store(status.as_u16(), Ordering::Relaxed);
+    }
     log_or_debug(
         quiet,
         format!("[h2] connect-ip status: {}", status.as_u16()),
@@ -850,6 +926,7 @@ pub async fn run(
             status.as_u16()
         )));
     }
+    advance_startup(trace, CarrierStartupStage::MasqueDataValidation);
     let recv_body = response.into_body();
 
     let mut validate_deadline: Option<Instant> = None;
@@ -865,7 +942,9 @@ pub async fn run(
         );
     } else if !ready_fired {
         ready_fired = true;
-        crate::ffi::mark_ready();
+        if publish_ready {
+            crate::ffi::mark_ready();
+        }
         if let Some(tx) = ready_tx.take() {
             let _ = tx.send(());
         }
@@ -886,8 +965,10 @@ pub async fn run(
     // the upload was window-limited, so an upload stalled the download.
     let (send_cmd_tx, send_cmd_rx) = mpsc::channel::<SendCmd>(SEND_CMD_QUEUE);
     let (sender_done_tx, mut sender_done) = oneshot::channel::<Result<()>>();
+    let send_stats = (!publish_ready).then(|| Arc::new(CarrierSendStats::default()));
+    let sender_stats = send_stats.clone();
     let sender_handle = tokio::spawn(async move {
-        let result = sender_loop(send_stream, outbound_rx, send_cmd_rx).await;
+        let result = sender_loop(send_stream, outbound_rx, send_cmd_rx, sender_stats.as_deref()).await;
         let _ = sender_done_tx.send(result);
     });
     let _sender_guard = AbortOnDrop(sender_handle);
@@ -915,6 +996,9 @@ pub async fn run(
         let _ = receiver_done_tx.send(result);
     });
     let _receiver_guard = AbortOnDrop(receiver_handle);
+    let mut stats_interval = tokio::time::interval(Duration::from_secs(5));
+    stats_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut reported_bytes = 0;
 
     loop {
         if data_check && !ready_fired {
@@ -950,6 +1034,22 @@ pub async fn run(
         // Not `biased`: every arm gets a fair turn, so a steady stream of
         // outbound packets (or ACKs) can no longer starve the receive arm.
         tokio::select! {
+            _ = stats_interval.tick(), if !publish_ready => {
+                let stats = send_stats.as_ref().expect("carrier counter");
+                let bytes = stats.bytes.load(Ordering::Relaxed);
+                let received = receive_stats.released_bytes.load(Ordering::Relaxed);
+                let transferred = bytes.saturating_add(received);
+                if transferred.saturating_sub(reported_bytes) >= 64 * 1024 {
+                    reported_bytes = transferred;
+                    crate::app::h3_diagnostic(format!(
+                        "{} carrier H2 tx_bytes={} writes={} capacity_waits={} capacity_wait_ms={} rx_bytes={} rx_queue_waits={}",
+                        cfg.peer, bytes, stats.writes.load(Ordering::Relaxed),
+                        stats.waits.load(Ordering::Relaxed), stats.wait_micros.load(Ordering::Relaxed) / 1000,
+                        received, receive_stats.queue_waits.load(Ordering::Relaxed),
+                    ));
+                }
+            }
+
             _ = keepalive_interval.tick(), if ready_fired && !awaiting_pong => {
                 match ping_pong.send_ping(h2::Ping::opaque()) {
                     Ok(()) => {
@@ -1030,7 +1130,9 @@ pub async fn run(
                     if validate_successes >= DATA_PROBE_REQUIRED_SUCCESSES {
                         ready_fired = true;
                         validate_deadline = None;
-                        crate::ffi::mark_ready();
+                        if publish_ready {
+                            crate::ffi::mark_ready();
+                        }
                         if let Some(tx) = ready_tx.take() {
                             let _ = tx.send(());
                         }
@@ -1060,12 +1162,21 @@ enum SendCmd {
     Close,
 }
 
+#[derive(Default)]
+struct CarrierSendStats {
+    bytes: AtomicU64,
+    writes: AtomicU64,
+    waits: AtomicU64,
+    wait_micros: AtomicU64,
+}
+
 /// Owns the HTTP/2 send half: device packets (batched) and control capsules.
 /// Ends the stream on Close or when the device side goes away.
 async fn sender_loop(
     mut send_stream: h2::SendStream<Bytes>,
     mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     mut cmd_rx: mpsc::Receiver<SendCmd>,
+    stats: Option<&CarrierSendStats>,
 ) -> Result<()> {
     let mut cmd_open = true;
     loop {
@@ -1073,7 +1184,7 @@ async fn sender_loop(
             cmd = cmd_rx.recv(), if cmd_open => {
                 match cmd {
                     Some(SendCmd::Capsule(data)) => {
-                        if let Err(e) = send_capsule(&mut send_stream, data).await {
+                        if let Err(e) = send_capsule_profiled(&mut send_stream, data, stats).await {
                             log::trace!("[h2] control capsule: {e}");
                         }
                     }
@@ -1101,11 +1212,11 @@ async fn sender_loop(
                     };
                     let framed = masque::encode_datagram_capsule(&more);
                     if group.len() + framed.len() > SEND_COALESCE_BYTES {
-                        send_capsule(&mut send_stream, Bytes::from(std::mem::take(&mut group))).await?;
+                        send_capsule_profiled(&mut send_stream, Bytes::from(std::mem::take(&mut group)), stats).await?;
                     }
                     group.extend_from_slice(&framed);
                 }
-                send_capsule(&mut send_stream, Bytes::from(group)).await?;
+                send_capsule_profiled(&mut send_stream, Bytes::from(group), stats).await?;
             }
         }
     }
@@ -1122,12 +1233,21 @@ async fn close_sender(
 }
 
 async fn send_capsule(send: &mut h2::SendStream<Bytes>, data: Bytes) -> Result<()> {
+    send_capsule_profiled(send, data, None).await
+}
+
+async fn send_capsule_profiled(
+    send: &mut h2::SendStream<Bytes>,
+    data: Bytes,
+    stats: Option<&CarrierSendStats>,
+) -> Result<()> {
     let len = data.len();
     if len == 0 {
         return Ok(());
     }
 
     send.reserve_capacity(len);
+    let wait_started = (stats.is_some() && send.capacity() < len).then(Instant::now);
     while send.capacity() < len {
         match futures::future::poll_fn(|cx| send.poll_capacity(cx)).await {
             Some(Ok(_)) => {}
@@ -1138,6 +1258,14 @@ async fn send_capsule(send: &mut h2::SendStream<Bytes>, data: Bytes) -> Result<(
 
     send.send_data(data, false)
         .map_err(|e| AetherError::Masque(format!("h2 send_data: {e}")))?;
+    if let Some(stats) = stats {
+        stats.bytes.fetch_add(len as u64, Ordering::Relaxed);
+        stats.writes.fetch_add(1, Ordering::Relaxed);
+        if let Some(started) = wait_started {
+            stats.waits.fetch_add(1, Ordering::Relaxed);
+            stats.wait_micros.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+    }
     Ok(())
 }
 

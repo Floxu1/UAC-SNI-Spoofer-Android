@@ -68,7 +68,6 @@ import androidx.compose.ui.unit.dp
 import com.uacspoofer.mobile.ui.theme.styleTokens
 import com.uacspoofer.mobile.ui.theme.neonDp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.uacspoofer.mobile.engine.Engine4UnlockStore
 import com.uacspoofer.mobile.engine.EngineMode
 import com.uacspoofer.mobile.engine.EngineModeStore
 
@@ -105,7 +104,7 @@ internal fun EngineMode.switchContentDescription(): String = when (this) {
     EngineMode.XRAY_CF -> homeText("Cloudflare SNI engine", "موتور کلودفلر")
     EngineMode.TOR_WEBTUNNEL -> homeText("Tor engine", "موتور تور")
     EngineMode.UAC_POW -> homeText("PoW engine", "موتور PoW")
-    EngineMode.UAC_DIRECT -> homeText("Direct engine (serverless)", "موتور Direct (بدون سرور)")
+    EngineMode.UAC_DIRECT -> homeText("Direct engine", "موتور دایرکت")
 }
 
 private fun EngineMode.identityIcon(): ImageVector = when (this) {
@@ -135,14 +134,8 @@ internal fun EngineSwitchRail(
     onSelect: (EngineMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current.applicationContext
-    val unlockStore = remember(context) { Engine4UnlockStore.get(context) }
-    val engine4Unlocked by unlockStore.unlocked.collectAsStateWithLifecycle()
     val active = pending ?: selected
-    val visibleModes = remember(engine4Unlocked, active) {
-        val base = EngineMode.visible(engine4Unlocked)
-        if (active.isDirect && active !in base) base + active else base
-    }
+    val visibleModes = EngineMode.entries
     val tuned = styleTokens()
     val width: Dp = if (tuned != null) neonDp(compact, 46f, 42f, tuned.railWidth) else if (compact) 42.dp else 46.dp
     val small: Dp = if (tuned != null) neonDp(compact, 38f, 34f, tuned.railItem) else if (compact) 34.dp else 38.dp

@@ -52,6 +52,63 @@ fn spki_sha256(cert: &boring::x509::X509Ref) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// Authenticate the public H2 hostname before using its key with the H2 engine.
+/// The pin is scoped to this run and is never learned from an unverified peer.
+pub(crate) async fn authenticate_h2_carrier(
+    peer: std::net::SocketAddr,
+    host: &str,
+    cert: &[u8],
+    key: &[u8],
+) -> Result<[u8; 32]> {
+    use boring::ssl::SslConnector;
+    use tokio::net::TcpSocket;
+
+    let tls_error = |error: boring::error::ErrorStack| AetherError::Tls(error.to_string());
+    let mut builder = SslConnector::builder(SslMethod::tls()).map_err(tls_error)?;
+    builder.set_min_proto_version(Some(SslVersion::TLS1_2)).map_err(tls_error)?;
+    builder.set_alpn_protos(b"\x02h2").map_err(tls_error)?;
+    builder.set_verify(SslVerifyMode::PEER);
+    #[cfg(target_os = "android")]
+    {
+        let apex = std::path::Path::new("/apex/com.android.conscrypt/cacerts");
+        let roots = if apex.is_dir() {
+            apex
+        } else {
+            std::path::Path::new("/system/etc/security/cacerts")
+        };
+        for entry in std::fs::read_dir(roots)? {
+            let pem = std::fs::read(entry?.path())?;
+            let root = X509::from_pem(&pem).map_err(tls_error)?;
+            builder.cert_store_mut().add_cert(root).map_err(tls_error)?;
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    builder.set_default_verify_paths().map_err(tls_error)?;
+
+    let cert = X509::from_pem(cert).map_err(tls_error)?;
+    let key = PKey::private_key_from_pem(key).map_err(tls_error)?;
+    builder.set_certificate(&cert).map_err(tls_error)?;
+    builder.set_private_key(&key).map_err(tls_error)?;
+    let config = builder.build().configure().map_err(tls_error)?;
+    let verify = async {
+        let socket = if peer.is_ipv4() { TcpSocket::new_v4()? } else { TcpSocket::new_v6()? };
+        crate::platform::protect_socket(&socket)?;
+        let tcp = socket.connect(peer).await?;
+        let stream = crate::fragment::FragmentingStream::new(tcp, crate::fragment::FragmentConfig::from_env());
+        let stream = tokio_boring::connect(config, host, stream)
+            .await
+            .map_err(|error| AetherError::Tls(format!("H2 carrier Web PKI: {error}")))?;
+        if stream.ssl().selected_alpn_protocol() != Some(b"h2") {
+            return Err(AetherError::Tls("carrier did not negotiate h2".into()));
+        }
+        stream.ssl().peer_certificate().as_deref().and_then(spki_sha256)
+            .ok_or_else(|| AetherError::Tls("verified H2 carrier had no usable server key".into()))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(8), verify)
+        .await
+        .map_err(|_| AetherError::Tls("H2 carrier Web PKI handshake timed out".into()))?
+}
+
 /// Install TLS verification on an `SslContextBuilder`.
 ///
 /// When `pin_endpoint` is true and `expected_pins` is non-empty:

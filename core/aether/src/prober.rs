@@ -749,6 +749,26 @@ async fn verify_one(
     }
 }
 
+pub fn masque_scan_peers(
+    mode: ScanMode,
+    ports: &[u16],
+    ip: IpScan,
+) -> impl Iterator<Item = SocketAddr> {
+    build_candidates(&mode.strategy(), ports, ip)
+        .into_iter()
+        .map(|(ip, port)| SocketAddr::new(ip, port))
+}
+
+#[cfg(feature = "direct-support")]
+pub fn direct_range_peers() -> Vec<SocketAddr> {
+    let mut strategy = ScanMode::Turbo.strategy();
+    strategy.full_subnet = true;
+    build_candidates(&strategy, &[443], IpScan::V4)
+        .into_iter()
+        .map(|(ip, port)| SocketAddr::new(ip, port))
+        .collect()
+}
+
 fn build_candidates(st: &Strategy, ports: &[u16], ip: IpScan) -> Vec<(IpAddr, u16)> {
     let primary = ports.first().copied().unwrap_or(443);
     let mut out: Vec<(IpAddr, u16)> = Vec::new();

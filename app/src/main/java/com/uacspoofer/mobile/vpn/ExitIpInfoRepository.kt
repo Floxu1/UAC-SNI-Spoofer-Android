@@ -1,5 +1,7 @@
 package com.uacspoofer.mobile.vpn
 
+import com.uacspoofer.mobile.engine.direct.DirectStatusStore
+
 import android.content.Context
 import com.uacspoofer.mobile.engine.EngineModeStore
 import com.uacspoofer.mobile.engine.pow.PowCoreConfig
@@ -77,6 +79,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
                 exitCountryCode = exitCountry,
                 powEngine = engine.isPow,
                 powWarpOnly = powWarpOnly,
+                directModeKey = DirectStatusStore.status.value.exitLookupKey.takeIf { engine.isDirect },
             )
             val now = System.currentTimeMillis()
             val memoryInfo = mutableState.value
@@ -285,6 +288,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
             exitCountryCode: String = "",
             powEngine: Boolean = false,
             powWarpOnly: Boolean = false,
+            directModeKey: String? = null,
         ): String = when {
             torEngine -> {
                 val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
@@ -295,6 +299,7 @@ class ExitIpInfoRepository private constructor(context: Context) {
                 val country = exitCountryCode.trim().lowercase().ifBlank { "auto" }
                 "$POW_LOOKUP_ID:$country"
             }
+            directModeKey != null -> "engine:uac_direct:$directModeKey"
             else -> profileId
         }
 

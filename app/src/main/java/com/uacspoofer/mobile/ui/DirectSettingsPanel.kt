@@ -1,237 +1,401 @@
 package com.uacspoofer.mobile.ui
 
+import android.os.SystemClock
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
-import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.uacspoofer.mobile.engine.direct.DirectCa
+import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.core.ConnectionStateStore
+import com.uacspoofer.mobile.core.VpnController
 import com.uacspoofer.mobile.engine.direct.DirectEngineSettings
 import com.uacspoofer.mobile.engine.direct.DirectEngineStore
+import com.uacspoofer.mobile.engine.direct.DirectPhase
+import com.uacspoofer.mobile.engine.direct.DirectScanMode
 import com.uacspoofer.mobile.engine.direct.DirectStatusStore
+import com.uacspoofer.mobile.engine.pow.PowRegions
 import com.uacspoofer.mobile.ui.theme.UacColors
+import java.util.Locale
 
-/** Engine 4 (UAC Direct) settings: serverless direct DPI bypass. */
 @Composable
-internal fun DirectSettingsScreen(onBack: () -> Unit) {
+internal fun DirectSettingsScreen(onBack: () -> Unit, unlocked: Boolean, onUnlock: () -> Unit) {
     val accent = DirectAccent
-    ToolPageScaffold(
-        accent = accent,
-        verticalSpacing = PowGap,
-        header = {
-            PowCompactHeader(
-                accent = accent,
-                onBack = onBack,
-                title = homeText("UAC Direct", "UAC Direct"),
-                subtitle = homeText("Engine 4 · serverless", "موتور ۴ · بدون سرور"),
-                icon = Icons.Outlined.Bolt,
-            )
-        },
-    ) {
-        item { DirectSettingsPanel() }
+    val context = LocalContext.current
+    val store = remember(context) { DirectEngineStore.get(context) }
+    val s by store.settings.collectAsStateWithLifecycle()
+    val status by DirectStatusStore.status.collectAsStateWithLifecycle()
+    val connectionState by ConnectionStateStore.state.collectAsStateWithLifecycle()
+    val automaticDnsAddress = status.selectedDnsUrl.takeIf {
+        s.autoSelectDns && connectionState == ConnectionState.CONNECTED && status.phase == DirectPhase.CONNECTED
+    }
+    var advancedOpen by rememberSaveable { mutableStateOf(false) }
+    val unlockTaps = remember { FiveTapSequence() }
+    fun save(value: DirectEngineSettings) = store.save(value)
+
+    PowDirectional {
+        ToolPageScaffold(
+            accent = accent,
+            textStyle = homeLocalizedTextStyle().copy(textAlign = TextAlign.Start),
+            header = {
+                PowCompactHeader(
+                    accent = accent,
+                    onBack = onBack,
+                    title = homeText("Direct settings", "تنظیمات دایرکت"),
+                    subtitle = homeText("Engine 4", "موتور ۴"),
+                    icon = Icons.Outlined.Bolt,
+                )
+            },
+        ) {
+            item {
+                DirectConnectionCard(
+                    unlocked = unlocked,
+                    settings = s,
+                    routePending = connectionState == ConnectionState.CONNECTED && status.phase == DirectPhase.CONNECTED &&
+                        status.usingWireGuard != s.wireGuardOverDirect,
+                    onRouteChange = { save(s.copy(wireGuardOverDirect = it)) },
+                    pingMs = status.ipScan?.selectedPingMs.takeIf { connectionState == ConnectionState.CONNECTED },
+                    onScanModeChange = { save(s.copy(scanMode = it)) },
+                    dnsSummary = status.selectedDnsLabel?.takeIf { automaticDnsAddress != null }
+                        ?.let { label ->
+                            status.selectedDnsLatencyMs?.let { ms ->
+                                homeText("$label · $ms ms", "$label · $ms میلی‌ثانیه")
+                            }
+                        },
+                    onAutoDnsChange = { save(s.copy(autoSelectDns = it)) },
+                    onCountryChange = { VpnController.selectDirectExit(context, it) },
+                )
+            }
+            item {
+                PowCard {
+                    val actionLabel = if (advancedOpen) homeText("Collapse", "جمع کردن") else homeText("Expand", "باز کردن")
+                    val arrowRotation by animateFloatAsState(
+                        targetValue = if (advancedOpen) 180f else 0f,
+                        animationSpec = tween(270),
+                        label = "directAdvancedArrow",
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .heightIn(min = 54.dp)
+                            .clickable(role = Role.Button, onClickLabel = actionLabel) { advancedOpen = !advancedOpen }
+                            .padding(horizontal = PowPad, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(PowGap),
+                    ) {
+                        PowIconTile(Icons.Outlined.Tune, UacColors.TextSecondary)
+                        Text(
+                            homeText("Advanced settings", "تنظیمات پیشرفته"),
+                            modifier = Modifier.weight(1f),
+                            color = UacColors.TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Icon(
+                            Icons.Outlined.ExpandMore,
+                            null,
+                            tint = if (advancedOpen) accent else UacColors.TextSecondary,
+                            modifier = Modifier.size(20.dp).rotate(arrowRotation),
+                        )
+                    }
+                }
+            }
+            item {
+                AnimatedVisibility(
+                    visible = advancedOpen,
+                    enter = expandVertically(expandFrom = Alignment.Top, animationSpec = tween(320)) +
+                        fadeIn(animationSpec = tween(220, delayMillis = 45)),
+                    exit = shrinkVertically(shrinkTowards = Alignment.Top, animationSpec = tween(240)) +
+                        fadeOut(animationSpec = tween(140)),
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        DirectNetworkSettings(s, ::save)
+                        PowCard {
+                            Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                DirectField(
+                                    label = homeText("DNS for international sites", "DNS سایت‌های خارجی"),
+                                    value = automaticDnsAddress ?: s.unfilteredDns,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    readOnly = automaticDnsAddress != null,
+                                ) { save(s.copy(unfilteredDns = it)) }
+                                DirectField(homeText("DNS for domestic sites", "DNS سایت‌های داخلی"), s.domesticDns, Modifier.fillMaxWidth()) { save(s.copy(domesticDns = it)) }
+                                PowHint(homeText("Advanced changes apply on the next connection.", "تنظیمات پیشرفته از اتصال بعدی اعمال می‌شوند."))
+                            }
+                        }
+                        PowButton(
+                            text = homeText("Reset settings", "بازنشانی تنظیمات"),
+                            enabled = true,
+                            accent = accent,
+                            filled = false,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            store.resetToDefaults()
+                        }
+                    }
+                }
+            }
+            item {
+                Spacer(
+                    Modifier.fillMaxWidth().height(64.dp).pointerInput(unlockTaps) {
+                        detectTapGestures {
+                            if (unlockTaps.tap(SystemClock.elapsedRealtime())) {
+                                onUnlock()
+                            }
+                        }
+                    },
+                )
+            }
+        }
     }
 }
 
 internal val DirectAccent = Color(0xFFFFC46B)
 
 @Composable
-private fun DirectSettingsPanel() {
-    val context = LocalContext.current
-    val store = remember(context) { DirectEngineStore.get(context) }
-    val s by store.settings.collectAsStateWithLifecycle()
-    val status by DirectStatusStore.status.collectAsStateWithLifecycle()
-    val accent = DirectAccent
-    fun save(v: DirectEngineSettings) = store.save(v)
-
-    PowDirectional {
-        Column(verticalArrangement = Arrangement.spacedBy(PowGap)) {
-            PowCard {
-                Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    PowHint(
-                        homeText(
-                            "No server/worker. Google sites use MITM domain fronting (SNI www.google.com). Cloudflare sites use ECH (outer SNI cloudflare-ech.com). Both need the app CA installed as a user certificate. Fragment is optional and usually fails on MCI. IP-blocked sites stay unreachable.",
-                            "بدون سرور/ورکر. سایت‌های گوگل با MITM و دامنهٔ گوگل (SNI=www.google.com) می‌رن. سایت‌های کلودفلر با ECH (SNI بیرونی cloudflare-ech.com). هر دو به نصب گواهی CA برنامه به‌عنوان گواهی کاربر نیاز دارن. تیکه‌کردن اختیاریه و روی همراه اول معمولاً fail می‌شه. سایت‌هایی که IPشون بسته‌ست باز نمی‌شن.",
-                        ),
-                        UacColors.TextPrimary,
-                    )
-                    if (status.detail.isNotBlank()) PowHint(status.detail)
-                }
-            }
-            SectionLabel(homeText("Layers", "لایه‌ها"))
-            PowCard {
-                PowSwitchRow(
-                    icon = Icons.Outlined.Public,
-                    title = homeText("Google fronting (MITM)", "Fronting گوگل (MITM)"),
-                    subtitle = homeText("YouTube / Google via SNI www.google.com — needs CA", "یوتیوب/گوگل با SNI گوگل — نیاز به CA"),
-                    checked = s.googleFronting,
-                    accent = accent,
-                ) { save(s.copy(googleFronting = it)) }
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Shield,
-                    title = homeText("Cloudflare ECH (MITM)", "ECH کلودفلر (MITM)"),
-                    subtitle = homeText("x.com / Discord via encrypted ClientHello — needs CA", "x.com و Discord با ClientHello رمز — نیاز به CA"),
-                    checked = s.echEnabled,
-                    accent = accent,
-                ) { save(s.copy(echEnabled = it)) }
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Bolt,
-                    title = homeText("ClientHello fragment", "تیکه‌کردن ClientHello"),
-                    subtitle = homeText("Off by default: MCI drops fragmented hellos", "پیش‌فرض خاموش: همراه اول hello تیکه‌شده رو drop می‌کنه"),
-                    checked = s.fragmentEnabled,
-                    accent = accent,
-                ) { save(s.copy(fragmentEnabled = it)) }
-                PowRowDivider()
-                Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PowHint(homeText(
-                        "Export the CA, then on the phone: Settings → Security → Install a certificate → CA certificate. Only install on devices you control. MITM can read HTTPS for routed domains.",
-                        "CA رو Export کن، بعد روی گوشی: تنظیمات → امنیت → نصب گواهی → گواهی CA. فقط روی دستگاه خودت نصب کن. MITM می‌تونه HTTPS دامنه‌های مسیر رو بخونه.",
-                    ))
-                    PowButton(
-                        text = homeText("Export CA certificate", "خروجی گرفتن از گواهی CA"),
-                        enabled = true,
-                        accent = accent,
-                        filled = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        runCatching {
-                            val file = DirectCa.exportToDownloads(context)
-                            android.widget.Toast.makeText(context, file.absolutePath, android.widget.Toast.LENGTH_LONG).show()
-                        }.onFailure {
-                            android.widget.Toast.makeText(context, it.message ?: "CA export failed", android.widget.Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
-            }
-            if (s.fragmentEnabled) {
-            SectionLabel(homeText("TLS ClientHello", "ClientHello در TLS"))
-            PowCard {
-                PowPickerRow(
-                    icon = Icons.Outlined.Tune,
-                    label = homeText("Variant", "نسخه"),
-                    sheetTitle = homeText("Fragment variant", "نسخه‌ی تیکه‌کردن"),
-                    choices = listOf(
-                        PowMenuChoice(DirectEngineSettings.VARIANT_A, "A · 6/98/1", homeText("Default, light split", "پیش‌فرض، تیکه‌کردن سبک")),
-                        PowMenuChoice(DirectEngineSettings.VARIANT_B, "B · 0/104/1", homeText("Alternative split", "تیکه‌کردن جایگزین")),
-                    ),
-                    selectedId = s.variant,
-                    accent = accent,
-                    onSelect = { save(s.withVariant(it)) },
+private fun DirectConnectionCard(
+    unlocked: Boolean,
+    settings: DirectEngineSettings,
+    routePending: Boolean,
+    pingMs: Long?,
+    onRouteChange: (Boolean) -> Unit,
+    onScanModeChange: (DirectScanMode) -> Unit,
+    dnsSummary: String?,
+    onAutoDnsChange: (Boolean) -> Unit,
+    onCountryChange: (String) -> Unit,
+) {
+    PowCard {
+        if (unlocked) {
+            Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    homeText("Connection mode", "روش اتصال"),
+                    color = UacColors.TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
                 )
-                PowRowDivider()
-                Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DirectField(homeText("Lengths", "طول‌ها"), s.helloLengths, Modifier.weight(1f)) { save(s.copy(helloLengths = it)) }
-                        DirectField(homeText("Delays ms", "تأخیر"), s.helloDelays, Modifier.weight(1f)) { save(s.copy(helloDelays = it)) }
-                        DirectNumber(homeText("Max split", "حداکثر تیکه"), s.helloMaxSplit, Modifier.weight(1f)) { save(s.copy(helloMaxSplit = it)) }
-                    }
+                Row(Modifier.fillMaxWidth().selectableGroup(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DirectModeChoice(
+                        label = homeText("Direct", "مستقیم"),
+                        icon = Icons.Outlined.Bolt,
+                        selected = !settings.wireGuardOverDirect,
+                        modifier = Modifier.weight(1f),
+                        onSelect = { onRouteChange(false) },
+                    )
+                    DirectModeChoice(
+                        label = homeText("Cloudflare", "کلودفلر"),
+                        icon = Icons.Outlined.Cloud,
+                        selected = settings.wireGuardOverDirect,
+                        modifier = Modifier.weight(1f),
+                        onSelect = { onRouteChange(true) },
+                    )
                 }
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Shield,
-                    title = homeText("Second stage", "مرحله‌ی دوم"),
-                    subtitle = homeText("Splits the first packets again", "پکت‌های اول رو دوباره تیکه می‌کنه"),
-                    checked = s.secondStageEnabled,
-                    accent = accent,
-                ) { save(s.copy(secondStageEnabled = it)) }
-                if (s.secondStageEnabled) {
-                    Row(Modifier.padding(PowPad), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DirectField(homeText("Lengths", "طول‌ها"), s.secondLengths, Modifier.weight(1f)) { save(s.copy(secondLengths = it)) }
-                        DirectField(homeText("Delays ms", "تأخیر"), s.secondDelays, Modifier.weight(1f)) { save(s.copy(secondDelays = it)) }
-                        DirectNumber(homeText("Max split", "حداکثر تیکه"), s.secondMaxSplit, Modifier.weight(1f)) { save(s.copy(secondMaxSplit = it)) }
-                    }
+                if (routePending) {
+                    PowHint(homeText("The new mode applies on the next connection.", "روش جدید از اتصال بعدی اعمال می‌شود."))
                 }
             }
-            } // fragmentEnabled
-            SectionLabel(homeText("Other TCP and UDP", "بقیه‌ی TCP و UDP"))
-            PowCard {
-                PowSwitchRow(
-                    icon = Icons.Outlined.Speed,
-                    title = homeText("Fragment other TCP", "تیکه‌کردن بقیه‌ی TCP"),
-                    subtitle = homeText("Non-TLS TCP in small pieces", "TCP غیر TLS به تیکه‌های کوچیک"),
-                    checked = s.tcpFragmentEnabled,
-                    accent = accent,
-                ) { save(s.copy(tcpFragmentEnabled = it)) }
-                if (s.tcpFragmentEnabled) {
-                    Row(Modifier.padding(PowPad), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        DirectField(homeText("Lengths", "طول‌ها"), s.tcpLengths, Modifier.weight(1f)) { save(s.copy(tcpLengths = it)) }
-                        DirectField(homeText("Delays ms", "تأخیر"), s.tcpDelays, Modifier.weight(1f)) { save(s.copy(tcpDelays = it)) }
-                        DirectNumber(homeText("Max split", "حداکثر تیکه"), s.tcpMaxSplit, Modifier.weight(1f)) { save(s.copy(tcpMaxSplit = it)) }
-                    }
-                }
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Bolt,
-                    title = homeText("UDP noise", "نویز UDP"),
-                    subtitle = homeText("Random packets before UDP traffic", "پکت‌های الکی قبل از ترافیک UDP"),
-                    checked = s.udpNoise,
-                    accent = accent,
-                ) { save(s.copy(udpNoise = it)) }
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Shield,
-                    title = homeText("Block QUIC", "بستن QUIC"),
-                    subtitle = homeText("Apps fall back to TCP, where splitting works", "برنامه‌ها می‌رن سراغ TCP که تیکه‌کردن روش جواب می‌ده"),
-                    checked = s.blockQuic,
-                    accent = accent,
-                ) { save(s.copy(blockQuic = it)) }
-                PowRowDivider()
-                PowSwitchRow(
-                    icon = Icons.Outlined.Public,
-                    title = homeText("IPv6", "IPv6"),
-                    subtitle = homeText("Off: IPv4 only", "خاموش: فقط IPv4"),
-                    checked = s.ipv6,
-                    accent = accent,
-                ) { save(s.copy(ipv6 = it)) }
-                PowRowDivider()
+        }
+        if (unlocked && settings.wireGuardOverDirect) {
+            PowRowDivider()
+            val nameLocale = if (LocalHomePersian.current) Locale("fa") else Locale.ENGLISH
+            val countries = remember(nameLocale) {
+                PowRegions.options(emptyList()).map { PowMenuChoice(it, PowRegions.name(it, nameLocale)) }
+            }
+            PowPickerRow(
+                icon = Icons.Outlined.Public,
+                label = homeText("Exit country", "کشور خروجی"),
+                sheetTitle = homeText("Exit country", "کشور خروجی"),
+                subtitle = homeText("Picking a country turns on Psiphon.", "با انتخاب کشور، سایفون روشن می‌شود."),
+                choices = listOf(PowMenuChoice("", homeText("Automatic", "خودکار"))) + countries,
+                selectedId = settings.exitCountryCode,
+                unlistedTitle = settings.exitCountryCode.takeIf { it.isNotBlank() }?.let { PowRegions.name(it, nameLocale) },
+                accent = DirectAccent,
+                onSelect = onCountryChange,
+            )
+            PowRowDivider()
+        }
+        if (settings.wireGuardOverDirect) {
+            val scanLabel = homeText("Search mode", "حالت جست‌وجو")
+            PowPickerRow(
+                icon = Icons.Outlined.Speed,
+                label = scanLabel,
+                sheetTitle = scanLabel,
+                choices = listOf(
+                    PowMenuChoice(
+                        DirectScanMode.TURBO.id,
+                        homeText("Turbo", "توربو"),
+                        homeText("Checks a short list for faster startup.", "برای اتصال سریع، چند مسیر را بررسی می‌کند."),
+                    ),
+                    PowMenuChoice(
+                        DirectScanMode.BALANCED.id,
+                        homeText("Balanced", "متعادل"),
+                        homeText("Checks a sample of addresses for lower ping.", "نمونه‌ای از آدرس‌ها را برای پینگ کمتر بررسی می‌کند."),
+                    ),
+                    PowMenuChoice(
+                        DirectScanMode.DEEP.id,
+                        homeText("Deep", "عمیق"),
+                        homeText("Checks the full address range. Takes longer.", "تمام آدرس‌های محدوده را بررسی می‌کند و بیشتر طول می‌کشد."),
+                    ),
+                ),
+                subtitle = pingMs?.let {
+                    homeText("Current route ping: $it ms", "پینگ مسیر فعلی: $it میلی‌ثانیه")
+                },
+                selectedId = settings.scanMode.id,
+                accent = DirectAccent,
+                onSelect = { onScanModeChange(DirectScanMode.fromStored(it)) },
+            )
+        }
+        if (unlocked || settings.wireGuardOverDirect) PowRowDivider()
+        PowSwitchRow(
+            icon = Icons.Outlined.Public,
+            title = homeText("Choose DNS automatically", "انتخاب خودکار DNS"),
+            subtitle = dnsSummary ?: homeText(
+                "Tests DNS services at each connection and picks the fastest that responds correctly.",
+                "در هر اتصال، سریع‌ترین DNS با پاسخ سالم را انتخاب می‌کند.",
+            ),
+            checked = settings.autoSelectDns,
+            accent = DirectAccent,
+            onCheckedChange = onAutoDnsChange,
+        )
+    }
 }
-            SectionLabel(homeText("DNS", "DNS"))
-            PowCard {
-                Column(Modifier.padding(PowPad), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DirectField(homeText("Unfiltered DNS (DoH)", "DNS فیلترنشده (DoH)"), s.unfilteredDns, Modifier.fillMaxWidth()) { save(s.copy(unfilteredDns = it)) }
-                    DirectField(homeText("Domestic DNS", "DNS داخلی"), s.domesticDns, Modifier.fillMaxWidth()) { save(s.copy(domesticDns = it)) }
-                    PowHint(homeText("Changes apply on the next connect.", "تغییرات از اتصال بعدی اعمال می‌شن."))
-                    PowButton(
-                        text = homeText("Reset to defaults", "برگشت به پیش‌فرض"),
-                        enabled = true,
-                        accent = accent,
-                        filled = false,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { store.resetToDefaults() }
-                }
-            }
+
+@Composable
+private fun DirectModeChoice(
+    label: String,
+    icon: ImageVector,
+    selected: Boolean,
+    modifier: Modifier,
+    onSelect: () -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        modifier = modifier
+            .heightIn(min = 54.dp)
+            .clip(shape)
+            .background(if (selected) DirectAccent.copy(alpha = 0.14f) else UacColors.BackgroundBottom.copy(alpha = 0.38f))
+            .border(1.dp, if (selected) DirectAccent.copy(alpha = 0.55f) else UacColors.Divider, shape)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onSelect)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(icon, null, tint = if (selected) DirectAccent else UacColors.TextSecondary, modifier = Modifier.size(18.dp))
+        Text(label, Modifier.weight(1f), color = UacColors.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        RadioButton(
+            selected = selected,
+            onClick = null,
+            modifier = Modifier.size(18.dp),
+            colors = RadioButtonDefaults.colors(selectedColor = DirectAccent, unselectedColor = UacColors.TextSecondary),
+        )
+    }
+}
+
+@Composable
+private fun DirectNetworkSettings(s: DirectEngineSettings, save: (DirectEngineSettings) -> Unit) {
+    PowCard {
+        PowSwitchRow(Icons.Outlined.Speed, homeText("Split other packets", "تقسیم بسته‌های دیگر"), "", s.tcpFragmentEnabled, DirectAccent) {
+            save(s.copy(tcpFragmentEnabled = it))
+        }
+        if (s.tcpFragmentEnabled) {
+            DirectPacketFields(s.tcpLengths, s.tcpDelays, s.tcpMaxSplit,
+                { save(s.copy(tcpLengths = it)) }, { save(s.copy(tcpDelays = it)) }, { save(s.copy(tcpMaxSplit = it)) })
+        }
+        PowRowDivider()
+        PowSwitchRow(Icons.Outlined.Bolt, homeText("Send extra packets", "ارسال بسته‌های کمکی"), "", s.udpNoise, DirectAccent) {
+            save(s.copy(udpNoise = it))
+        }
+        PowRowDivider()
+        PowSwitchRow(Icons.Outlined.Shield, homeText("Browser compatibility", "سازگاری مرورگرها"), "", s.blockQuic, DirectAccent) {
+            save(s.copy(blockQuic = it))
+        }
+        PowRowDivider()
+        PowSwitchRow(Icons.Outlined.Public, homeText("IPv6 support", "پشتیبانی از IPv6"), "", s.ipv6, DirectAccent) {
+            save(s.copy(ipv6 = it))
         }
     }
 }
 
 @Composable
-private fun DirectField(label: String, value: String, modifier: Modifier, onChange: (String) -> Unit) {
+private fun DirectPacketFields(
+    lengths: String,
+    delays: String,
+    limit: Int,
+    onLengthsChange: (String) -> Unit,
+    onDelaysChange: (String) -> Unit,
+    onLimitChange: (Int) -> Unit,
+) {
+    Row(Modifier.padding(PowPad), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        DirectField(homeText("Size", "اندازه"), lengths, Modifier.weight(1f), onChange = onLengthsChange)
+        DirectField(homeText("Delay (ms)", "مکث"), delays, Modifier.weight(1f), onChange = onDelaysChange)
+        DirectNumber(homeText("Max parts", "سقف بخش‌ها"), limit, Modifier.weight(1f), onLimitChange)
+    }
+}
+
+@Composable
+private fun DirectField(
+    label: String,
+    value: String,
+    modifier: Modifier,
+    readOnly: Boolean = false,
+    onChange: (String) -> Unit,
+) {
     OutlinedTextField(
         value = value,
         onValueChange = onChange,
         modifier = modifier,
+        readOnly = readOnly,
         label = { Text(label, fontSize = 11.sp) },
         singleLine = true,
         colors = OutlinedTextFieldDefaults.colors(

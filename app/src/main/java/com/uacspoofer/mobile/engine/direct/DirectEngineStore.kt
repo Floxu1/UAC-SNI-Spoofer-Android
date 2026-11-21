@@ -17,11 +17,18 @@ class DirectEngineStore private constructor(context: Context) {
 
     @Synchronized
     fun save(value: DirectEngineSettings) {
-        val v = value.validated()
+        val v = value.copy(adaptiveClientHello = true).validated()
         NetworkGuardStore.get(appContext).setIranDirect(v.iranDirect)
         prefs.edit()
-            .putBoolean("googleFronting", v.googleFronting)
-            .putBoolean("echEnabled", v.echEnabled)
+            .remove("googleFronting")
+            .remove("echEnabled")
+            .remove("adaptiveClientHello")
+            .remove("wireGuardOverDirect")
+            .putBoolean(UNLOCKED_CONNECTION_METHOD, v.wireGuardOverDirect)
+            .remove("scanRangesByLatency")
+            .putString("scanMode", v.scanMode.id)
+            .putBoolean("autoSelectDns", v.autoSelectDns)
+            .putString("exitCountryCode", v.exitCountryCode)
             .putBoolean("fragmentEnabled", v.fragmentEnabled)
             .putString("variant", v.variant)
             .putString("helloLengths", v.helloLengths)
@@ -54,8 +61,10 @@ class DirectEngineStore private constructor(context: Context) {
         val iran = runCatching { NetworkGuardStore.get(appContext).snapshot().iranDirect }
             .getOrElse { b("iranDirect", d.iranDirect) }
         return DirectEngineSettings(
-            googleFronting = b("googleFronting", d.googleFronting),
-            echEnabled = b("echEnabled", d.echEnabled),
+            wireGuardOverDirect = b(UNLOCKED_CONNECTION_METHOD, d.wireGuardOverDirect),
+            scanMode = DirectScanMode.fromStored(prefs.getString("scanMode", null), b("scanRangesByLatency", false)),
+            autoSelectDns = b("autoSelectDns", d.autoSelectDns),
+            exitCountryCode = prefs.getString("exitCountryCode", d.exitCountryCode) ?: d.exitCountryCode,
             fragmentEnabled = b("fragmentEnabled", d.fragmentEnabled),
             variant = s("variant", d.variant),
             helloLengths = s("helloLengths", d.helloLengths),
@@ -80,6 +89,8 @@ class DirectEngineStore private constructor(context: Context) {
 
     companion object {
         private const val PREFS = "engine_direct_v2"
+        // Only choices made after the connection menu became hidden may override the default.
+        private const val UNLOCKED_CONNECTION_METHOD = "unlockedWireGuardOverDirect"
         @Volatile private var instance: DirectEngineStore? = null
         fun get(context: Context): DirectEngineStore = instance ?: synchronized(this) {
             instance ?: DirectEngineStore(context.applicationContext).also { instance = it }

@@ -645,17 +645,18 @@ internal fun HomePowCountryDialog(
     selectedCode: String,
     connected: Boolean,
     onSelect: (String) -> Unit,
-    onManage: () -> Unit,
+    onManage: (() -> Unit)?,
     onDismissRequest: () -> Unit,
+    direct: Boolean = false,
 ) {
     val isPersian = LocalHomePersian.current
     val localizedFont = homeLocalizedFont()
     val nameLocale = if (isPersian) Locale("fa") else Locale.ENGLISH
     val current = PowRegions.normalize(selectedCode)
-    val codes = remember(current) {
-        val recommended = PowRegions.RECOMMENDED
-        val extra = current.takeIf { it.isNotEmpty() && it !in recommended }
-        listOf(PowRegions.AUTOMATIC) + recommended + listOfNotNull(extra)
+    val codes = remember(current, direct) {
+        val available = if (direct) PowRegions.options(emptyList()) else PowRegions.RECOMMENDED
+        val extra = current.takeIf { it.isNotEmpty() && it !in available }
+        listOf(PowRegions.AUTOMATIC) + available + listOfNotNull(extra)
     }
     val firstRowFocus = remember { FocusRequester() }
     AnimatedHomeMetricDialog(
@@ -688,26 +689,29 @@ internal fun HomePowCountryDialog(
                     nameLocale = nameLocale,
                     selected = selected,
                     connected = connected && selected,
+                    direct = direct,
                     onClick = { onSelect(code) },
                     modifier = if (index == 0) Modifier.focusRequester(firstRowFocus) else Modifier,
                 )
             }
         }
-        Spacer(Modifier.height(7.dp))
-        TextButton(
-            onClick = onManage,
-            modifier = Modifier
-                .align(Alignment.End)
-                .keyboardFocusRing(),
-        ) {
-            Icon(Icons.Outlined.Tune, null, tint = DialogBlue, modifier = Modifier.size(17.dp))
-            Spacer(Modifier.size(6.dp))
-            Text(
-                homeText("Manage countries", "مدیریت کشورها"),
-                color = DialogBlue,
-                fontSize = 11.sp,
-                fontFamily = localizedFont,
-            )
+        if (onManage != null) {
+            Spacer(Modifier.height(7.dp))
+            TextButton(
+                onClick = onManage,
+                modifier = Modifier
+                    .align(Alignment.End)
+                    .keyboardFocusRing(),
+            ) {
+                Icon(Icons.Outlined.Tune, null, tint = DialogBlue, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.size(6.dp))
+                Text(
+                    homeText("Manage countries", "مدیریت کشورها"),
+                    color = DialogBlue,
+                    fontSize = 11.sp,
+                    fontFamily = localizedFont,
+                )
+            }
         }
     }
 }
@@ -718,6 +722,7 @@ private fun HomePowCountryDialogRow(
     nameLocale: Locale,
     selected: Boolean,
     connected: Boolean,
+    direct: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -729,11 +734,12 @@ private fun HomePowCountryDialogRow(
     } else {
         PowRegions.name(code, nameLocale)
     }
-    val subtitle = if (automatic) {
-        homeText("Psiphon picks the best exit", "خروجی را Psiphon انتخاب می‌کند")
-    } else {
-        val iso = code.uppercase(Locale.US)
-        homeText("UAC PoW EXIT • $iso", "خروجی UAC PoW • $iso")
+    val iso = code.uppercase(Locale.US)
+    val subtitle = when {
+        direct && automatic -> homeText("Direct Boost exit", "خروجی شتاب دایرکت")
+        direct -> homeText("Psiphon exit · $iso", "خروجی سایفون · $iso")
+        automatic -> homeText("Psiphon picks the best exit", "خروجی را Psiphon انتخاب می‌کند")
+        else -> homeText("UAC PoW EXIT • $iso", "خروجی UAC PoW • $iso")
     }
     val accent = if (connected) UacColors.ConnectedGreen else DialogBlue
     val highlighted = selected || connected

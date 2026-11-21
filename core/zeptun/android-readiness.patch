@@ -1,0 +1,31 @@
+diff --git a/src/engine.zig b/src/engine.zig
+--- a/src/engine.zig
++++ b/src/engine.zig
+@@ -741,7 +741,7 @@
+                 w.engine.requestStop();
+                 return;
+             };
+-            _ = w.engine.ready.fetchAdd(1, .acquire);
++            _ = w.engine.ready.fetchAdd(1, .release);
+             const spin_ns: u64 = @as(u64, w.cfg.io.busy_poll_us) * std.time.ns_per_us;
+             while (w.engine.state.load(.acquire) == .running) {
+                 const spinning = spin_ns != 0 and w.loop.nowNs() -% w.last_activity_ns < spin_ns;
+diff --git a/src/ffi/ffi.zig b/src/ffi/ffi.zig
+--- a/src/ffi/ffi.zig
++++ b/src/ffi/ffi.zig
+@@ -92,2 +92,2 @@
+-    if (builtin.single_threaded) return std.heap.page_allocator;
++    if (builtin.single_threaded or builtin.target.abi.isAndroid()) return std.heap.page_allocator;
+     return std.heap.smp_allocator;
+@@ -387,6 +387,11 @@
+     return code(.ok);
+ }
+ 
++export fn zeptun_is_ready(tun: ?*anyopaque) callconv(.c) bool {
++    const h = handleOf(tun) orelse return false;
++    return h.engine.isRunning() and h.engine.ready.load(.acquire) >= h.engine.worker_count;
++}
++
+ export fn zeptun_stats(tun: ?*anyopaque, out: ?*stats.Snapshot) callconv(.c) c_int {
+     const h = handleOf(tun) orelse return code(.invalid_argument);
+     const o = out orelse return code(.invalid_argument);

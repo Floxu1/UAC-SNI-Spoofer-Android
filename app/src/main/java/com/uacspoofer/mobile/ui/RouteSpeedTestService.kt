@@ -70,7 +70,7 @@ internal class RouteSpeedTestService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_vpn)
+            .setSmallIcon(R.drawable.ic_stat_uac)
             .setContentTitle("Route Tournament is running")
             .setContentText("Champion and backup results are saved continuously")
             .setContentIntent(openIntent)

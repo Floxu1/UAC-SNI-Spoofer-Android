@@ -46,6 +46,7 @@ internal object MciXrayConfigBuilder {
         nativeTun: Boolean,
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
         aiRoute: AiRoutePlan? = null,
+        socksTunPort: Int? = null,
     ): String {
         val s = settings.validated()
         val identity = runtimeOptions.identityOverride ?: profile.runtimeIdentity(s)
@@ -128,7 +129,9 @@ internal object MciXrayConfigBuilder {
         val sniffing = """"sniffing":{"enabled":true,"destOverride":["http","tls","fakedns"],"metadataOnly":false$routeOnly}"""
         val inbounds = buildList {
             add("""{"tag":"socks-in","listen":"${q(s.socksAddress)}","port":${s.socksPort},"protocol":"socks","settings":{"auth":"noauth","udp":${s.socksUdp},"ip":"${q(s.socksAddress)}","userLevel":8},$sniffing}""")
-            if (nativeTun) {
+            if (socksTunPort != null) {
+                add("""{"tag":"tun-in","listen":"127.0.0.1","port":$socksTunPort,"protocol":"socks","settings":{"auth":"noauth","udp":true,"ip":"127.0.0.1","userLevel":8},$sniffing}""")
+            } else if (nativeTun) {
                 add("""{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":${s.tunMtu},"userLevel":8},$sniffing}""")
             }
         }.joinToString(",\n")

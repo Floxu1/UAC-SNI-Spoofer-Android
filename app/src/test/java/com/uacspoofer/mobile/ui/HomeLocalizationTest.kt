@@ -42,4 +42,17 @@ class HomeLocalizationTest {
         assertFalse(mixed.contains("\""))
         assertEquals(mixed.indexOf("تکه"), 1)
     }
+
+    @Test
+    fun pairedBracketsStayOutsideAutomaticallyIsolatedTerms() {
+        assertEquals("\u200Fموتور تونل (\u2068TUN\u2069)", localizePersian("موتور تونل (TUN)"))
+        assertEquals("\u200Fمسیر [\u2068HTTP/2\u2069]", localizePersian("مسیر [HTTP/2]"))
+        assertEquals("\u200Fحالت (\u2068TCP\u2069 (\u2068TLS\u2069))", localizePersian("حالت (TCP (TLS))"))
+    }
+
+    @Test
+    fun preservesPersianSuffixAndExplicitTechnicalGroup() {
+        assertEquals("\u200F\u2068HEV\u2069 (پایدار)", localizePersian("HEV (پایدار)"))
+        assertEquals("\u200Fحالت \u2068TUN (VPN)\u2069", localizePersian("حالت ${homeLtr("TUN (VPN)")}"))
+    }
 }

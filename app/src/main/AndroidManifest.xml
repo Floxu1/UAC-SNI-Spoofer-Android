@@ -9,6 +9,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android uses this declaration for its developer-options app picker. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_MOCK_LOCATION"
+        tools:ignore="MockLocation" />
 
     
     <queries>
@@ -43,6 +47,10 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
 
         <service
@@ -70,6 +78,12 @@
             android:name=".engine.pow.PowPsiphonSidecarService"
             android:exported="false"
             android:process=":uacpow2"
+            android:stopWithTask="false" />
+
+        <service
+            android:name=".engine.direct.DirectPsiphonService"
+            android:exported="false"
+            android:process=":uacdirect"
             android:stopWithTask="false" />
 
         <service

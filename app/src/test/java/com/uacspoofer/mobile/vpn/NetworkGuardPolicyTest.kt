@@ -128,6 +128,9 @@ class LanSharePolicyTest {
     fun endpointHidesBlankAddresses() {
         assertEquals("192.168.1.40:18080", LanSharePolicy.endpoint("192.168.1.40"))
         assertNull(LanSharePolicy.endpoint("  "))
+        assertEquals("192.168.1.40:65535", LanSharePolicy.endpoint("192.168.1.40", 65535))
+        assertNull(LanSharePolicy.endpoint("192.168.1.40", 0))
+        assertNull(LanSharePolicy.endpoint("192.168.1.40", 65536))
         assertEquals(18_080, LanSharePolicy.PORT)
     }
 }

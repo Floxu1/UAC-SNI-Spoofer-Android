@@ -1,0 +1,22 @@
+[package]
+name = "uac-direct-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "Direct"
+crate-type = ["cdylib"]
+
+[dependencies]
+route_support = { package = "aether", path = "../aether", default-features = false, features = ["direct-support"] }
+tokio = { version = "1.52", features = ["net", "rt", "sync", "time"] }
+futures = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = true

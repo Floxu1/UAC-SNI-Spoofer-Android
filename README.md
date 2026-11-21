@@ -24,7 +24,7 @@
 ## فهرست
 
 - [معرفی](#معرفی)
-- [تغییرات نسخه 2.1.2](#تغییرات-نسخه-212)
+- [تغییرات نسخه 2.1.4](#تغییرات-نسخه-214)
 - [موتور ۱ — Xray](#موتور-۱--xray)
 - [موتور ۲ — Tor](#موتور-۲--tor)
 - [موتور ۳ — UAC PoW](#موتور-۳--uac-pow)
@@ -39,7 +39,7 @@
 
 ## معرفی
 
-‏UAC SNI Spoofer یک کلاینت متن‌باز اندروید است که روی <code>VpnService</code> و پل بومی <code>TUN</code> (‏<code>hev-socks5-tunnel</code>) ساخته شده و سه موتور مستقل دارد. همیشه فقط یک موتور اجرا می‌شود و تعویض موتور در حین اتصال، اول اتصال فعلی را قطع می‌کند.
+‏UAC SNI Spoofer یک کلاینت متن‌باز اندروید است که از <code>VpnService</code> و پردازش بومی TUN استفاده می‌کند. در <strong>تنظیمات کلی ← موتور پردازش TUN</strong> می‌توانید گزینهٔ پایدار یا Zeptun آزمایشی را برای Xray، Tor و UAC PoW انتخاب کنید. انتخاب از اتصال بعدی VPN اعمال می‌شود. گزینهٔ پایدار از HEV برای Tor و PoW و از TUN داخلی Xray برای Xray استفاده می‌کند.
 
 | | موتور ۱ — <code>Xray</code> | موتور ۲ — <code>Tor</code> | موتور ۳ — <code>UAC PoW</code> |
 |---|---|---|---|
@@ -49,7 +49,7 @@
 
 رابط کاربری کاملاً فارسی و انگلیسی (راست‌به‌چپ و چپ‌به‌راست) است و با <code>Jetpack Compose</code> و <code>Material 3</code> ساخته شده.
 
-## تغییرات نسخه 2.1.2
+## تغییرات نسخه 2.1.4
 
 یادداشت‌ها و تغییرات کامل را در [صفحهٔ آخرین رلیز](https://github.com/Floxu1/UAC-SNI-Spoofer-Android/releases/latest) بخوانید.
 
@@ -108,11 +108,11 @@
 
 | فایل | مناسب برای |
 |---|---|
-| <code>UAC-2.1.2-arm64-v8a.apk</code> | **تقریباً همه‌ی گوشی‌ها** (پیشنهادی) |
-| <code>UAC-2.1.2-armeabi-v7a.apk</code> | گوشی‌های قدیمی ۳۲ بیتی |
-| <code>UAC-2.1.2-x86_64.apk</code> | شبیه‌سازهای کامپیوتر (مثل LDPlayer) |
-| <code>UAC-2.1.2-x86.apk</code> | شبیه‌سازهای قدیمی ۳۲ بیتی |
-| <code>UAC-2.1.2-universal.apk</code> | همه‌ی دستگاه‌ها (حجم بیشتر) |
+| <code>UAC-2.1.4-arm64-v8a.apk</code> | **تقریباً همه‌ی گوشی‌ها** (پیشنهادی) |
+| <code>UAC-2.1.4-armeabi-v7a.apk</code> | گوشی‌های قدیمی ۳۲ بیتی |
+| <code>UAC-2.1.4-x86_64.apk</code> | شبیه‌سازهای کامپیوتر (مثل LDPlayer) |
+| <code>UAC-2.1.4-x86.apk</code> | شبیه‌سازهای قدیمی ۳۲ بیتی |
+| <code>UAC-2.1.4-universal.apk</code> | همه‌ی دستگاه‌ها (حجم بیشتر) |
 
 ## شروع سریع
 
@@ -144,7 +144,7 @@ cd UAC-SNI-Spoofer-Android
 
 <div dir="rtl">
 
-ساخت نسخه‌ی release به فایل <code>signing.properties</code> نیاز دارد (نمونه: <code>signing.properties.example</code>). مرحله‌ی <code>preBuild</code> کتابخانه‌ی Rust ‏<code>libaether.so</code> را برای همه‌ی معماری‌ها می‌سازد.
+ساخت نسخه‌ی Release به فایل <code>signing.properties</code> نیاز دارد. نمونه در <code>signing.properties.example</code> است. مرحله‌ی <code>preBuild</code> فایل‌های هسته را برای معماری‌های پشتیبانی‌شده، در صورت نیاز، می‌سازد. موتور ۳ از <code>libaether.so</code> و موتور ۴ از [<code>libDirect.so</code>](core/direct/README.md) استفاده می‌کند.
 
 ## پرسش‌های رایج
 

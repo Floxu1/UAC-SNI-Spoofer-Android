@@ -26,6 +26,7 @@ internal data class PowLastConnect(
         val transportLabel = when (transport) {
             "h2" -> "HTTP/2"
             "h3" -> "HTTP/3"
+            PowCoreConfig.NATIVE_H3_OVER_H2 -> PowCoreConfig.H3_NEW_METHOD_LABEL
             else -> ""
         }
         val host = peer.substringBefore('%').substringBefore(']')

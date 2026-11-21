@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -31,7 +32,7 @@ fn http_probe_port() -> u16 {
         .unwrap_or(80)
 }
 
-async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
+pub(crate) async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
     let ip = socks::dns_resolve(stack, HTTP_PROBE_HOST).await?;
     let dst = SocketAddr::new(ip, http_probe_port());
 
@@ -79,6 +80,55 @@ async fn http_probe(stack: &netstack::StackHandle) -> Result<()> {
             "unexpected http probe response: {status_line}"
         )))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct H3PayloadScore {
+    pub replies: usize,
+    pub median_rtt: Reverse<Duration>,
+}
+
+pub(crate) async fn validate_h3_payload(
+    stack: &netstack::StackHandle,
+    peer: SocketAddr,
+) -> Result<H3PayloadScore> {
+    const SAMPLES: usize = 3;
+    let started = Instant::now();
+    let mut rtts = Vec::with_capacity(SAMPLES);
+    for sample in 1..=SAMPLES {
+        if sample > 1 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let start = Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(3), http_probe(stack)).await;
+        let outcome = match result {
+            Ok(Ok(())) => {
+                let rtt = start.elapsed();
+                rtts.push(rtt);
+                format!("HTTP 204 RTT={}ms", rtt.as_millis())
+            }
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "DNS/TCP/HTTP exchange timed out".into(),
+        };
+        crate::app::h3_diagnostic(format!(
+            "{peer} C IP payload sample {sample}/{SAMPLES}: {outcome}"
+        ));
+    }
+    let received = rtts.len();
+    crate::app::h3_diagnostic(format!(
+        "{peer} C IP payload {received}/{SAMPLES} round trips in {}ms",
+        started.elapsed().as_millis()
+    ));
+    if received < 2 {
+        return Err(AetherError::Masque(
+            "C IP payload: fewer than two HTTP round trips".into(),
+        ));
+    }
+    rtts.sort_unstable();
+    Ok(H3PayloadScore {
+        replies: received,
+        median_rtt: Reverse(rtts[received / 2]),
+    })
 }
 
 fn http_status_code(status_line: &str) -> Option<u16> {
@@ -157,6 +207,7 @@ pub async fn masque_http_ping(p: &MasquePingParams, timeout: Duration) -> Result
                 tls_curve_preset: crate::TlsCurvePreset::Chrome,
                 local_ipv4: p.local_ipv4,
                 quiet: true,
+                experimental_h3: false,
             };
             AbortGuard(tokio::spawn(quic::run(
                 cfg,
@@ -239,7 +290,17 @@ pub async fn wg_http_ping_established(
 
 #[cfg(test)]
 mod tests {
-    use super::http_status_code;
+    use super::{http_status_code, Duration, H3PayloadScore, Reverse};
+
+    #[test]
+    fn h3_score_prefers_reliability_then_latency() {
+        let score = |replies, millis| H3PayloadScore {
+            replies,
+            median_rtt: Reverse(Duration::from_millis(millis)),
+        };
+        assert!(score(3, 500) > score(2, 150));
+        assert!(score(3, 300) > score(3, 500));
+    }
 
     #[test]
     fn reads_the_status_code_from_the_status_line() {

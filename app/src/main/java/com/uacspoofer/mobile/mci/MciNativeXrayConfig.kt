@@ -12,6 +12,7 @@ internal object MciNativeXrayConfig {
         profile: ProxyProfile = ProxyProfile.ADVANCED_SETTINGS_TEMPLATE,
         runtimeOptions: MciXrayRuntimeOptions = MciXrayRuntimeOptions.DEFAULT,
         aiRoute: AiRoutePlan? = null,
+        socksTunPort: Int? = null,
     ): String = MciXrayConfigBuilder.build(
         edge,
         settings,
@@ -19,5 +20,6 @@ internal object MciNativeXrayConfig {
         nativeTun = true,
         runtimeOptions = runtimeOptions,
         aiRoute = aiRoute,
+        socksTunPort = socksTunPort,
     )
 }

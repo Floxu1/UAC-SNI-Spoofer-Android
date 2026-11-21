@@ -24,6 +24,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -46,6 +48,7 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
@@ -110,7 +113,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -945,9 +947,11 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val localizedFont = homeLocalizedFont()
     val context = LocalContext.current
     val panelStore = remember(context) { ConnectPanelStore.get(context) }
-    val statusPanel by panelStore.status.collectAsStateWithLifecycle()
-    val stepsPanel by panelStore.steps.collectAsStateWithLifecycle()
     val engineMode = rememberDisplayedEngineMode()
+    val statusPanel by (if (engineMode.isDirect) panelStore.directStatus else panelStore.status)
+        .collectAsStateWithLifecycle()
+    val stepsPanel by (if (engineMode.isDirect) panelStore.directSteps else panelStore.steps)
+        .collectAsStateWithLifecycle()
     val advancedStore = remember(context) { AdvancedSettingsStore(context) }
     val advanced by advancedStore.state.collectAsStateWithLifecycle()
     val torStatus by TorStatusStore.status.collectAsStateWithLifecycle()
@@ -1017,8 +1021,8 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             ),
         )
         engineMode.isDirect -> homeText(
-            "Starting direct mode (no server) ${directStatus.progressPercent}%",
-            "در حال راه‌اندازی حالت مستقیم (بدون سرور) ${directStatus.progressPercent}٪",
+            "Starting Direct ${directStatus.progressPercent}%",
+            "در حال راه‌اندازی Direct ${directStatus.progressPercent}٪",
         )
         else -> when {
             showRouteProgress && routeProgress.isActive -> homeText(
@@ -1047,6 +1051,10 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
             } else {
                 homeText("Device VPN is routing through UAC PoW", "VPN دستگاه از UAC PoW می‌گذره")
             }
+            engineMode.isDirect && directStatus.usingWireGuard -> homeText(
+                "Connected · UAC Direct",
+                "اتصال برقرار است · UAC Direct",
+            )
             engineMode.isDirect -> if (advanced.connectionMode == CONNECTION_MODE_PROXY) {
                 homeText("Local SOCKS only · no device VPN", "فقط SOCKS محلی · بدون VPN دستگاه")
             } else {
@@ -1083,79 +1091,81 @@ internal fun ConnectionStatus(state: ConnectionState, accent: Color) {
     val neonStatus = styleTokens()
     val statusColor = if (neonStatus != null && !neonStatus.statusUseAccent) neonStatus.statusColor else accent
     val showProgressInfo = (state == ConnectionState.CONNECTING || state == ConnectionState.ERROR) &&
-        (statusPanel == ConnectPanelMode.CLOSED || (engineMode.isPow && stepsPanel == ConnectPanelMode.CLOSED))
+        (statusPanel == ConnectPanelMode.CLOSED ||
+            ((engineMode.isPow || engineMode.isDirect) && stepsPanel == ConnectPanelMode.CLOSED))
     val reopen = connectPanelText(R.string.connect_panel_reopen)
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = status,
-            color = statusColor,
-            fontSize = neonStatus?.statusSize?.sp ?: 15.sp,
-            fontWeight = if (neonStatus != null) FontWeight(neonStatus.statusWeight) else FontWeight.Medium,
-            fontFamily = localizedFont,
-            textAlign = TextAlign.Center,
-            style = TextStyle(
-                textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
-            ),
-            modifier = (if (isPersian) Modifier.widthIn(min = 180.dp) else Modifier)
-                .then(if (neonStatus != null) Modifier.graphicsLayer { alpha = neonStatus.statusAlpha } else Modifier),
-            maxLines = 1,
-            softWrap = false,
-        )
-        AnimatedVisibility(
-            visible = showProgressInfo,
-            enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.8f, animationSpec = tween(200)),
-            exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.8f, animationSpec = tween(200)),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Spacer(Modifier.width(8.dp))
-                ReopenPanelsButton(
-                    label = reopen,
-                    onClick = {
-                        if (statusPanel == ConnectPanelMode.CLOSED) {
-                            panelStore.setStatus(ConnectPanelMode.COLLAPSED)
-                        }
-                        if (stepsPanel == ConnectPanelMode.CLOSED) {
-                            panelStore.setSteps(ConnectPanelMode.COLLAPSED)
-                        }
-                    },
-                )
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = status,
+                color = statusColor,
+                fontSize = neonStatus?.statusSize?.sp ?: 15.sp,
+                fontWeight = if (neonStatus != null) FontWeight(neonStatus.statusWeight) else FontWeight.Medium,
+                fontFamily = localizedFont,
+                textAlign = TextAlign.Center,
+                style = TextStyle(
+                    textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
+                ),
+                modifier = Modifier
+                    .widthIn(max = 320.dp)
+                    .fillMaxWidth()
+                    .padding(horizontal = 48.dp)
+                    .then(if (neonStatus != null) Modifier.graphicsLayer { alpha = neonStatus.statusAlpha } else Modifier),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = hint,
+                color = neonStatus?.hintColor ?: UacColors.TextSecondary,
+                fontSize = neonStatus?.hintSize?.sp ?: 11.5.sp,
+                fontWeight = if (neonStatus != null) FontWeight(neonStatus.hintWeight) else FontWeight.Normal,
+                fontFamily = localizedFont,
+                textAlign = TextAlign.Center,
+                style = TextStyle(
+                    textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
+                ),
+                modifier = Modifier
+                    .padding(horizontal = (neonStatus?.hintPad ?: 28f).dp)
+                    .then(if (neonStatus != null) Modifier.graphicsLayer { alpha = neonStatus.hintAlpha } else Modifier),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        // The overlay is measured after the text so the icon cannot resize the status area.
+        Box(Modifier.matchParentSize(), contentAlignment = Alignment.TopCenter) {
+            Box(Modifier.widthIn(max = 320.dp).fillMaxWidth()) {
+                AnimatedVisibility(
+                    visible = showProgressInfo,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(y = (-8).dp),
+                    enter = fadeIn(tween(200)) + scaleIn(initialScale = 0.8f, animationSpec = tween(200)),
+                    exit = fadeOut(tween(200)) + scaleOut(targetScale = 0.8f, animationSpec = tween(200)),
+                ) {
+                    ReopenPanelsButton(
+                        label = reopen,
+                        onClick = {
+                            if (statusPanel == ConnectPanelMode.CLOSED) {
+                                panelStore.setStatus(ConnectPanelMode.COLLAPSED, direct = engineMode.isDirect)
+                            }
+                            if (stepsPanel == ConnectPanelMode.CLOSED) {
+                                panelStore.setSteps(ConnectPanelMode.COLLAPSED, direct = engineMode.isDirect)
+                            }
+                        },
+                    )
+                }
             }
         }
-        }
-        Spacer(Modifier.height(3.dp))
-        Text(
-            text = hint,
-            color = neonStatus?.hintColor ?: UacColors.TextSecondary,
-            fontSize = neonStatus?.hintSize?.sp ?: 11.5.sp,
-            fontWeight = if (neonStatus != null) FontWeight(neonStatus.hintWeight) else FontWeight.Normal,
-            fontFamily = localizedFont,
-            textAlign = TextAlign.Center,
-            style = TextStyle(
-                textDirection = if (isPersian) TextDirection.Rtl else TextDirection.Content,
-            ),
-            modifier = Modifier
-                .padding(horizontal = (neonStatus?.hintPad ?: 28f).dp)
-                .then(if (neonStatus != null) Modifier.graphicsLayer { alpha = neonStatus.hintAlpha } else Modifier),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
 @Composable
 private fun ReopenPanelsButton(label: String, onClick: () -> Unit) {
     val tokens = styleTokens()
-    val start = tokens?.gradientStart ?: UacColors.DisconnectedBlue
-    val end = tokens?.gradientEnd ?: UacColors.ConnectingCyan
-    val glyph = androidx.compose.ui.graphics.lerp(Color.White, end, 0.32f)
-    val density = LocalDensity.current
-    val glow = remember(density) {
-        val blurPx = with(density) { 10.dp.toPx() }
-        val sigma = blurPx * 0.57735f + 0.5f
-        BlurEffect(sigma, sigma, TileMode.Decal)
-    }
+    val accent = tokens?.gradientEnd ?: UacColors.ConnectingCyan
+    val shape = RoundedCornerShape(8.dp)
     val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     Box(
         modifier = Modifier
             .minimumInteractiveComponentSize()
@@ -1163,7 +1173,7 @@ private fun ReopenPanelsButton(label: String, onClick: () -> Unit) {
             .semantics { contentDescription = label }
             .clickable(
                 interactionSource = interaction,
-                indication = ripple(bounded = false, radius = 20.dp, color = end.copy(alpha = 0.28f)),
+                indication = ripple(bounded = false, radius = 18.dp, color = accent.copy(alpha = 0.22f)),
                 role = Role.Button,
                 onClick = onClick,
             ),
@@ -1171,37 +1181,16 @@ private fun ReopenPanelsButton(label: String, onClick: () -> Unit) {
     ) {
         Box(
             Modifier
-                .size(44.dp)
-                .graphicsLayer {
-                    renderEffect = glow
-                    clip = false
-                },
+                .size(24.dp)
+                .background(accent.copy(alpha = if (pressed) 0.20f else 0.08f), shape)
+                .border(1.dp, accent.copy(alpha = 0.42f), shape),
             contentAlignment = Alignment.Center,
         ) {
-            Box(
-                Modifier
-                    .size(22.dp)
-                    .background(end.copy(alpha = 0.25f), CircleShape),
-            )
-        }
-        Box(
-            Modifier
-                .size(22.dp)
-                .background(end.copy(alpha = 0.08f), CircleShape)
-                .border(
-                    width = 1.5.dp,
-                    brush = Brush.linearGradient(listOf(start, end)),
-                    shape = CircleShape,
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "i",
-                color = glyph,
-                fontSize = 12.sp,
-                fontStyle = FontStyle.Italic,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = homeLocalizedFont(),
+            Icon(
+                Icons.AutoMirrored.Rounded.ListAlt,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(15.dp),
             )
         }
     }
@@ -1264,14 +1253,17 @@ internal fun PowConnectSheet(modifier: Modifier = Modifier) {
             label = "steps-panel-fold",
         ) { expanded ->
         if (!expanded) {
-            PowStepsCollapsed(
-                modifier = Modifier.fillMaxWidth(),
-                row = current,
+            CollapsedConnectSteps(
+                title = current?.title.orEmpty(),
+                state = when (current?.state) {
+                    PowStepState.DONE -> MiniStepState.DONE
+                    PowStepState.FAILED -> MiniStepState.FAILED
+                    PowStepState.RUNNING -> MiniStepState.RUNNING
+                    null -> null
+                },
                 done = done,
                 total = rows.size,
                 paint = paint,
-                persian = persian,
-                font = font,
                 onExpand = { panelStore.setSteps(ConnectPanelMode.OPEN) },
             )
         } else Column(
@@ -1337,63 +1329,64 @@ internal fun PowConnectSheet(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PowStepsCollapsed(
-    modifier: Modifier,
-    row: PowStepRow?,
+internal fun CollapsedConnectSteps(
+    title: String,
+    state: MiniStepState?,
     done: Int,
     total: Int,
     paint: ConnectPanelPaint,
-    persian: Boolean,
-    font: androidx.compose.ui.text.font.FontFamily?,
     onExpand: () -> Unit,
 ) {
     val fraction = if (total == 0) 0f else done.toFloat() / total.toFloat()
+    val expandLabel = connectPanelText(R.string.connect_panel_expand)
+    val shape = RoundedCornerShape(16.dp)
     Column(
-        modifier
+        Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
+            .clip(shape)
             .background(paint.background)
-            .border(1.dp, paint.border.copy(alpha = 0.75f), RoundedCornerShape(16.dp))
-            .clickable(role = Role.Button, onClick = onExpand),
+            .border(1.dp, paint.border.copy(alpha = 0.75f), shape)
+            .clickable(role = Role.Button, onClickLabel = expandLabel, onClick = onExpand),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (row != null) {
+            if (state != null && state != MiniStepState.PENDING && state != MiniStepState.SKIPPED) {
                 Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-                    when (row.state) {
-                        PowStepState.DONE -> Icon(
+                    when (state) {
+                        MiniStepState.DONE -> Icon(
                             Icons.Rounded.Check, null, tint = UacColors.ConnectedGreen, modifier = Modifier.size(14.dp),
                         )
-                        PowStepState.FAILED -> Icon(
+                        MiniStepState.FAILED -> Icon(
                             Icons.Rounded.Close, null, tint = UacColors.ErrorRed, modifier = Modifier.size(14.dp),
                         )
-                        PowStepState.RUNNING -> CircularProgressIndicator(
+                        MiniStepState.RUNNING -> CircularProgressIndicator(
                             color = paint.border,
                             trackColor = paint.border.copy(alpha = 0.15f),
                             strokeWidth = 2.dp,
                             modifier = Modifier.size(14.dp),
                         )
+                        else -> Unit
                     }
                 }
             }
             Text(
-                text = row?.title.orEmpty(),
+                text = title,
                 color = UacColors.TextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                fontFamily = font,
+                fontFamily = homeLocalizedFont(),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                style = TextStyle(textDirection = if (persian) TextDirection.Rtl else TextDirection.Ltr),
+                style = TextStyle(textDirection = if (LocalHomePersian.current) TextDirection.Rtl else TextDirection.Ltr),
                 modifier = Modifier.weight(1f),
             )
             ConnectPanelCount(done, total, paint.border)
             Icon(
                 Icons.Rounded.ExpandLess,
-                connectPanelText(R.string.connect_panel_expand),
+                null,
                 tint = UacColors.TextSecondary,
                 modifier = Modifier.size(18.dp),
             )
@@ -1548,6 +1541,7 @@ private fun psiphonRoute(label: String): String = when {
 }
 
 private fun stageLabel(text: String, persian: Boolean): PowStepCopy {
+    PowStatusCopy.h3ScanStage(persian, text)?.let { return PowStepCopy(it) }
     if (!persian) {
         return when {
             text.startsWith("Key account key won via ") || text.startsWith("Key account key saved via ") -> {

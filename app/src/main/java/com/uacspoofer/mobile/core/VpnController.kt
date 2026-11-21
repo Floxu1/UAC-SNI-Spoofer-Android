@@ -3,6 +3,7 @@ package com.uacspoofer.mobile.core
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.uacspoofer.mobile.engine.direct.DirectEngineStore
 import com.uacspoofer.mobile.settings.NetworkGuardStore
 import com.uacspoofer.mobile.vpn.UacVpnService
 
@@ -38,6 +39,18 @@ object VpnController {
         val state = ConnectionStateStore.state.value
         if (state != ConnectionState.CONNECTED && state != ConnectionState.CONNECTING) return
         val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_APPLY_POW_EXIT)
+        context.startService(intent)
+    }
+
+    fun selectDirectExit(context: Context, countryCode: String) {
+        val store = DirectEngineStore.get(context)
+        val current = store.snapshot()
+        val next = current.copy(wireGuardOverDirect = true, exitCountryCode = countryCode).validated()
+        if (next == current) return
+        store.save(next)
+        val state = ConnectionStateStore.state.value
+        if (state != ConnectionState.CONNECTED && state != ConnectionState.CONNECTING) return
+        val intent = Intent(context, UacVpnService::class.java).setAction(UacVpnService.ACTION_APPLY_DIRECT_EXIT)
         context.startService(intent)
     }
 

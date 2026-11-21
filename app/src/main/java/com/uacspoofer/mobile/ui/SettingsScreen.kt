@@ -11,6 +11,7 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +28,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -46,7 +51,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.automirrored.outlined.AltRoute
@@ -57,13 +64,15 @@ import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DashboardCustomize
 import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.PublicOff
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Schedule
-import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.Tune
@@ -72,6 +81,7 @@ import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -85,19 +95,24 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -106,6 +121,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -113,6 +129,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.R
 import com.uacspoofer.mobile.core.ConnectionState
+import com.uacspoofer.mobile.ui.theme.AppTheme
+import com.uacspoofer.mobile.ui.theme.AppThemeStore
+import com.uacspoofer.mobile.ui.theme.orDefault
+import com.uacspoofer.mobile.ui.theme.paletteFor
 import com.uacspoofer.mobile.core.ConnectionStateStore
 import com.uacspoofer.mobile.core.VpnController
 import com.uacspoofer.mobile.engine.EngineModeStore
@@ -124,6 +144,8 @@ import com.uacspoofer.mobile.location.GpsSpoofTarget
 import com.uacspoofer.mobile.logging.CrashReportStore
 import com.uacspoofer.mobile.profiles.ProfileStore
 import com.uacspoofer.mobile.settings.AdvancedSettingsStore
+import com.uacspoofer.mobile.settings.TunBackend
+import com.uacspoofer.mobile.settings.TunBackendStore
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.settings.CONNECTION_MODE_TUNNEL
 import com.uacspoofer.mobile.settings.LanShareMode
@@ -137,18 +159,22 @@ import com.uacspoofer.mobile.vpn.LanShareStatus
 import com.uacspoofer.mobile.vpn.MonthlyTrafficStore
 import com.uacspoofer.mobile.vpn.UacQuickSettingsTileService
 
-private val SettingsGroupShape = RoundedCornerShape(14.dp)
-private val SettingsGroupColor: Color
-    get() = when (com.uacspoofer.mobile.ui.theme.UacThemeState.theme) {
-        com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS -> Color(0xE610142E)
-        com.uacspoofer.mobile.ui.theme.AppTheme.NEON -> Color(0xE6140824)
-        com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC -> Color(0xE6121C28)
-    }
-private val SettingsHairlineColor = Color.White.copy(alpha = 0.07f)
+private val SettingsGroupShape = RoundedCornerShape(20.dp)
+private val SettingsGroupColor get() = UacColors.SettingsSurface
+private val SettingsRowTextInset = 58.dp
+
+private enum class SettingsSection(val icon: ImageVector) {
+    APPEARANCE(Icons.Outlined.Palette),
+    CONNECTION(Icons.Outlined.VpnKey),
+    PRIVACY(Icons.Outlined.Shield),
+    TOOLS(Icons.Outlined.Tune),
+}
 
 @Composable
 internal fun SettingsScreen(
     onMenuClick: () -> Unit,
+    themeEditorEnabled: Boolean,
+    onEditTheme: () -> Unit,
     onAdvancedSettingsClick: () -> Unit,
     onPowSettingsClick: () -> Unit,
     onTorSettingsClick: () -> Unit,
@@ -158,15 +184,18 @@ internal fun SettingsScreen(
     val isPersian = LocalHomePersian.current
     val engineStore = remember(context) { EngineModeStore.get(context) }
     val engineMode by engineStore.mode.collectAsStateWithLifecycle()
-    val localizedTextStyle = homeLocalizedTextStyle()
+    val localizedTextStyle = homeLocalizedTextStyle().copy(textAlign = TextAlign.Start)
+    val layoutDirection = if (isPersian) LayoutDirection.Rtl else LayoutDirection.Ltr
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     var tileNotice by remember { mutableStateOf<String?>(null) }
     val accent = UacColors.DisconnectedBlue
     val tileAddedMessage = homeText("Tile added successfully", "دکمه به پنل اضافه شد")
-    val tileAlreadyAddedMessage = homeText("Tile is already in Quick Settings", "دکمه از قبل داخل پنل هست")
+    val tileAlreadyAddedMessage = homeText("Tile is already in Quick Settings", "این دکمه از قبل در تنظیمات سریع هست")
     val tileNotAddedMessage = homeText("Tile was not added", "دکمه اضافه نشد")
     val tileManualMessage = homeText(
         "Open Quick Settings edit mode and drag UAC SNI Spoofer into the panel",
-        "ویرایش پنل تنظیمات سریع رو باز کن و UAC SNI Spoofer رو به پنل بکش",
+        "پنل تنظیمات سریع را باز کنید. در بخش ویرایش، دکمهٔ UAC SNI Spoofer را به پنل بکشید.",
     )
     val tileErrorMessage = homeText("Could not request the tile", "درخواست افزودن دکمه انجام نشد")
     val diagnosticsOpen = remember { mutableStateOf(false) }
@@ -178,52 +207,35 @@ internal fun SettingsScreen(
         return
     }
 
-    CompositionLocalProvider(LocalTextStyle provides localizedTextStyle) {
+    CompositionLocalProvider(LocalLayoutDirection provides layoutDirection) {
         ToolPageScaffold(
             accent = accent,
-            verticalSpacing = 16.dp,
+            verticalSpacing = 22.dp,
+            listState = listState,
+            textStyle = localizedTextStyle,
             header = {
-                ToolPageHeader(
-                    title = homeText("General settings", "تنظیمات کلی"),
-                    subtitle = homeText("App and connection preferences", "تنظیمات برنامه و اتصال"),
-                    icon = Icons.Outlined.Settings,
-                    accent = accent,
+                SettingsPageHeader(
                     onMenuClick = onMenuClick,
+                    onSectionClick = { section ->
+                        scope.launch { listState.animateScrollToItem(section.ordinal) }
+                    },
                 )
             },
         ) {
-            item {
-                SettingsGroup(homeText("App theme", "تم برنامه")) {
-                    AppThemeSettingsRow()
+            item(key = SettingsSection.APPEARANCE) {
+                SettingsGroup(homeText("App appearance", "ظاهر برنامه")) {
+                    AppThemeSettingsRow(themeEditorEnabled, onEditTheme)
                 }
             }
-            item {
-                SettingsGroup(homeText("Connection & Network Settings", "تنظیمات اتصال و شبکه")) {
+            item(key = SettingsSection.CONNECTION) {
+                SettingsGroup(homeText("Connection and network", "اتصال و شبکه")) {
                     ConnectionModeSettingsRow(showDivider = true)
-                    AutoConnectSettingsRow(showDivider = true)
-                    LanShareSettingsRow(showDivider = true)
-                    QuicBlockSettingsRow(showDivider = true)
-                    IranDirectSettingsRow(showDivider = true)
-                    ManualDirectDomainsSettingsRow(showDivider = true)
-                    TrafficUsageSettingsRow(showDivider = false)
-                }
-            }
-            item {
-                SettingsGroup(homeText("Privacy & Security", "حریم خصوصی و امنیت")) {
-                    KillSwitchSettingsRow(showDivider = true)
-                    GpsSpoofSettingsRow(showDivider = true)
-                    DnsSinkholeSettingsRow(showDivider = true)
-                    WebRtcBlockSettingsRow(showDivider = true)
-                    Ipv6BlockSettingsRow(showDivider = false)
-                }
-            }
-            item {
-                SettingsGroup(homeText("More", "سایر")) {
+                    TunBackendSettingsRow()
                     if (engineMode.isPow) {
                         SettingsNavRow(
                             icon = Icons.Outlined.Hub,
                             title = homeText("UAC PoW", "UAC PoW"),
-                            summary = homeText("Outer hop and MASQUE", "لایه بیرونی و MASQUE"),
+                            summary = homeText("Connection path and MASQUE", "مسیر اتصال و تنظیمات MASQUE"),
                             isPersian = isPersian,
                             showDivider = true,
                             onClick = onPowSettingsClick,
@@ -234,8 +246,8 @@ internal fun SettingsScreen(
                             icon = Icons.Outlined.Shield,
                             title = homeText("Tor settings", "تنظیمات Tor"),
                             summary = homeText(
-                                "Bridges, exit, fragment, watchdog",
-                                "پل‌ها، خروجی، تکه‌کردن، نگهبان",
+                                "Bridges, exit location and connection options",
+                                "پل‌ها، موقعیت خروجی و گزینه‌های اتصال",
                             ),
                             isPersian = isPersian,
                             showDivider = true,
@@ -247,8 +259,8 @@ internal fun SettingsScreen(
                             icon = Icons.Outlined.Tune,
                             title = homeText("Direct settings", "تنظیمات Direct"),
                             summary = homeText(
-                                "Serverless: ClientHello split, UDP noise, DNS",
-                                "بدون سرور: تیکه‌کردن ClientHello، نویز UDP، DNS",
+                                "DNS and connection options for serverless mode",
+                                "تنظیمات DNS و اتصال در حالت بدون سرور",
                             ),
                             isPersian = isPersian,
                             showDivider = true,
@@ -260,19 +272,37 @@ internal fun SettingsScreen(
                             icon = Icons.Outlined.Tune,
                             title = homeText("Xray settings", "تنظیمات Xray"),
                             summary = homeText(
-                                "DNS, TUN and transport",
-                                "DNS، TUN و انتقال",
+                                "DNS, TUN and transport options",
+                                "تنظیمات DNS، تونل و روش انتقال",
                             ),
                             isPersian = isPersian,
                             showDivider = true,
                             onClick = onAdvancedSettingsClick,
                         )
                     }
+                    AutoConnectSettingsRow(showDivider = true)
+                    LanShareSettingsRow(showDivider = true)
+                    QuicBlockSettingsRow(showDivider = true)
+                    IranDirectSettingsRow(showDivider = true)
+                    ManualDirectDomainsSettingsRow(showDivider = true)
+                    TrafficUsageSettingsRow(showDivider = false)
+                }
+            }
+            item(key = SettingsSection.PRIVACY) {
+                SettingsGroup(homeText("Privacy and security", "امنیت و حریم خصوصی")) {
+                    KillSwitchSettingsRow(showDivider = true)
+                    GpsSpoofSettingsRow(showDivider = true)
+                    DnsSinkholeSettingsRow(showDivider = true)
+                    WebRtcBlockSettingsRow(showDivider = true)
+                    Ipv6BlockSettingsRow(showDivider = false)
+                }
+            }
+            item(key = SettingsSection.TOOLS) {
+                SettingsGroup(homeText("Tools and maintenance", "ابزارها و نگهداری")) {
                     SettingsBackupRows(isPersian = isPersian)
                     CrashReportSettingsRow(showDivider = true)
                     QuickSettingsTileRow(
                         notice = tileNotice,
-                        showDivider = false,
                         onAdd = {
                             requestQuickSettingsTile(context) { result ->
                                 tileNotice = when (result) {
@@ -314,6 +344,137 @@ internal fun SettingsScreen(
 }
 
 @Composable
+private fun SettingsPageHeader(
+    onMenuClick: () -> Unit,
+    onSectionClick: (SettingsSection) -> Unit,
+) {
+    val shape = RoundedCornerShape(16.dp)
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier.widthIn(max = WideShell.PageContentMax - 36.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    homeText("General settings", "تنظیمات کلی"),
+                    modifier = Modifier.weight(1f).semantics { heading() },
+                    color = UacColors.TextPrimary,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 35.sp,
+                )
+                IconButton(
+                    onClick = onMenuClick,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(SettingsGroupColor, CircleShape)
+                        .border(1.dp, UacColors.CardBorder, CircleShape)
+                        .openDrawerOnDpadLeft(onMenuClick),
+                ) {
+                    Icon(
+                        Icons.Outlined.Menu,
+                        contentDescription = homeText("Open navigation", "باز کردن منوی برنامه"),
+                        tint = UacColors.TextPrimary,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(SettingsGroupColor)
+                    .border(1.dp, UacColors.CardBorder, shape)
+                    .padding(horizontal = 4.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                for (section in SettingsSection.entries) {
+                    Column(
+                        modifier = Modifier.weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(role = Role.Button) { onSectionClick(section) }
+                            .padding(vertical = 7.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        Icon(section.icon, null, tint = UacColors.DisconnectedBlue, modifier = Modifier.size(18.dp))
+                        Text(
+                            when (section) {
+                                SettingsSection.APPEARANCE -> homeText("Appearance", "ظاهر")
+                                SettingsSection.CONNECTION -> homeText("Connection", "اتصال")
+                                SettingsSection.PRIVACY -> homeText("Security", "امنیت")
+                                SettingsSection.TOOLS -> homeText("Tools", "ابزارها")
+                            },
+                            color = UacColors.TextPrimary,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TunBackendSettingsRow() {
+    val context = LocalContext.current
+    val store = remember(context) { TunBackendStore(context) }
+    var selected by remember(store) { mutableStateOf(store.selected()) }
+    var open by remember { mutableStateOf(false) }
+    val title = homeText("TUN engine", "موتور تونل (TUN)")
+    val reconnect = homeText(
+        "Reconnect the VPN to apply this change.",
+        "برای اعمال تغییر، VPN را قطع و دوباره وصل کنید.",
+    )
+    val choices = listOf(
+        PowMenuChoice(
+            TunBackend.HEV.id,
+            homeText("HEV (Default)", "HEV (پیش‌فرض)"),
+            homeText("Uses the stable tunnel implementation.", "از پیاده‌سازی پایدار تونل استفاده می‌کند."),
+        ),
+        PowMenuChoice(
+            TunBackend.ZEPTUN.id,
+            homeText("Zeptun (Experimental)", "Zeptun (آزمایشی)"),
+            homeText(
+                "Uses Zeptun to process VPN traffic.",
+                "ترافیک VPN را با Zeptun پردازش می‌کند.",
+            ),
+        ),
+    )
+    val current = choices.first { it.id == selected.id }
+    SettingsNavRow(
+        icon = Icons.Outlined.VpnKey,
+        title = title,
+        summary = current.title,
+        isPersian = LocalHomePersian.current,
+        showDivider = true,
+        onClick = { open = true },
+    )
+    if (open) {
+        PowChoiceSheet(
+            title = title,
+            choices = choices,
+            selectedId = selected.id,
+            accent = UacColors.DisconnectedBlue,
+            onSelect = { id ->
+                val next = TunBackend.fromId(id)
+                if (next != selected) {
+                    store.select(next)
+                    selected = next
+                    val state = ConnectionStateStore.state.value
+                    if (state == ConnectionState.CONNECTED || state == ConnectionState.CONNECTING) {
+                        android.widget.Toast.makeText(context, reconnect, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            onDismiss = { open = false },
+        )
+    }
+}
+
+@Composable
 private fun ConnectionModeSettingsRow(showDivider: Boolean) {
     val context = LocalContext.current
     val store = remember(context) { AdvancedSettingsStore(context) }
@@ -324,12 +485,14 @@ private fun ConnectionModeSettingsRow(showDivider: Boolean) {
         PowMenuChoice(
             CONNECTION_MODE_TUNNEL,
             homeText("Tunnel (VPN)", "تونل (VPN)"),
-            homeText("Every app on the phone goes through the VPN.", "همه‌ی برنامه‌های گوشی از VPN رد می‌شن."),
+            homeText("Routes device traffic through the VPN, subject to your app routing rules.",
+                "ترافیک دستگاه طبق تنظیمات مسیریابی برنامه‌ها از VPN عبور می‌کند."),
         ),
         PowMenuChoice(
             CONNECTION_MODE_PROXY,
             homeText("Proxy only", "فقط پروکسی"),
-            homeText("Only apps you set up yourself use it.", "فقط برنامه‌هایی که خودت تنظیم کنی ازش رد می‌شن."),
+            homeText("Apps that you configure to use the proxy connect through it.",
+                "برنامه‌هایی که برای استفاده از پروکسی تنظیم کرده‌اید از آن عبور می‌کنند."),
         ),
     )
     val current = modes.firstOrNull { it.id == advanced.connectionMode } ?: modes.first()
@@ -338,9 +501,9 @@ private fun ConnectionModeSettingsRow(showDivider: Boolean) {
             icon = Icons.Outlined.VpnKey,
             title = homeText("Connection mode", "حالت اتصال"),
             summary = if (proxy) {
-                homeText("Port ${advanced.socksPort} · Xray, Tor and PoW", "پورت ${advanced.socksPort} · Xray، Tor و PoW")
+                homeText("Proxy only, port ${advanced.socksPort}", "فقط پروکسی روی پورت ${advanced.socksPort}")
             } else {
-                homeText("VPN for every app · Xray, Tor and PoW", "VPN برای همه‌ی برنامه‌ها · Xray، Tor و PoW")
+                current.title
             },
             isPersian = LocalHomePersian.current,
             showDivider = false,
@@ -348,14 +511,14 @@ private fun ConnectionModeSettingsRow(showDivider: Boolean) {
         )
         if (proxy) {
             Column(
-                modifier = Modifier.padding(start = 50.dp, end = 12.dp, bottom = 10.dp),
+                modifier = Modifier.padding(start = SettingsRowTextInset, end = 14.dp, bottom = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    homeText(
+                    homeLatinDigits(homeText(
                         "Set apps to 127.0.0.1 and this port. Applies to the next connection.",
-                        "برنامه‌ها را روی 127.0.0.1 و این پورت تنظیم کن. از اتصال بعدی اعمال می‌شود.",
-                    ),
+                        "در برنامه‌ها، آدرس 127.0.0.1 و پورت زیر را وارد کنید. تغییر از اتصال بعدی اعمال می‌شود.",
+                    )),
                     color = UacColors.TextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 16.sp,
@@ -375,7 +538,7 @@ private fun ConnectionModeSettingsRow(showDivider: Boolean) {
                             fontWeight = FontWeight.Medium,
                         )
                         Text(
-                            homeText("Needed for voice calls and games.", "برای تماس صوتی و بازی‌ها لازمه."),
+                            homeText("Needed for voice calls and games.", "برای تماس صوتی و بعضی بازی‌ها لازم است."),
                             color = UacColors.TextSecondary,
                             fontSize = 12.sp,
                         )
@@ -395,7 +558,7 @@ private fun ConnectionModeSettingsRow(showDivider: Boolean) {
     }
     if (open) {
         PowChoiceSheet(
-            title = homeText("How apps use the connection", "برنامه‌ها چطور از اتصال استفاده کنن"),
+            title = homeText("Connection mode", "حالت اتصال برنامه‌ها"),
             choices = modes,
             selectedId = current.id,
             accent = UacColors.DisconnectedBlue,
@@ -410,7 +573,7 @@ private fun ConnectionModeSettingsRow(showDivider: Boolean) {
 @Composable
 private fun SocksPortField(value: Int, onValid: (Int) -> Unit) {
     var text by remember(value) { mutableStateOf(value.toString()) }
-        val valid = text.toIntOrNull()?.let { it in 1024..65535 } == true
+    val valid = text.toIntOrNull()?.let { it in 1024..65535 } == true
     OutlinedTextField(
         value = text,
         onValueChange = { raw ->
@@ -418,6 +581,11 @@ private fun SocksPortField(value: Int, onValid: (Int) -> Unit) {
             text.toIntOrNull()?.takeIf { it in 1024..65535 && it != value }?.let(onValid)
         },
         modifier = Modifier.fillMaxWidth(),
+        textStyle = LocalTextStyle.current.copy(
+            textDirection = TextDirection.Ltr,
+            textAlign = TextAlign.Left,
+            fontFamily = FontFamily.Default,
+        ),
         label = { Text(homeText("SOCKS port", "پورت SOCKS"), fontSize = 11.sp) },
         singleLine = true,
         isError = !valid,
@@ -446,7 +614,7 @@ private fun KillSwitchSettingsRow(showDivider: Boolean) {
     val proxyMode = advanced.connectionMode == CONNECTION_MODE_PROXY
     val summary = when {
         proxyMode -> homeText("Tunnel mode only", "فقط حالت تونل")
-        blocking -> homeText("Blocking leaks", "نشت مسدود است")
+        blocking -> homeText("Internet access blocked", "دسترسی به اینترنت مسدود است")
         settings.killSwitch && connection == ConnectionState.CONNECTED ->
             homeText("Armed", "فعال")
         settings.killSwitch -> homeText("On", "روشن")
@@ -464,7 +632,7 @@ private fun KillSwitchSettingsRow(showDivider: Boolean) {
         },
         help = homeText(
             "If the VPN drops, other apps stay offline until you reconnect or turn this off. Tunnel mode only.",
-            "اگر VPN قطع شود، بقیه برنامه‌ها آفلاین می‌مانند تا دوباره وصل شوی یا این گزینه را خاموش کنی. فقط حالت تونل.",
+            "اگر VPN قطع شود، دسترسی برنامه‌ها به اینترنت بسته می‌شود. برای برقراری دسترسی، VPN را دوباره وصل کنید یا این گزینه را خاموش کنید. فقط در حالت تونل فعال است.",
         ),
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -486,7 +654,7 @@ private fun AutoConnectSettingsRow(showDivider: Boolean) {
         enabled = settings.autoConnect,
         help = homeText(
             "Connects after reboot and when the app opens, if VPN permission is already granted.",
-            "بعد از روشن شدن گوشی و باز شدن برنامه، اگر مجوز VPN از قبل داده شده باشد، خودش وصل می‌شود.",
+            "اگر مجوز VPN را داده باشید، پس از روشن شدن دستگاه یا باز کردن برنامه، اتصال به‌طور خودکار برقرار می‌شود.",
         ),
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -506,30 +674,41 @@ private fun LanShareSettingsRow(showDivider: Boolean) {
     val settings by store.settings.collectAsStateWithLifecycle()
     val connection by ConnectionStateStore.state.collectAsStateWithLifecycle()
     val endpoint by LanShareStatus.endpoint.collectAsStateWithLifecycle()
+    val port = settings.lanSharePort
+    val currentEndpoint = endpoint.port == port && endpoint.mode == settings.lanShareMode
     val ip = endpoint.address?.takeIf {
-        endpoint.listening && endpoint.mode == settings.lanShareMode && it.isNotBlank()
+        endpoint.listening && currentEndpoint && it.isNotBlank()
     }
-    val port = if (endpoint.listening) endpoint.port else LanSharePolicy.PORT
+    val unavailablePort = currentEndpoint && endpoint.detail == LanSharePolicy.PORT_UNAVAILABLE
     val ready = ip != null
     val summary = when {
         !settings.lanShare -> homeText("Off", "خاموش")
-        connection != ConnectionState.CONNECTED -> homeText("After connect", "بعد از وصل")
-        ready -> (if (settings.lanShareMode == LanShareMode.PLAYSTATION_5) "PS5 · " else "") + "$ip:$port"
-        endpoint.detail == "no lan" -> homeText("Needs Wi‑Fi", "وای‌فای لازم است")
+        connection != ConnectionState.CONNECTED -> homeText("Waiting for VPN", "در انتظار اتصال VPN")
+        ready -> {
+            val address = "$ip:$port"
+            val label = if (settings.lanShareMode == LanShareMode.PLAYSTATION_5) "PS5 · $address" else address
+            homeText(label, homeLtr(label))
+        }
+        unavailablePort -> homeText("Port unavailable", "پورت در دسترس نیست")
+        currentEndpoint && endpoint.detail == "no lan" -> homeText("Needs Wi‑Fi", "وای‌فای لازم است")
         else -> homeText("Starting…", "در حال شروع…")
     }
     SettingsToggleRow(
         icon = Icons.Outlined.WifiTethering,
-        title = homeText("LAN sharing", "اشتراک در شبکه"),
+        title = homeText("Share VPN on local network", "اشتراک VPN در شبکهٔ محلی"),
         summary = summary,
         enabled = settings.lanShare,
         help = homeText(
             "Choose SOCKS5 for compatible devices, or PlayStation 5 for the console's HTTP proxy. Both devices must be on the same network. Trusted networks only, no password.",
-            "برای دستگاه‌های سازگار SOCKS5 و برای کنسول PlayStation 5 را انتخاب کن. هر دو دستگاه باید در یک شبکه باشند. فقط شبکهٔ مورد اعتماد، بدون رمز.",
+            "برای دستگاه‌های سازگار، SOCKS5 را انتخاب کنید. کنسول PlayStation 5 از پروکسی HTTP استفاده می‌کند. چون این اتصال رمز ورود ندارد، هر دو دستگاه را به یک شبکهٔ مطمئن وصل کنید.",
         ),
-        extra = if (settings.lanShare) {
-            {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        extra = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                LanSharePortEditor(port) {
+                    store.setLanSharePort(it)
+                    if (store.snapshot().lanShare) VpnController.applyNetworkGuard(context)
+                }
+                if (settings.lanShare) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         LanShareMode.entries.forEach { mode ->
                             val selected = settings.lanShareMode == mode
@@ -554,22 +733,23 @@ private fun LanShareSettingsRow(showDivider: Boolean) {
                         ip = ip,
                         port = port,
                         connected = connection == ConnectionState.CONNECTED,
-                        needsWifi = endpoint.detail == "no lan",
+                        needsWifi = currentEndpoint && endpoint.detail == "no lan",
+                        unavailablePort = unavailablePort,
                         mode = settings.lanShareMode,
                     )
                     if (settings.lanShareMode == LanShareMode.PLAYSTATION_5) {
                         Text(homeText(
-                            "PS5: Settings → Network → Settings → Set Up Internet Connection → select your network → Advanced Settings → Proxy Server → Use. Enter this IP as Address and enter the port separately.",
-                            "در PS5 به Settings → Network → Settings → Set Up Internet Connection برو؛ روی شبکهٔ خودت Advanced Settings و سپس Proxy Server → Use را انتخاب کن. در Address فقط آی‌پی بالا را بنویس و پورت را جدا وارد کن.",
-                        ), color = UacColors.TextSecondary, fontSize = 11.sp)
+                            "On PS5, go to Settings, Network, Settings, then Set Up Internet Connection. Select your network and open Advanced Settings. Set Proxy Server to Use and enter the address and port separately.",
+                            "در PS5، از منوی Settings وارد Network شوید. در بخش Settings گزینهٔ Set Up Internet Connection را بزنید. شبکهٔ خود را انتخاب کنید و Advanced Settings را باز کنید. در Proxy Server گزینهٔ Use را بزنید و آدرس و پورت را جداگانه وارد کنید.",
+                        ), color = UacColors.TextSecondary, fontSize = 12.sp, lineHeight = 19.sp)
                         Text(homeText(
                             "HTTP/HTTPS proxy for compatible console services and downloads. UDP game traffic, voice chat and NAT are not tunneled by this mode.",
-                            "پروکسی HTTP/HTTPS برای سرویس‌های سازگار کنسول و دانلود است. ترافیک UDP بازی، چت صوتی و NAT با این حالت تونل نمی‌شوند.",
-                        ), color = UacColors.TextSecondary, fontSize = 11.sp)
+                            "این پروکسی برای دانلودها و سرویس‌های سازگار کنسول است. ترافیک UDP بازی، گفت‌وگوی صوتی و NAT از آن عبور نمی‌کنند.",
+                        ), color = UacColors.TextSecondary, fontSize = 12.sp, lineHeight = 19.sp)
                     }
                 }
             }
-        } else null,
+        },
         autoExpand = settings.lanShare,
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -577,6 +757,43 @@ private fun LanShareSettingsRow(showDivider: Boolean) {
             VpnController.applyNetworkGuard(context)
         },
     )
+}
+
+@Composable
+private fun LanSharePortEditor(port: Int, onSave: (Int) -> Unit) {
+    var text by rememberSaveable(port) { mutableStateOf(port.toString()) }
+    val nextPort = text.toIntOrNull()?.takeIf(LanSharePolicy::isValidPort)
+    val canSave = nextPort != null && nextPort != port
+    val focus = LocalFocusManager.current
+    fun save() {
+        if (canSave && nextPort != null) {
+            onSave(nextPort)
+            focus.clearFocus()
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it.filter(Char::isDigit) },
+            modifier = Modifier.weight(1f),
+            label = { Text(homeText("Sharing port", "پورت اشتراک")) },
+            singleLine = true,
+            isError = text.isNotEmpty() && nextPort == null,
+            supportingText = if (text.isNotEmpty() && nextPort == null) {
+                { Text(homeText("Enter a number from 1 to 65535.", "عددی از ۱ تا ۶۵۵۳۵ وارد کنید.")) }
+            } else null,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { save() }),
+        )
+        TextButton(enabled = canSave, onClick = ::save) {
+            Text(homeText("Save", "ذخیره"))
+        }
+    }
 }
 
 
@@ -614,12 +831,12 @@ private fun IranDirectSettingsRow(showDivider: Boolean) {
     LaunchedEffect(Unit) { refreshStatus() }
     SettingsToggleRow(
         icon = Icons.AutoMirrored.Outlined.AltRoute,
-        title = homeText("Iranian sites direct", "سایت‌های ایرانی مستقیم"),
+        title = homeText("Direct access to Iranian sites", "دسترسی مستقیم به سایت‌های ایرانی"),
         summary = if (settings.iranDirect) homeText("On", "روشن") else homeText("Off", "خاموش"),
         enabled = settings.iranDirect,
         help = homeText(
-            "Iranian sites open without the VPN, and load faster.",
-            "سایت‌های ایران بدون فیلترشکن و سریع‌تر باز می‌شن.",
+            "Traffic to Iranian sites uses your regular internet connection.",
+            "ترافیک سایت‌های ایرانی از اتصال عادی اینترنت عبور می‌کند.",
         ),
         extra = {
             Row(
@@ -850,12 +1067,12 @@ private fun QuicBlockSettingsRow(showDivider: Boolean) {
     }
     SettingsToggleRow(
         icon = Icons.Outlined.Speed,
-        title = homeText("QUIC Blocker", "مسدودساز QUIC"),
+        title = homeText("Block QUIC", "مسدود کردن QUIC"),
         summary = summary,
         enabled = settings.quicBlock,
         help = homeText(
             "Blocks UDP 443 so apps like YouTube, Instagram, and browsers fall back to TCP. That often fixes slow or stuck video loading.",
-            "ترافیک UDP 443 را مسدود می‌کند. این کار برنامه‌هایی مثل یوتیوب، اینستاگرام و مرورگرها را مجبور به استفاده از TCP کرده و مشکل کندی و لودینگ ویدیوها را برطرف می‌کند.",
+            "ترافیک UDP روی پورت 443 مسدود می‌شود تا برنامه‌های سازگار به TCP برگردند. این گزینه ممکن است به رفع مشکل بارگذاری ویدیو کمک کند.",
         ),
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -872,12 +1089,12 @@ private fun TrafficUsageSettingsRow(showDivider: Boolean) {
     val monthTotal = monthlyTrafficLabel(monthly.totalBytes)
     SettingsToggleRow(
         icon = Icons.Outlined.Schedule,
-        title = homeText("Traffic usage", "نمایش ترافیک مصرفی"),
-        summary = homeText("This month · $monthTotal", "این ماه · $monthTotal"),
+        title = homeText("Traffic usage", "مصرف ترافیک"),
+        summary = homeText("$monthTotal this month", "مصرف این ماه $monthTotal"),
         enabled = false,
         help = homeText(
             "VPN traffic on this phone. Session resets when you disconnect.",
-            "ترافیک VPN همین گوشی. جلسه با قطع شدن از نو شروع می‌شود.",
+            "مصرف VPN همین دستگاه. شمارندهٔ هر اتصال با قطع VPN بازنشانی می‌شود.",
         ),
         extra = { TrafficUsagePanels() },
         showDivider = showDivider,
@@ -905,7 +1122,7 @@ private fun DnsSinkholeSettingsRow(showDivider: Boolean) {
         enabled = settings.dnsSinkhole,
         help = homeText(
             "DNS Sinkhole. Locally blocks known tracker domains to improve speed and privacy.",
-            "DNS Sinkhole. دامنه‌های ردیاب (تِرَکر) شناخته شده را به صورت محلی مسدود می‌کند تا سرعت و حریم خصوصی بهبود یابد.",
+            "درخواست‌های DNS برای دامنه‌های شناخته‌شدهٔ تبلیغاتی و ردیاب‌ها روی دستگاه مسدود می‌شوند.",
         ),
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -935,7 +1152,7 @@ private fun WebRtcBlockSettingsRow(showDivider: Boolean) {
         enabled = settings.webRtcBlock,
         help = homeText(
             "Drops STUN/TURN packets so WebRTC cannot leak your real IP. May break in-browser voice/video calls such as Google Meet.",
-            "پکت‌های STUN/TURN را دراپ می‌کند تا از نشت آی‌پی واقعی شما توسط WebRTC جلوگیری کند. (ممکن است تماس‌های صوتی/تصویری تحت وب مثل Google Meet را قطع کند).",
+            "با مسدود کردن بسته‌های STUN و TURN از افشای آدرس IP در WebRTC جلوگیری می‌کند. ممکن است تماس‌های تحت وب، مثل Google Meet، دچار اختلال شوند.",
         ),
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -965,7 +1182,7 @@ private fun Ipv6BlockSettingsRow(showDivider: Boolean) {
         enabled = settings.ipv6Block,
         help = homeText(
             "Drops all IPv6 on the tunnel so your real IPv6 address cannot leak.",
-            "تمام ارتباطات IPv6 را در تونل مسدود می‌کند تا از لو رفتن آی‌پی واقعی شما جلوگیری شود.",
+            "ترافیک IPv6 در تونل مسدود می‌شود تا آدرس واقعی IPv6 دستگاه فاش نشود.",
         ),
         showDivider = showDivider,
         onCheckedChange = { checked ->
@@ -1012,9 +1229,9 @@ private fun GpsSpoofSettingsRow(showDivider: Boolean) {
     val summary = when {
         !enabled -> homeText("Off", "خاموش")
         needsSetup -> homeText("Needs setup", "نیاز به تنظیم")
-        connection != ConnectionState.CONNECTED -> homeText("After connect", "بعد از وصل")
-        countryName.isNotBlank() -> countryName
-        else -> homeText("Waiting…", "منتظر…")
+        connection != ConnectionState.CONNECTED -> homeText("Waiting for VPN", "در انتظار اتصال VPN")
+        countryName.isNotBlank() -> homeText(countryName, countryName)
+        else -> homeText("Waiting for location", "در انتظار موقعیت خروجی")
     }
     SettingsToggleRow(
         icon = Icons.Outlined.MyLocation,
@@ -1030,7 +1247,7 @@ private fun GpsSpoofSettingsRow(showDivider: Boolean) {
         },
         help = homeText(
             "Apps see the selected country, not your real location.",
-            "برنامه‌ها کشور انتخاب‌شده را می‌بینند، نه جای واقعی تو.",
+            "موقعیت GPS که به برنامه‌ها گزارش می‌شود بر اساس کشور خروجی VPN تنظیم می‌شود.",
         ),
         extra = if (needsSetup) {
             {
@@ -1051,7 +1268,7 @@ private fun GpsSpoofSettingsRow(showDivider: Boolean) {
                         modifier = Modifier.size(16.dp),
                     )
                     Text(
-                        homeText("Set as mock location", "mock location را همین برنامه بگذار"),
+                        homeText("Select the mock location app", "انتخاب برنامهٔ موقعیت مکانی آزمایشی"),
                         color = UacColors.TextPrimary,
                         fontSize = 12.sp,
                         modifier = Modifier.weight(1f),
@@ -1073,6 +1290,7 @@ private fun LanShareEndpointPanel(
     port: Int,
     connected: Boolean,
     needsWifi: Boolean,
+    unavailablePort: Boolean,
     mode: LanShareMode,
 ) {
     val context = LocalContext.current
@@ -1080,8 +1298,9 @@ private fun LanShareEndpointPanel(
     val ready = !ip.isNullOrBlank()
     val copyValue = if (!ready) null else if (mode == LanShareMode.PLAYSTATION_5) ip else "$ip:$port"
     val ipText = ip ?: when {
-        !connected -> homeText("Connect VPN first", "اول VPN را وصل کن")
+        !connected -> homeText("Connect VPN first", "ابتدا VPN را وصل کنید")
         needsWifi -> homeText("Needs Wi‑Fi", "وای‌فای لازم است")
+        unavailablePort -> homeText("Choose another port", "پورت دیگری انتخاب کنید")
         else -> homeText("Waiting…", "منتظر…")
     }
     Column(
@@ -1090,7 +1309,6 @@ private fun LanShareEndpointPanel(
     ) {
         LanShareValueRow(homeText("Type", "نوع"), mode.proxyType, ready = true)
         LanShareValueRow(homeText("IP", "آی‌پی"), ipText, ready = ready)
-        LanShareValueRow(homeText("Port", "پورت"), port.toString(), ready = true)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1104,6 +1322,7 @@ private fun LanShareEndpointPanel(
                     )
                     copied = true
                 }
+                .defaultMinSize(minHeight = 48.dp)
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1116,16 +1335,14 @@ private fun LanShareEndpointPanel(
             )
             Text(
                 when {
-                    !ready -> homeText("IP appears after connect", "آی‌پی بعد از وصل شدن می‌آید")
-                    copied -> homeText("Copied $copyValue", "کپی شد $copyValue")
-                    else -> if (mode == LanShareMode.PLAYSTATION_5) homeText("Copy IP $copyValue", "کپی آی‌پی $copyValue")
-                        else homeText("Copy $copyValue", "کپی $copyValue")
+                    !ready -> homeText("IP appears after connecting", "آدرس IP پس از اتصال نمایش داده می‌شود")
+                    copied -> homeText("Copied to clipboard", "در حافظهٔ موقت کپی شد")
+                    mode == LanShareMode.PLAYSTATION_5 -> homeText("Copy IP address", "کپی آدرس IP")
+                    else -> homeText("Copy address and port", "کپی آدرس و پورت")
                 },
                 color = UacColors.TextPrimary,
                 fontSize = 12.sp,
                 modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -1155,7 +1372,7 @@ private fun LanShareValueRow(
             fontWeight = FontWeight.SemiBold,
             fontFamily = if (ready) FontFamily.Monospace else homeLocalizedFont(),
             textAlign = TextAlign.Start,
-            style = LocalTextStyle.current.copy(textDirection = TextDirection.Ltr),
+            style = if (ready) LocalTextStyle.current.copy(textDirection = TextDirection.Ltr) else LocalTextStyle.current,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1164,71 +1381,147 @@ private fun LanShareValueRow(
 }
 
 @Composable
-private fun AppThemeSettingsRow() {
+private fun AppThemeSettingsRow(themeEditorEnabled: Boolean, onEditTheme: () -> Unit) {
     val context = LocalContext.current
-    val store = remember(context) { com.uacspoofer.mobile.ui.theme.AppThemeStore.get(context) }
+    val store = remember(context) { AppThemeStore.get(context) }
     val theme by store.theme.collectAsStateWithLifecycle()
+    val savedThemes by store.savedThemes.collectAsStateWithLifecycle()
+    val selectedId by store.selectedId.collectAsStateWithLifecycle()
+    val unlockTaps = remember { FiveTapSequence() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .selectableGroup()
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        AppThemeChoice(
-            label = "Classic",
-            selected = theme == com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC,
-            onClick = { store.set(com.uacspoofer.mobile.ui.theme.AppTheme.CLASSIC) },
-            modifier = Modifier.weight(1f),
+        for (base in AppTheme.entries) {
+            AppThemeChoice(
+                theme = base,
+                selected = theme == base && selectedId == null,
+                onClick = {
+                    if (store.theme.value != base || store.selectedId.value != null) store.set(base)
+                    if (base == AppTheme.NEON) {
+                        if (unlockTaps.tap(SystemClock.elapsedRealtime())) onEditTheme()
+                    } else {
+                        unlockTaps.reset()
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+    if (themeEditorEnabled && savedThemes.isNotEmpty()) {
+        SettingsHairline()
+        Text(
+            homeText("Saved themes", "تم‌های ذخیره‌شده"),
+            color = UacColors.TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(start = 14.dp, top = 12.dp).semantics { heading() },
         )
-        AppThemeChoice(
-            label = "Neon",
-            selected = theme == com.uacspoofer.mobile.ui.theme.AppTheme.NEON,
-            onClick = { store.set(com.uacspoofer.mobile.ui.theme.AppTheme.NEON) },
-            modifier = Modifier.weight(1f),
-        )
-        AppThemeChoice(
-            label = "Solaris",
-            selected = theme == com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS,
-            onClick = { store.set(com.uacspoofer.mobile.ui.theme.AppTheme.SOLARIS) },
-            modifier = Modifier.weight(1f),
-        )
+        for (saved in savedThemes) {
+            val selected = selectedId == saved.id
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .selectable(selected = selected, role = Role.RadioButton, onClick = {
+                        unlockTaps.reset()
+                        store.selectSaved(saved.id)
+                    })
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                RadioButton(selected = selected, onClick = null)
+                Column(Modifier.weight(1f)) {
+                    Text(homeText(saved.name, saved.name), color = UacColors.TextPrimary, fontSize = 15.sp,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(saved.base.displayName(), color = UacColors.TextSecondary, fontSize = 13.sp)
+                }
+                IconButton(onClick = {
+                    unlockTaps.reset()
+                    store.selectSaved(saved.id)
+                    onEditTheme()
+                }) {
+                    Icon(Icons.Outlined.Edit, homeText("Edit ${saved.name}", "ویرایش ${saved.name}"),
+                        tint = UacColors.TextPrimary)
+                }
+            }
+        }
     }
 }
 
+internal class FiveTapSequence {
+    private var lastTapAt = 0L
+    private var count = 0
+
+    fun tap(now: Long): Boolean {
+        if (now - lastTapAt >= 500L) reset()
+        lastTapAt = now
+        count++
+        if (count < 5) return false
+        reset()
+        return true
+    }
+
+    fun reset() {
+        count = 0
+    }
+}
+
+private fun AppTheme.displayName(): String = name.lowercase(Locale.ROOT).replaceFirstChar { it.uppercaseChar() }
+
 @Composable
 private fun AppThemeChoice(
-    label: String,
+    theme: AppTheme,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val neon = com.uacspoofer.mobile.ui.theme.UacThemeState.isNeon
-    val shape = RoundedCornerShape(12.dp)
-    val border = when {
-        selected && neon -> UacColors.NeonMagenta
-        selected -> UacColors.DisconnectedBlue
-        else -> UacColors.CardBorder
-    }
-    val fill = when {
-        selected && neon -> UacColors.NeonMagenta.copy(alpha = 0.18f)
-        selected -> UacColors.DisconnectedBlue.copy(alpha = 0.16f)
-        else -> Color.Transparent
-    }
-    Box(
+    val palette = remember(theme) { paletteFor(theme, tokens = null) }
+    val shape = RoundedCornerShape(14.dp)
+    Column(
         modifier = modifier
-            .height(42.dp)
             .clip(shape)
-            .background(fill, shape)
-            .border(1.dp, border, shape)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+            .background(if (selected) UacColors.DisconnectedBlue.copy(alpha = 0.12f) else Color.Transparent)
+            .border(1.dp, if (selected) UacColors.DisconnectedBlue else UacColors.Divider, shape)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .padding(5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
+        Box(
+            modifier = Modifier.fillMaxWidth()
+                .height(48.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(Brush.linearGradient(listOf(palette.backgroundTop, palette.settingsSurface, palette.backgroundBottom))),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier.size(31.dp)
+                    .border(1.dp, palette.connected.copy(alpha = 0.5f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(Modifier.size(23.dp).background(palette.surface, CircleShape)
+                    .border(1.dp, palette.connected, CircleShape))
+            }
+            if (selected) {
+                Icon(
+                    Icons.Outlined.Check,
+                    contentDescription = null,
+                    tint = palette.backgroundTop,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).size(15.dp)
+                        .background(palette.connected, CircleShape).padding(2.dp),
+                )
+            }
+        }
         Text(
-            label,
+            theme.displayName(),
             color = if (selected) UacColors.TextPrimary else UacColors.TextSecondary,
-            fontSize = 14.sp,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            textAlign = TextAlign.Center,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-            maxLines = 1,
         )
     }
 }
@@ -1241,17 +1534,18 @@ private fun SettingsGroup(
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             title,
-            color = UacColors.TextSecondary.copy(alpha = 0.78f),
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 16.sp,
-            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+            color = UacColors.TextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 23.sp,
+            modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp).semantics { heading() },
         )
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(SettingsGroupShape)
                 .background(SettingsGroupColor)
+                .border(1.dp, UacColors.Divider, SettingsGroupShape)
                 .animateContentSize(),
             content = content,
         )
@@ -1271,41 +1565,45 @@ private fun SettingsToggleRow(
     summaryColor: Color? = null,
     onCheckedChange: ((Boolean) -> Unit)? = null,
 ) {
-    var expanded by remember { mutableStateOf(autoExpand) }
+    var expanded by rememberSaveable { mutableStateOf(autoExpand) }
     LaunchedEffect(autoExpand) {
         if (autoExpand) expanded = true
     }
     val statusColor = summaryColor ?: if (enabled) UacColors.ConnectedGreen else UacColors.TextSecondary
+    val detailsAction = if (expanded) homeText("Hide details", "بستن توضیحات") else homeText("Show details", "نمایش توضیحات")
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 12.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+                .padding(start = 6.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .clickable { expanded = !expanded },
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(role = Role.Button, onClickLabel = detailsAction) { expanded = !expanded }
+                    .defaultMinSize(minHeight = 60.dp)
+                    .padding(start = 8.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SettingsRowIcon(icon, enabled)
-                Spacer(Modifier.size(10.dp))
+                Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
                         title,
                         color = UacColors.TextPrimary,
                         fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        lineHeight = 19.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.SemiBold,
+                        lineHeight = 22.sp,
                     )
                     Text(
-                        summary,
+                        homeLatinDigits(summary),
                         color = statusColor,
-                        fontSize = 12.sp,
-                        maxLines = 1,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -1326,6 +1624,7 @@ private fun SettingsToggleRow(
                 Switch(
                     checked = enabled,
                     onCheckedChange = onCheckedChange,
+                    modifier = Modifier.semantics { contentDescription = title },
                     colors = SwitchDefaults.colors(
                         checkedTrackColor = UacColors.ConnectedGreen,
                         checkedThumbColor = Color.White,
@@ -1338,14 +1637,14 @@ private fun SettingsToggleRow(
         }
         if (expanded) {
             Column(
-                modifier = Modifier.padding(start = 50.dp, end = 14.dp, bottom = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(start = SettingsRowTextInset, end = 14.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    help,
+                    homeLatinDigits(help),
                     color = UacColors.TextSecondary,
-                    fontSize = 12.sp,
-                    lineHeight = 16.sp,
+                    fontSize = 13.sp,
+                    lineHeight = 21.sp,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 extra?.invoke()
@@ -1362,37 +1661,37 @@ internal fun SettingsNavRow(
     summary: String,
     isPersian: Boolean,
     showDivider: Boolean,
+    actionIcon: ImageVector = if (isPersian) Icons.Outlined.ChevronLeft else Icons.Outlined.ChevronRight,
     onClick: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(start = 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+                .clickable(role = Role.Button, onClick = onClick)
+                .defaultMinSize(minHeight = 66.dp)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             SettingsRowIcon(icon, enabled = false)
-            Spacer(Modifier.size(10.dp))
+            Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
                     color = UacColors.TextPrimary,
                     fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 22.sp,
                 )
                 Text(
-                    summary,
+                    homeLatinDigits(summary),
                     color = UacColors.TextSecondary,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
                 )
             }
             Icon(
-                if (isPersian) Icons.Outlined.ChevronLeft else Icons.Outlined.ChevronRight,
+                actionIcon,
                 contentDescription = null,
                 tint = UacColors.TextSecondary.copy(alpha = 0.7f),
                 modifier = Modifier.size(18.dp),
@@ -1419,11 +1718,11 @@ private fun CrashReportSettingsRow(showDivider: Boolean) {
     }
     SettingsNavRow(
         icon = Icons.Outlined.ContentCopy,
-        title = homeText("Copy crash report", "کپی گزارش کرش"),
+        title = homeText("Copy crash report", "کپی گزارش خطا"),
         summary = when {
-            copied -> homeText("Copied — paste it in a message", "کپی شد — در پیام بچسبان")
-            hasReport -> homeText("Last crash is ready to send", "آخرین کرش آماده ارسال است")
-            else -> homeText("No crash recorded yet", "کرشی ثبت نشده")
+            copied -> homeText("Copied. You can paste it in a message.", "گزارش کپی شد. می‌توانید آن را در پیام جای‌گذاری کنید.")
+            hasReport -> homeText("Copy the most recent report.", "آخرین گزارش آمادهٔ کپی است.")
+            else -> homeText("No crash report yet", "هنوز گزارشی ثبت نشده است")
         },
         isPersian = LocalHomePersian.current,
         showDivider = showDivider,
@@ -1445,62 +1744,27 @@ private fun CrashReportSettingsRow(showDivider: Boolean) {
 @Composable
 private fun QuickSettingsTileRow(
     notice: String?,
-    showDivider: Boolean,
     onAdd: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth().animateContentSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onAdd)
-                .padding(start = 12.dp, end = 10.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SettingsRowIcon(Icons.Outlined.DashboardCustomize, enabled = false)
-            Spacer(Modifier.size(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    homeText("Quick Settings tile", "دکمه تنظیمات سریع"),
-                    color = UacColors.TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    homeText("From the notification shade", "از پنل بالای گوشی"),
-                    color = UacColors.TextSecondary,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(CircleShape)
-                    .background(UacColors.ConnectedGreen)
-                    .clickable(onClick = onAdd),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Outlined.Add,
-                    contentDescription = homeText("Add", "افزودن"),
-                    tint = Color.Black,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
+        SettingsNavRow(
+            icon = Icons.Outlined.DashboardCustomize,
+            title = homeText("Add a Quick Settings button", "افزودن دکمه به تنظیمات سریع"),
+            summary = homeText("Connect or disconnect from the Android panel.", "از پنل اندروید VPN را وصل یا قطع کنید."),
+            isPersian = LocalHomePersian.current,
+            showDivider = false,
+            actionIcon = Icons.Outlined.Add,
+            onClick = onAdd,
+        )
         notice?.let { message ->
             Text(
                 message,
                 color = UacColors.TextSecondary,
-                fontSize = 12.sp,
-                lineHeight = 16.sp,
-                modifier = Modifier.padding(start = 50.dp, end = 14.dp, bottom = 10.dp),
+                fontSize = 13.sp,
+                lineHeight = 21.sp,
+                modifier = Modifier.padding(start = SettingsRowTextInset, end = 14.dp, bottom = 12.dp),
             )
         }
-        if (showDivider) SettingsHairline()
     }
 }
 
@@ -1509,11 +1773,11 @@ private fun SettingsRowIcon(icon: ImageVector, enabled: Boolean) {
     val tint = if (enabled) UacColors.ConnectedGreen else UacColors.TextSecondary
     Box(
         modifier = Modifier
-            .size(28.dp)
-            .background(tint.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
+            .size(32.dp)
+            .background(tint.copy(alpha = 0.13f), RoundedCornerShape(9.dp)),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
     }
 }
 
@@ -1522,9 +1786,9 @@ private fun SettingsHairline() {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 50.dp)
-            .height(0.6.dp)
-            .background(SettingsHairlineColor),
+            .padding(start = SettingsRowTextInset, end = 14.dp)
+            .height(1.dp)
+            .background(UacColors.DividerOverride.orDefault(Color.White.copy(alpha = 0.07f))),
     )
 }
 

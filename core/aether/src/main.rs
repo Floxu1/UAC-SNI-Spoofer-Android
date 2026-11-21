@@ -17,7 +17,7 @@ use crate::{
 };
 
 const TUNNEL_MTU: usize = 1280;
-const INNER_MTU: usize = 1200;
+pub const INNER_MTU: usize = 1200;
 const DEFAULT_CONFIG: &str = "aether.toml";
 static INITIALIZED: std::sync::Once = std::sync::Once::new();
 
@@ -37,6 +37,8 @@ pub struct StartOptions {
     pub masque_config_path: Option<String>,
     pub protocol: Protocol,
     pub forced_peer: Option<SocketAddr>,
+    #[cfg(feature = "direct-support")]
+    pub direct_retry_skip_ip: Option<std::net::IpAddr>,
     pub scan_mode: ScanMode,
     pub ip_scan: IpScan,
     pub obfuscation_profile: Option<String>,
@@ -45,6 +47,8 @@ pub struct StartOptions {
     pub endpoint_cache_path: Option<String>,
     pub endpoint_discovery: EndpointDiscovery,
     pub masque_transport: MasqueTransport,
+    pub h2_carrier_peer: Option<SocketAddr>,
+    pub h2_carrier_config: Option<String>,
     pub tls_curve_preset: TlsCurvePreset,
     pub wireguard_data_check: bool,
     pub tun_fd: Option<i32>,
@@ -101,14 +105,22 @@ pub struct StartOptions {
 pub enum MasqueTransport {
     H3,
     H2,
+    H3Experimental,
+    H3OverH2,
 }
 
 impl MasqueTransport {
     pub fn parse(value: &str) -> Self {
         match value.trim().to_lowercase().as_str() {
             "h2" | "http2" | "http/2" => Self::H2,
+            "h3-experimental" => Self::H3Experimental,
+            "h3-over-h2" => Self::H3OverH2,
             _ => Self::H3,
         }
+    }
+
+    pub fn verifies_h3_payload(self) -> bool {
+        matches!(self, Self::H3Experimental | Self::H3OverH2)
     }
 }
 
@@ -170,6 +182,8 @@ impl StartOptions {
             masque_config_path: None,
             protocol,
             forced_peer: None,
+            #[cfg(feature = "direct-support")]
+            direct_retry_skip_ip: None,
             scan_mode: ScanMode::Balanced,
             ip_scan: IpScan::V4,
             obfuscation_profile: None,
@@ -178,6 +192,8 @@ impl StartOptions {
             endpoint_cache_path: None,
             endpoint_discovery: EndpointDiscovery::Cache,
             masque_transport: MasqueTransport::H3,
+            h2_carrier_peer: None,
+            h2_carrier_config: None,
             tls_curve_preset: TlsCurvePreset::Chrome,
             wireguard_data_check: true,
             tun_fd: None,
@@ -302,8 +318,33 @@ pub async fn run_cli() -> Result<()> {
         return Ok(());
     }
 
-    select_masque_transport().await;
-    options.masque_transport = if std::env::var("AETHER_MASQUE_HTTP2").is_ok() {
+    if let Ok(carrier) = std::env::var("AETHER_H3_OVER_H2") {
+        if options.protocol != Protocol::Masque
+            || std::env::var_os("AETHER_H3_EXPERIMENTAL").is_some()
+            || std::env::var_os("AETHER_MASQUE_HTTP2").is_some()
+        {
+            return Err(AetherError::Other(
+                "--h3-over-h2 requires MASQUE and exclusive transport selection".into(),
+            ));
+        }
+        let carrier = carrier.parse().map_err(|_| {
+            AetherError::Other("--h3-over-h2 requires an IP address and port".into())
+        })?;
+        if options.forced_peer.is_none() {
+            return Err(AetherError::Other("--h3-over-h2 requires an inner --peer".into()));
+        }
+        options.masque_transport = MasqueTransport::H3OverH2;
+        options.h2_carrier_peer = Some(carrier);
+        options.h2_carrier_config = std::env::var("AETHER_H3_CARRIER_CONFIG").ok();
+        return start(options).await;
+    }
+
+    if std::env::var("AETHER_H3_EXPERIMENTAL").is_err() {
+        select_masque_transport().await;
+    }
+    options.masque_transport = if std::env::var("AETHER_H3_EXPERIMENTAL").is_ok() {
+        MasqueTransport::H3Experimental
+    } else if std::env::var("AETHER_MASQUE_HTTP2").is_ok() {
         MasqueTransport::H2
     } else {
         MasqueTransport::H3
@@ -316,6 +357,9 @@ pub async fn start(options: StartOptions) -> Result<()> {
     initialize();
 
     match options.protocol {
+        Protocol::Masque if options.masque_transport == MasqueTransport::H3OverH2 => {
+            run_h3_over_h2(&options).await
+        }
         Protocol::Masque => {
             masque_h2::set_preferred(options.masque_transport == MasqueTransport::H2);
             let config_path = masque_config_path(&options);
@@ -365,7 +409,7 @@ pub async fn start(options: StartOptions) -> Result<()> {
     }
 }
 
-fn apply_runtime_options(options: &StartOptions) {
+pub fn apply_runtime_options(options: &StartOptions) {
     fn set_optional(key: &str, value: &Option<String>) {
         match value
             .as_deref()
@@ -704,7 +748,7 @@ async fn adopt_team_profile(identity: account::Identity) -> account::Identity {
     identity
 }
 
-fn warp_config_path(options: &StartOptions) -> String {
+pub fn warp_config_path(options: &StartOptions) -> String {
     if let Some(p) = options.wireguard_config_path.clone() {
         return p;
     }
@@ -714,7 +758,7 @@ fn warp_config_path(options: &StartOptions) -> String {
     }
 }
 
-fn masque_config_path(options: &StartOptions) -> String {
+pub fn masque_config_path(options: &StartOptions) -> String {
     if let Some(p) = options.masque_config_path.clone() {
         return p;
     }
@@ -752,7 +796,7 @@ fn keep_saved_identity() -> bool {
     )
 }
 
-async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> {
+pub async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> {
     if let Some(identity) = config::load(config_path)? {
         log::info!("[+] loaded existing warp identity from {config_path}");
         crate::ffi::record_log("Key: already saved, not requesting a new one");
@@ -785,7 +829,7 @@ async fn load_or_provision_warp(config_path: &str) -> Result<account::Identity> 
     Ok(identity)
 }
 
-async fn load_or_provision_masque(
+pub async fn load_or_provision_masque(
     config_path: &str,
     force_new_cert: bool,
 ) -> Result<account::Identity> {
@@ -1080,7 +1124,7 @@ struct CleanH2List {
     peers: Vec<String>,
 }
 
-fn load_clean_h2(config_path: &str) -> Vec<SocketAddr> {
+pub fn load_clean_h2(config_path: &str) -> Vec<SocketAddr> {
     let Ok(text) = fs::read_to_string(clean_h2_path(config_path)) else {
         return Vec::new();
     };
@@ -1108,7 +1152,7 @@ fn write_clean_h2(config_path: &str, peers: &[SocketAddr]) {
     }
 }
 
-fn remember_clean_h2(config_path: &str, peer: SocketAddr) {
+pub fn remember_clean_h2(config_path: &str, peer: SocketAddr) {
     let mut peers = load_clean_h2(config_path);
     peers.retain(|saved| *saved != peer);
     peers.insert(0, peer);
@@ -1354,7 +1398,7 @@ fn masque_h2_gateway_peers() -> Vec<SocketAddr> {
 
 /// The four addresses measured to answer connect-ip. A refused certificate is
 /// retried against these, not against the website ranges that answer HTTP 400.
-fn certificate_retry_peers() -> Vec<(SocketAddr, &'static str)> {
+pub fn certificate_retry_peers() -> Vec<(SocketAddr, &'static str)> {
     [
         "162.159.199.1:443",
         "162.159.199.2:443",
@@ -2049,6 +2093,10 @@ async fn run_masque(
         }
     }
 
+    if options.masque_transport == MasqueTransport::H3Experimental {
+        return run_experimental_h3(&identity, ech, listen, &lastconn_path, options).await;
+    }
+
     let mut quick_peer: Option<SocketAddr> = None;
     let mut known: Vec<(SocketAddr, &'static str)> = Vec::new();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
@@ -2453,17 +2501,407 @@ async fn run_masque(
     }
 }
 
-async fn run_masque_tunnel(
+async fn run_experimental_h3(
+    identity: &account::Identity,
+    ech: Option<Vec<u8>>,
+    listen: SocketAddr,
+    lastconn_path: &str,
+    options: &StartOptions,
+) -> Result<()> {
+    if options.tun_fd.is_some() {
+        return Err(AetherError::Other(
+            "Experimental H3 requires the userspace SOCKS stack".into(),
+        ));
+    }
+    let peers = if let Some(peer) = options.forced_peer {
+        vec![peer]
+    } else {
+        let cached = (options.endpoint_discovery == EndpointDiscovery::Cache)
+            .then(|| lastconn::load(lastconn_path))
+            .flatten()
+            .and_then(|last| last.peer.parse().ok());
+        let v6_seeds = prober::MASQUE_SEEDS_V6
+            .iter()
+            .filter_map(|ip| ip.parse::<Ipv6Addr>().ok())
+            .map(|ip| SocketAddr::new(ip.into(), consts::QUIC_PORT));
+        let mut seen = HashSet::new();
+        // The operator's trace reached CONNECT-IP on UDP/1701 at this peer.
+        let observed_peer: SocketAddr = "162.159.198.2:1701".parse().unwrap();
+        cached
+            .into_iter()
+            .chain([observed_peer])
+            .chain(assigned_masque_peer(identity))
+            .chain(v6_seeds.filter(|_| options.ip_scan.want_v6()))
+            .chain(masque_gateway_peers())
+            .filter(|peer| masque_ip_ok(peer) && seen.insert(*peer))
+            .take(MASQUE_H3_PROBE_LIMIT)
+            .collect()
+    };
+
+    for peer in peers {
+        h3_diagnostic(format!("{peer} native QUIC/UDP attempt"));
+        let result = run_masque_tunnel(
+            identity,
+            peer,
+            ech.clone(),
+            listen,
+            options,
+            options.forced_peer.is_none().then_some(lastconn_path),
+        )
+        .await;
+        if crate::ffi::clear_ready() {
+            return result;
+        }
+        if let Err(error) = result {
+            h3_diagnostic(format!("{peer} failed: {error}"));
+        }
+    }
+    Err(AetherError::Other(
+        "No native HTTP/3 gateway passed payload validation; see H3 diagnostics".into(),
+    ))
+}
+
+pub(crate) fn h3_diagnostic(message: impl std::fmt::Display) {
+    let line = format!("H3 diagnostic: {message}");
+    log::info!("{line}");
+    crate::ffi::record_log(line);
+}
+
+pub struct ScanTunnel<S> {
+    pub stack: S,
+    pub task: TunnelExit,
+    _control: tokio::sync::mpsc::Sender<quic::Control>,
+}
+
+impl<S> Drop for ScanTunnel<S> {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn start_scan_tunnel<S>(
+    stack: S,
+    control: tokio::sync::mpsc::Sender<quic::Control>,
+    ready_rx: tokio::sync::oneshot::Receiver<()>,
+    run: impl std::future::Future<Output = Result<()>> + Send + 'static,
+) -> Result<ScanTunnel<S>> {
+    let mut running = ScanTunnel {
+        stack,
+        _control: control,
+        task: tokio::spawn(run),
+    };
+    tokio::select! {
+        result = &mut running.task => join_outcome("candidate tunnel", result)?,
+        result = tokio::time::timeout(Duration::from_secs(12), ready_rx) => {
+            result.map_err(|_| AetherError::Masque("candidate startup timed out".into()))?
+                .map_err(|_| AetherError::Masque("candidate stopped before accepting CONNECT-IP".into()))?;
+        }
+    }
+    Ok(running)
+}
+
+pub async fn open_scan_carrier(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    trace: Option<std::sync::Arc<masque_h2::CarrierStartupTrace>>,
+) -> Result<ScanTunnel<crate::h3_carrier::Carrier>> {
+    let mut cfg = saved_h2_config(identity, peer);
+    cfg.pin_endpoint = true;
+    cfg.expected_pins = consts::MASQUE_PINS.iter().map(|pin| pin.to_vec()).collect();
+    match tls::authenticate_h2_carrier(peer, &cfg.sni, &cfg.cert_pem, &cfg.key_pem).await {
+        Ok(pin) => cfg.expected_pins.push(pin.to_vec()),
+        Err(error) => log::debug!("H2 carrier {peer} Web PKI: {error}"),
+    }
+    let (channels, internals) = quic::channels();
+    let (addr_tx, addr_rx) = tokio::sync::mpsc::channel(8);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let carrier =
+        crate::h3_carrier::Carrier::new(&identity.ipv4, &identity.ipv6, channels.outbound_tx);
+    let receiver = carrier.clone();
+    let run = async move {
+        tokio::select! {
+            biased;
+            result = masque_h2::run_with_readiness(cfg, internals, Some(addr_tx), Some(ready_tx), false, trace.as_deref()) => result,
+            result = receiver.receive(channels.inbound_rx, addr_rx) => result,
+        }
+    };
+    start_scan_tunnel(carrier, channels.ctrl_tx, ready_rx, run).await
+}
+
+async fn score_scan_inner(
+    identity: &account::Identity,
+    options: &StartOptions,
+    peer: SocketAddr,
+    carrier: &crate::h3_carrier::Carrier,
+) -> Result<(
+    crate::tunnelping::H3PayloadScore,
+    ScanTunnel<netstack::StackHandle>,
+)> {
+    let mut cfg = masque_quic_config(identity, peer, None, options);
+    cfg.quiet = true;
+    let (channels, internals) = quic::channels();
+    let stack = netstack::spawn(
+        &identity.ipv4,
+        &identity.ipv6,
+        TUNNEL_MTU,
+        channels.inbound_rx,
+        channels.outbound_tx,
+    )?;
+    let (addr_tx, mut addr_rx) = tokio::sync::mpsc::channel::<quic::AssignedAddr>(8);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let mut v4 = identity
+        .ipv4
+        .split('/')
+        .next()
+        .and_then(|ip| ip.parse().ok())
+        .map(|ip| (ip, 32));
+    let mut v6 = identity
+        .ipv6
+        .split('/')
+        .next()
+        .and_then(|ip| ip.parse().ok())
+        .map(|ip| (ip, 128));
+    let address_stack = stack.clone();
+    let addresses = async move {
+        while let Some(address) = addr_rx.recv().await {
+            match address.ip {
+                IpAddr::V4(ip) => v4 = Some((ip, address.prefix)),
+                IpAddr::V6(ip) => v6 = Some((ip, address.prefix)),
+            }
+            address_stack.set_addrs(v4, v6).await?;
+        }
+        Ok(())
+    };
+    let carrier = carrier.clone();
+    let run = async move {
+        tokio::select! {
+            biased;
+            result = quic::run_with_carrier(cfg, internals, Some(addr_tx), Some(ready_tx), Some(carrier)) => result,
+            result = addresses => result,
+        }
+    };
+    let mut inner = start_scan_tunnel(stack, channels.ctrl_tx, ready_rx, run).await?;
+    let score = tokio::select! {
+        score = crate::tunnelping::validate_h3_payload(&inner.stack, peer) => score?,
+        result = &mut inner.task => {
+            return Err(AetherError::Masque(format!("inner H3 ended during payload validation: {result:?}")));
+        }
+    };
+    Ok((score, inner))
+}
+
+pub fn unique_scan_peers(peers: impl IntoIterator<Item = SocketAddr>, ip: IpScan) -> Vec<SocketAddr> {
+    let mut seen = HashSet::new();
+    peers
+        .into_iter()
+        .filter(|peer| {
+            (if peer.is_ipv4() {
+                ip.want_v4()
+            } else {
+                ip.want_v6()
+            }) && seen.insert(*peer)
+        })
+        .collect()
+}
+
+async fn run_h3_over_h2(options: &StartOptions) -> Result<()> {
+    if options.tun_fd.is_some()
+        || !options.listen.ip().is_loopback()
+        || options.http_proxy.is_some()
+        || options.route_direct.is_some()
+        || options.routes_file.is_some()
+        || options.gateway
+    {
+        return Err(AetherError::Other(
+            "H3 over H2 requires loopback SOCKS without direct routes or a gateway proxy".into(),
+        ));
+    }
+
+    let config_path = masque_config_path(options);
+    let identity = load_or_provision_masque(&config_path, false).await?;
+    let outer_identity = match &options.h2_carrier_config {
+        Some(path) => load_or_provision_masque(path, false).await?,
+        None => identity.clone(),
+    };
+    let use_cache = options.endpoint_discovery != EndpointDiscovery::Fresh;
+    let clean_carriers = if use_cache {
+        load_clean_h2(&config_path)
+    } else {
+        Vec::new()
+    };
+    let (budget, comparison_window, inner_budget, comparison_count) = match options.scan_mode {
+        ScanMode::Turbo => (72, 4, 18, 2),
+        ScanMode::Balanced => (100, 7, 24, 3),
+        ScanMode::Thorough | ScanMode::Stealth | ScanMode::Ironclad => (155, 12, 31, 5),
+    };
+    let h2_peers = if let Some(peer) = options.h2_carrier_peer {
+        vec![peer]
+    } else {
+        let family = if prober::host_has_ipv6().await {
+            IpScan::Both
+        } else {
+            IpScan::V4
+        };
+        let assigned = assigned_masque_peer(&outer_identity)
+            .map(|peer| SocketAddr::new(peer.ip(), consts::QUIC_PORT));
+        let generated = (options.endpoint_discovery != EndpointDiscovery::CleanOnly)
+            .then(|| prober::masque_scan_peers(options.scan_mode, &[consts::QUIC_PORT], family));
+        let include_assigned = options.endpoint_discovery != EndpointDiscovery::CleanOnly;
+        unique_scan_peers(
+            clean_carriers
+                .into_iter()
+                .chain(assigned.filter(|_| include_assigned))
+                .chain(generated.into_iter().flatten()),
+            family,
+        )
+    };
+    let h3_peers = if let Some(peer) = options.forced_peer {
+        vec![peer]
+    } else {
+        let mut ports = prober::MASQUE_ALT_PORTS.to_vec();
+        ports.extend(
+            prober::MASQUE_PORTS
+                .iter()
+                .copied()
+                .filter(|port| !prober::MASQUE_ALT_PORTS.contains(port)),
+        );
+        let assigned =
+            assigned_masque_peer(&identity).map(|peer| SocketAddr::new(peer.ip(), ports[0]));
+        let cached = if use_cache {
+            cached_masque_gateways(options)
+        } else {
+            Vec::new()
+        };
+        unique_scan_peers(
+            assigned
+                .into_iter()
+                .chain(cached)
+                .chain(prober::masque_scan_peers(
+                    options.scan_mode,
+                    &ports,
+                    options.ip_scan,
+                )),
+            options.ip_scan,
+        )
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(budget);
+    h3_diagnostic(format!(
+        "Encapsulated H3 scan ({})",
+        options.scan_mode.label()
+    ));
+    for batch in h2_peers.chunks(3) {
+        crate::ffi::record_log("H3 New Method: Scanning IP addresses");
+        let carriers = futures::stream::iter(batch.iter().copied().map(|peer| {
+            let outer_identity = &outer_identity;
+            async move {
+                match open_scan_carrier(outer_identity, peer, None).await {
+                    Ok(carrier) => Some((peer, carrier)),
+                    Err(error) => {
+                        log::debug!("H2 carrier {peer} rejected: {error}");
+                        None
+                    }
+                }
+            }
+        }))
+        .buffer_unordered(3)
+        .filter_map(std::future::ready)
+        .collect::<Vec<_>>();
+        let Ok(mut carriers) = tokio::time::timeout_at(deadline, carriers).await else {
+            break;
+        };
+        if carriers.is_empty() {
+            continue;
+        }
+
+        crate::ffi::record_log("H3 New Method: Testing tunnel traffic");
+        // Start each carrier with a different H3 candidate.
+        let carrier_refs = &carriers;
+        let peer_refs = &h3_peers;
+        let mut attempts = futures::stream::iter((0..h3_peers.len()).flat_map(|offset| {
+            let identity = &identity;
+            carrier_refs
+                .iter()
+                .enumerate()
+                .map(move |(index, (_, carrier))| async move {
+                    let peer = peer_refs[(offset + index) % peer_refs.len()];
+                    (
+                        index,
+                        peer,
+                        score_scan_inner(identity, options, peer, &carrier.stack).await,
+                    )
+                })
+        }))
+        .buffer_unordered(3);
+        let mut compare_until =
+            deadline.min(tokio::time::Instant::now() + Duration::from_secs(inner_budget));
+        let mut qualified = Vec::new();
+        let mut qualified_ips = HashSet::new();
+        while let Ok(Some((index, peer, result))) =
+            tokio::time::timeout_at(compare_until, attempts.next()).await
+        {
+            match result {
+                Ok((score, inner)) => {
+                    h3_diagnostic(format!(
+                        "{peer} via {} passed {}/3, median {} ms",
+                        carriers[index].0,
+                        score.replies,
+                        score.median_rtt.0.as_millis(),
+                    ));
+                    if qualified.is_empty() {
+                        crate::ffi::record_log("H3 New Method: Comparing responsive IPs");
+                        compare_until = deadline.min(
+                            tokio::time::Instant::now() + Duration::from_secs(comparison_window),
+                        );
+                    }
+                    qualified.push((score, index, peer, inner));
+                    qualified_ips.insert(peer.ip());
+                    if qualified_ips.len() >= comparison_count {
+                        break;
+                    }
+                }
+                Err(error) => log::debug!("encapsulated H3 peer {peer} rejected: {error}"),
+            }
+        }
+        drop(attempts);
+        qualified.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let winner = qualified.into_iter().find(|(_, index, _, inner)| {
+            !inner.task.is_finished() && !carriers[*index].1.task.is_finished()
+        });
+        if let Some((score, index, inner_peer, mut inner)) = winner {
+            let (carrier_peer, mut carrier) = carriers.swap_remove(index);
+            drop(carriers);
+            h3_diagnostic(format!(
+                "{inner_peer} C validated on encapsulated H3 over H2 via {carrier_peer}"
+            ));
+            crate::ffi::record_log(format!(
+                "H3 New Method: Selected IP {} · {} ms",
+                inner_peer.ip(),
+                score.median_rtt.0.as_millis()
+            ));
+            crate::ffi::mark_ready();
+            return tokio::select! {
+                result = &mut carrier.task => join_outcome("H2 carrier", result),
+                result = &mut inner.task => join_outcome("inner H3 tunnel", result),
+                result = socks::serve(options.listen, inner.stack.clone()) => result,
+            };
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    crate::ffi::record_log("H3 New Method: No usable IP found");
+    Err(AetherError::Masque(
+        "No encapsulated H3 path passed the payload scan".into(),
+    ))
+}
+
+fn masque_quic_config(
     identity: &account::Identity,
     peer: SocketAddr,
     ech: Option<Vec<u8>>,
-    listen: SocketAddr,
     options: &StartOptions,
-    lastconn_path: Option<&str>,
-) -> Result<()> {
-    let (chans, internals) = quic::channels();
-
-    let cfg = quic::TunnelConfig {
+) -> quic::TunnelConfig {
+    quic::TunnelConfig {
         peer,
         sni: consts::CONNECT_SNI.to_string(),
         authority: quic::default_authority().to_string(),
@@ -2475,7 +2913,21 @@ async fn run_masque_tunnel(
         tls_curve_preset: options.tls_curve_preset,
         local_ipv4: parse_local_v4(&identity.ipv4),
         quiet: false,
-    };
+        experimental_h3: options.masque_transport.verifies_h3_payload(),
+    }
+}
+
+async fn run_masque_tunnel(
+    identity: &account::Identity,
+    peer: SocketAddr,
+    ech: Option<Vec<u8>>,
+    listen: SocketAddr,
+    options: &StartOptions,
+    lastconn_path: Option<&str>,
+) -> Result<()> {
+    let experimental_h3 = options.masque_transport.verifies_h3_payload();
+    let (chans, internals) = quic::channels();
+    let cfg = masque_quic_config(identity, peer, ech, options);
 
     let quic::Channels {
         outbound_tx,
@@ -2487,6 +2939,7 @@ async fn run_masque_tunnel(
 
     let (addr_tx, mut addr_rx) = tokio::sync::mpsc::channel::<quic::AssignedAddr>(8);
     let mut http_task = None;
+    let mut probe_stack = None;
     let local_task = if let Some(fd) = options.tun_fd {
         tokio::spawn(async move { while addr_rx.recv().await.is_some() {} });
         log::info!("[+] Android TUN bridge active");
@@ -2504,6 +2957,9 @@ async fn run_masque_tunnel(
             inbound_rx,
             outbound_tx,
         )?;
+        if experimental_h3 {
+            probe_stack = Some(stack.clone());
+        }
         let bridge_stack = stack.clone();
         tokio::spawn(async move {
             while let Some(a) = addr_rx.recv().await {
@@ -2525,7 +2981,8 @@ async fn run_masque_tunnel(
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let tunnel_task = if masque_h2::enabled() {
+    let use_h2 = !experimental_h3 && masque_h2::enabled();
+    let mut tunnel_task = if use_h2 {
         let h2cfg = masque_h2::H2TunnelConfig {
             peer: masque_h2::h2_peer(peer),
             sni: consts::L4_CONNECT_SNI.to_string(),
@@ -2550,55 +3007,67 @@ async fn run_masque_tunnel(
         tokio::spawn(quic::run(cfg, internals, Some(addr_tx), Some(ready_tx)))
     };
 
-    let startup_timeout = masque_startup_timeout();
-    let tunnel_result = match tokio::time::timeout(startup_timeout, ready_rx).await {
-        Ok(Ok(())) => {
-            if let Some(path) = lastconn_path {
-                lastconn::save(path, &peer.to_string(), options.masque_profile());
-            }
-            if masque_h2::enabled() {
-                remember_clean_h2(&options.config_path, peer);
-                crate::ffi::record_log(format!("Saved clean HTTP/2 address {peer}"));
-            }
-            tunnel_task.await
-        }
-        Ok(Err(_)) => {
-            let joined = tunnel_task.await;
-            let msg = match joined {
-                Ok(Ok(())) => "tunnel exited before validation".to_string(),
-                Ok(Err(e)) => format!("tunnel failed before validation: {e}"),
-                Err(e) => format!("tunnel task join error: {e}"),
-            };
-            local_task.abort();
-            if let Some(task) = &http_task {
-                task.abort();
-            }
-            return Err(AetherError::Other(msg));
-        }
-        Err(_) => {
-            tunnel_task.abort();
-            let _ = tunnel_task.await;
-            local_task.abort();
-            if let Some(task) = &http_task {
-                task.abort();
-            }
-            return Err(AetherError::Other(format!(
-                "tunnel startup timed out after {:?}",
-                startup_timeout
-            )));
-        }
+    let startup_timeout = if experimental_h3 {
+        quic::H3_STAGE_TIMEOUT * 2 + std::time::Duration::from_secs(2)
+    } else {
+        masque_startup_timeout()
     };
+    let result = async {
+        match tokio::time::timeout(startup_timeout, ready_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                let message = match (&mut tunnel_task).await {
+                    Ok(Ok(())) => "tunnel exited before validation".to_string(),
+                    Ok(Err(e)) => format!("tunnel failed before validation: {e}"),
+                    Err(e) => format!("tunnel task join error: {e}"),
+                };
+                return Err(AetherError::Other(message));
+            }
+            Err(_) => {
+                return Err(AetherError::Other(format!(
+                    "tunnel startup timed out after {startup_timeout:?}"
+                )));
+            }
+        }
 
+        if let Some(stack) = probe_stack {
+            tokio::select! {
+                result = crate::tunnelping::validate_h3_payload(&stack, peer) => { result?; }
+                result = &mut tunnel_task => {
+                    return Err(AetherError::Other(format!(
+                        "C IP payload: tunnel ended during validation: {result:?}"
+                    )));
+                }
+            }
+            h3_diagnostic(format!("{peer} C validated on native H3"));
+            crate::ffi::mark_ready();
+        }
+        if let Some(path) = lastconn_path {
+            lastconn::save(path, &peer.to_string(), options.masque_profile());
+        }
+        if use_h2 {
+            remember_clean_h2(&options.config_path, peer);
+            crate::ffi::record_log(format!("Saved clean HTTP/2 address {peer}"));
+        }
+        match (&mut tunnel_task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(AetherError::Other(format!("tunnel exited: {e}"))),
+            Err(e) => Err(AetherError::Other(format!("tunnel task join error: {e}"))),
+        }
+    }
+    .await;
+    // Finish cancelling failed attempts before the next gateway binds the same ports.
+    if !tunnel_task.is_finished() {
+        tunnel_task.abort();
+        let _ = tunnel_task.await;
+    }
     local_task.abort();
-    if let Some(task) = &http_task {
+    let _ = local_task.await;
+    if let Some(task) = http_task {
         task.abort();
+        let _ = task.await;
     }
-
-    match tunnel_result {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(AetherError::Other(format!("tunnel exited: {e}"))),
-        Err(e) => Err(AetherError::Other(format!("tunnel task join error: {e}"))),
-    }
+    result
 }
 
 fn wg_keepalive_secs() -> u16 {
@@ -3125,7 +3594,7 @@ async fn run_wireguard_tunnel(
     }
 }
 
-type TunnelExit = tokio::task::JoinHandle<Result<()>>;
+pub type TunnelExit = tokio::task::JoinHandle<Result<()>>;
 
 fn http_proxy_listen(options: &StartOptions) -> Option<SocketAddr> {
     // The config wins: on Android it is the only channel that exists, because
@@ -3159,7 +3628,7 @@ fn spawn_http_proxy(
     }))
 }
 
-async fn establish_wg(
+pub async fn establish_wg(
     identity: &account::Identity,
     peer: SocketAddr,
     mtu: usize,
@@ -3225,7 +3694,7 @@ async fn establish_wg(
     Ok((stack, exit))
 }
 
-struct ForwarderGuard(Vec<tokio::task::AbortHandle>);
+pub struct ForwarderGuard(pub Vec<tokio::task::AbortHandle>);
 
 impl Drop for ForwarderGuard {
     fn drop(&mut self) {
@@ -3548,7 +4017,7 @@ async fn run_warp_in_warp(
     outcome
 }
 
-fn join_outcome(
+pub fn join_outcome(
     what: &str,
     result: std::result::Result<Result<()>, tokio::task::JoinError>,
 ) -> Result<()> {
@@ -3855,6 +4324,26 @@ fn spawn_masque_cache_refresh(probe: prober::MasqueProbe, cache_path: Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn h3_scan_keeps_port_alternatives_and_respects_ip_family() {
+        let peers = [
+            "192.0.2.1:1701",
+            "[2001:db8::1]:443",
+            "192.0.2.1:1701",
+            "192.0.2.1:443",
+        ]
+        .map(|peer| peer.parse().unwrap());
+        assert_eq!(
+            unique_scan_peers(peers, IpScan::V4),
+            vec![peers[0], peers[3]]
+        );
+        assert_eq!(unique_scan_peers(peers, IpScan::V6), vec![peers[1]]);
+        assert_eq!(
+            unique_scan_peers(peers, IpScan::Both),
+            vec![peers[0], peers[1], peers[3]]
+        );
+    }
 
     #[test]
     fn start_options_have_app_safe_defaults() {

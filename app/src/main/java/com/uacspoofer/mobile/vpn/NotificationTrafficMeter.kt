@@ -101,7 +101,7 @@ class NotificationTrafficMeter {
             return "$arrow $total | ${compact(bytesPerSecond.toDouble(), SPEED_UNITS)}"
         }
 
-        /** At most 4 digits: 45.5M, 194M, 11K/s, 1023B. Rolls to the next unit at 1000. */
+        /** Keep the numeric part compact for the two notification columns. */
         private fun compact(value: Double, units: Array<String>): String {
             var amount = value.coerceAtLeast(0.0)
             var unit = 0
@@ -113,7 +113,7 @@ class NotificationTrafficMeter {
                 unit == 0 || amount >= 100.0 -> String.format(Locale.US, "%.0f", amount)
                 else -> String.format(Locale.US, "%.1f", amount).removeSuffix(".0")
             }
-            return number + units[unit]
+            return "$number ${units[unit]}"
         }
 
         fun formatBytes(bytes: Long): String {
@@ -135,7 +135,7 @@ class NotificationTrafficMeter {
             }
         }
 
-        private val BYTE_UNITS = arrayOf("B", "K", "M", "G")
-        private val SPEED_UNITS = arrayOf("B/s", "K/s", "M/s", "G/s")
+        private val BYTE_UNITS = arrayOf("B", "KB", "MB", "GB")
+        private val SPEED_UNITS = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
     }
 }

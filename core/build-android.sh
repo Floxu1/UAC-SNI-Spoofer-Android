@@ -3,6 +3,7 @@ set -euo pipefail
 
 ABI="arm64-v8a"
 API="24"
+CORE="Pow"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -14,12 +15,21 @@ while [[ $# -gt 0 ]]; do
       API="$2"
       shift 2
       ;;
+    -Core|--core)
+      CORE="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2
       ;;
   esac
 done
+
+case "$CORE" in
+  Pow|Direct) ;;
+  *) echo "Unsupported core: $CORE" >&2; exit 2 ;;
+esac
 
 case "$ABI" in
   arm64-v8a)
@@ -125,13 +135,19 @@ export "CXX_${RUST_TARGET_SUFFIX}=$BIN/clang++"
 export "CFLAGS_${RUST_TARGET_SUFFIX}=--target=${CLANG_PREFIX}${API}"
 export "CXXFLAGS_${RUST_TARGET_SUFFIX}=--target=${CLANG_PREFIX}${API}"
 export "BINDGEN_EXTRA_CLANG_ARGS_${RUST_TARGET_SUFFIX}=--target=${CLANG_PREFIX}${API} --sysroot=$SYSROOT -I$SYSROOT/usr/include -I$SYSROOT/usr/include/$INCLUDE_ARCH"
-export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-soname,libaether.so -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
 
 cd "$CRATE"
-cargo build --release --lib --target "$TARGET_TRIPLE"
+if [[ "$CORE" == "Direct" ]]; then
+  cargo rustc --manifest-path ../direct/Cargo.toml --locked --release --lib --target "$TARGET_TRIPLE" -- -C link-arg=-Wl,-soname,libDirect.so
+  FILE_NAME="libDirect.so"
+else
+  cargo rustc --locked --release --lib --target "$TARGET_TRIPLE" -- -C link-arg=-Wl,-soname,libaether.so
+  FILE_NAME="libaether.so"
+fi
 
-LIBRARY="$TARGET/$TARGET_TRIPLE/release/libaether.so"
+LIBRARY="$TARGET/$TARGET_TRIPLE/release/$FILE_NAME"
 for DESTINATION in "$ROOT/core/android-libs/$ABI" "$ROOT/app/src/main/jniLibs/$ABI"; do
   mkdir -p "$DESTINATION"
-  cp -f "$LIBRARY" "$DESTINATION/libaether.so"
+  cp -f "$LIBRARY" "$DESTINATION/$FILE_NAME"
 done

@@ -1,40 +1,40 @@
 package com.uacspoofer.mobile.engine.direct
 
-import com.uacspoofer.mobile.mci.IranDirectRules
-import com.uacspoofer.mobile.vpn.VpnPauseStore
-import com.uacspoofer.mobile.settings.DirectDomainWhitelist
+import com.uacspoofer.mobile.vpn.AdaptiveDnsResolver
 
-/**
- * Builds the Xray JSON for engine 4.
- *
- * When [DirectEngineSettings.googleFronting] or [DirectEngineSettings.echEnabled] is on, the
- * config follows the MITM domain-fronting pattern (tunnel decrypt + freedom TLS re-pack), adapted
- * from patterniha/MITM-DomainFronting: Google hosts are re-dialed with SNI www.google.com; CF hosts
- * are re-dialed with ECH (outer SNI cloudflare-ech.com). Iranian / private destinations use geosite:category-ir and geoip:ir via GeoAssets.
- */
+import com.uacspoofer.mobile.mci.IranDirectRules
+import com.uacspoofer.mobile.settings.DirectDomainWhitelist
+import com.uacspoofer.mobile.vpn.VpnPauseStore
+
 internal object DirectXrayConfig {
     const val TAG_TLS = "direct-tls"
     const val TAG_TCP = "direct-tcp-frag"
     const val TAG_PLAIN = "direct-plain"
     const val TAG_UDP = "direct-udp"
     const val TAG_NOISE = "direct-udp-noise"
-    const val TAG_GOOGLE = "tls-repack-google"
-    const val TAG_ECH = "tls-repack-ech"
-    const val TAG_DNS_REPACK = "tls-repack-dns"
+    const val TAG_WIREGUARD = "direct-wireguard"
+    const val ADAPTIVE_PREFIX = "direct-hello-"
+    const val PROBE_URL = "https://www.youtube.com/generate_204"
+    private const val BALANCER = "direct-clienthello"
+    private const val RECORD_SNI = "record-sni"
+    private val youtubeDomains = listOf(
+        "domain:youtube.com", "domain:youtu.be", "domain:youtube-nocookie.com",
+        "domain:googlevideo.com", "domain:ytimg.com", "full:yt3.ggpht.com",
+        "full:youtubei.googleapis.com", "full:youtube.googleapis.com",
+    ).joinToString(",") { "\"$it\"" }
+    val localMasks = mapOf(
+        "oob" to listOf("--oob", "0"),
+        RECORD_SNI to listOf("--tlsrec", "2+s"),
+    )
 
-    private val GOOGLE_DOMAINS = listOf(
-        "domain:google.com", "domain:googleapis.com", "domain:gstatic.com", "domain:googleusercontent.com",
-        "domain:googlevideo.com", "domain:youtube.com", "domain:ytimg.com", "domain:ggpht.com",
-        "domain:youtu.be", "domain:youtube-nocookie.com", "domain:withgoogle.com", "domain:google.com.",
-        "domain:googleadservices.com", "domain:googlesyndication.com", "full:dns.google",
+    private val adaptiveMasks = mapOf(
+        "record-small" to fragment("tlshello", "6,98,48-96", "0", 7),
+        "record-medium" to fragment("tlshello", "48-128", "0", 6),
+        "tcp-small" to fragment("1-1", "32-64", "1-2", 6),
+        "tcp-medium" to fragment("1-1", "80-160", "1-2", 5),
     )
-    /** CF-fronted names that benefit from ECH on MCI (SNI filter). Keep tight — IP-blocked hosts still fail. */
-    private val ECH_DOMAINS = listOf(
-        "domain:x.com", "domain:twitter.com", "domain:twimg.com", "domain:t.co",
-        "domain:discord.com", "domain:discordapp.com", "domain:discord.gg",
-        "domain:cloudflare.com", "domain:cloudflare-ech.com", "domain:cloudflare-dns.com",
-        "domain:medium.com", "domain:cdnjs.cloudflare.com",
-    )
+    val trafficTags = listOf(TAG_TLS, TAG_TCP, TAG_PLAIN, TAG_UDP, TAG_NOISE, TAG_WIREGUARD) +
+        (adaptiveMasks.keys + localMasks.keys).map { "$ADAPTIVE_PREFIX$it" }
 
     fun build(
         raw: DirectEngineSettings,
@@ -42,156 +42,19 @@ internal object DirectXrayConfig {
         socksPort: Int,
         tunMtu: Int,
         nativeTun: Boolean,
-        ca: DirectCa.Material?,
         noiseAllowed: Boolean = true,
-        mitmH11Port: Int = 0,
-        mitmH211Port: Int = 0,
+        maskPorts: Map<String, Int> = emptyMap(),
+        wireGuardSocksPort: Int? = null,
+        countryExit: Boolean = false,
+        sessionDns: AdaptiveDnsResolver? = null,
     ): String {
         val s = raw.validated()
-        val mitm = (s.googleFronting || s.echEnabled) && ca != null
-        return if (mitm) buildMitm(s, socksAddress, socksPort, tunMtu, nativeTun, ca!!, mitmH11Port, mitmH211Port)
-        else buildPlain(s, socksAddress, socksPort, tunMtu, nativeTun, noiseAllowed)
-    }
-
-    private fun buildMitm(
-        s: DirectEngineSettings,
-        socksAddress: String,
-        socksPort: Int,
-        tunMtu: Int,
-        nativeTun: Boolean,
-        ca: DirectCa.Material,
-        mitmH11Port: Int,
-        mitmH211Port: Int,
-    ): String {
-        require(mitmH11Port in 1..65535 && mitmH211Port in 1..65535 && mitmH11Port != mitmH211Port) {
-            "MITM decrypt ports must be two distinct free TCP ports"
-        }
-        val certJson = ca.certificatePemLines.joinToString(",") { "\"${q(it)}\"" }
-        val keyJson = ca.keyPemLines.joinToString(",") { "\"${q(it)}\"" }
-        val certBlock = """{"usage":"issue","certificate":[$certJson],"key":[$keyJson]}"""
-        val googleDomains = GOOGLE_DOMAINS.joinToString(",") { "\"$it\"" }
-        val echDomains = ECH_DOMAINS.joinToString(",") { "\"$it\"" }
-        val iranDomains = IranDirectRules.domainsJson()
-        val privateIps = IranDirectRules.ipsJson()
-        val irIps = IranDirectRules.irIpsJson()
-        val ipStrategy = if (s.ipv6) "ForceIP" else "ForceIPv4"
-
-        val inbounds = buildList {
-            add("""{"tag":"socks-in","listen":"${q(socksAddress)}","port":$socksPort,"protocol":"socks","settings":{"auth":"noauth","udp":true,"ip":"${q(socksAddress)}","userLevel":8},"sniffing":{"enabled":true,"destOverride":["tls","http"],"routeOnly":false}}""")
-            if (nativeTun) add("""{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":$tunMtu,"userLevel":8},"sniffing":{"enabled":true,"destOverride":["tls","http"],"routeOnly":false}}""")
-            add("""{"tag":"tls-decrypt-h11","listen":"127.0.0.1","port":$mitmH11Port,"protocol":"tunnel","settings":{"network":"tcp","port":443,"followRedirect":true},"streamSettings":{"security":"tls","tlsSettings":{"alpn":["http/1.1"],"certificates":[$certBlock]}}}""")
-            add("""{"tag":"tls-decrypt-h211","listen":"127.0.0.1","port":$mitmH211Port,"protocol":"tunnel","settings":{"network":"tcp","port":443,"followRedirect":true},"streamSettings":{"security":"tls","tlsSettings":{"alpn":["h2","http/1.1"],"certificates":[$certBlock]}}}""")
-        }.joinToString(",\n")
-
-        val outbounds = buildList {
-            add("""{"tag":"block","protocol":"blackhole"}""")
-            add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp"}}""")
-            add("""{"tag":"$TAG_PLAIN","protocol":"freedom","streamSettings":{"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
-            add("""{"tag":"$TAG_UDP","protocol":"freedom","streamSettings":{"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
-            add("""{"tag":"redirect-out-h11","protocol":"freedom","settings":{"redirect":"127.0.0.1:$mitmH11Port"}}""")
-            add("""{"tag":"redirect-out-h211","protocol":"freedom","settings":{"redirect":"127.0.0.1:$mitmH211Port"}}""")
-            if (s.googleFronting) {
-                add("""{"tag":"$TAG_GOOGLE","protocol":"freedom","streamSettings":{"security":"tls","tlsSettings":{"serverName":"www.google.com","verifyPeerCertByName":"FromMitM,www.google.com,dns.google,www.youtube.com,www.googlevideo.com","alpn":["FromMitM"],"fingerprint":"chrome"},"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
-            }
-            if (s.echEnabled) {
-                add("""{"tag":"$TAG_ECH","protocol":"freedom","streamSettings":{"security":"tls","tlsSettings":{"serverName":"FromMitM","echConfigList":"${DirectEngineSettings.CLOUDFLARE_ECH_CONFIG_LIST}","verifyPeerCertByName":"FromMitM","alpn":["FromMitM"],"fingerprint":"chrome"},"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
-            }
-            // Fronted DoH: talk to 1.1.1.1 with an allowed outer SNI (microsoft), verify as CF DNS.
-            add("""{"tag":"$TAG_DNS_REPACK","protocol":"freedom","settings":{"redirect":"1.1.1.1:443"},"streamSettings":{"security":"tls","tlsSettings":{"serverName":"www.microsoft.com","verifyPeerCertByName":"FromMitM,www.microsoft.com,cloudflare-dns.com,one.one.one.one,dns.google","alpn":["FromMitM"],"fingerprint":"chrome"},"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
-            if (s.fragmentEnabled) {
-                val stages = buildList {
-                    add(fragment("tlshello", s.helloLengths, s.helloDelays, s.helloMaxSplit))
-                    if (s.secondStageEnabled) add(fragment("1-1", s.secondLengths, s.secondDelays, s.secondMaxSplit))
-                }.joinToString(",")
-                add("""{"tag":"$TAG_TLS","protocol":"freedom","streamSettings":{"finalmask":{"tcp":[$stages]},"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
-            }
-        }.joinToString(",\n")
-
-        val accepted = if (nativeTun) """["socks-in","tun-in"]""" else """["socks-in"]"""
-        val rules = buildList {
-
-            if (VpnPauseStore.isPaused()) {
-                add("""{"type":"field","inboundTag":["dns-unfiltered"],"outboundTag":"$TAG_PLAIN"}""")
-            } else {
-                add("""{"type":"field","inboundTag":["dns-unfiltered"],"outboundTag":"$TAG_DNS_REPACK"}""")
-            }
-            add("""{"type":"field","inboundTag":$accepted,"port":"53","outboundTag":"dns-out"}""")
-            if (VpnPauseStore.isPaused()) {
-                add("""{"type":"field","network":"tcp,udp","outboundTag":"$TAG_PLAIN"}""")
-            }
-            val wlJson = DirectDomainWhitelist.xrayDomainsJson(DirectDomainWhitelist.snapshotOrEmpty())
-            if (wlJson.isNotEmpty()) {
-                add("""{"type":"field","network":"tcp,udp","domain":[$wlJson],"outboundTag":"$TAG_PLAIN"}""")
-            }
-            if (s.iranDirect) {
-                add("""{"type":"field","network":"tcp","domain":[$iranDomains],"outboundTag":"$TAG_PLAIN"}""")
-                add("""{"type":"field","network":"udp","domain":[$iranDomains],"outboundTag":"$TAG_UDP"}""")
-                add("""{"type":"field","network":"tcp","ip":[$irIps],"outboundTag":"$TAG_PLAIN"}""")
-                add("""{"type":"field","network":"udp","ip":[$irIps],"outboundTag":"$TAG_UDP"}""")
-            }
-            add("""{"type":"field","network":"tcp","ip":[$privateIps],"outboundTag":"$TAG_PLAIN"}""")
-            add("""{"type":"field","network":"udp","ip":[$privateIps],"outboundTag":"$TAG_UDP"}""")
-            if (!s.ipv6) add("""{"type":"field","ip":["::/0"],"outboundTag":"block"}""")
-            // After MITM decrypt:
-            if (s.googleFronting) {
-                add("""{"type":"field","domain":["domain:googlevideo.com"],"inboundTag":["tls-decrypt-h11"],"outboundTag":"$TAG_GOOGLE"}""")
-                add("""{"type":"field","domain":[$googleDomains],"inboundTag":["tls-decrypt-h211"],"outboundTag":"$TAG_GOOGLE"}""")
-            }
-            if (s.echEnabled) {
-                add("""{"type":"field","domain":[$echDomains],"inboundTag":["tls-decrypt-h211"],"outboundTag":"$TAG_ECH"}""")
-            }
-            add("""{"type":"field","inboundTag":["tls-decrypt-h11","tls-decrypt-h211"],"outboundTag":"block"}""")
-            // Before MITM: redirect 443 into decrypt tunnels
-            if (s.googleFronting) {
-                add("""{"type":"field","network":"tcp","port":"443","domain":["domain:googlevideo.com"],"outboundTag":"redirect-out-h11"}""")
-                add("""{"type":"field","network":"tcp","port":"443","domain":[$googleDomains],"outboundTag":"redirect-out-h211"}""")
-            }
-            if (s.echEnabled) {
-                add("""{"type":"field","network":"tcp","port":"443","domain":[$echDomains],"outboundTag":"redirect-out-h211"}""")
-            }
-            add("""{"type":"field","ip":["10.10.34.0/24"],"outboundTag":"block"}""")
-            if (s.blockQuic) {
-                add("""{"type":"field","network":"udp","protocol":["quic"],"outboundTag":"block"}""")
-                add("""{"type":"field","network":"udp","port":"443","outboundTag":"block"}""")
-            }
-            add("""{"type":"field","network":"udp","outboundTag":"$TAG_UDP"}""")
-            if (s.fragmentEnabled) {
-                add("""{"type":"field","network":"tcp","protocol":["tls"],"outboundTag":"$TAG_TLS"}""")
-                add("""{"type":"field","network":"tcp","port":"443","outboundTag":"$TAG_TLS"}""")
-            }
-            add("""{"type":"field","network":"tcp","outboundTag":"$TAG_PLAIN"}""")
-        }.joinToString(",\n")
-
-        val googleHints = """"www.google.com":["142.251.153.4","142.250.180.68"],"dns.google":["8.8.8.8","8.8.4.4"],"cloudflare-dns.com":["104.16.248.249","104.16.249.249"],"1.1.1.1":["1.1.1.1"]"""
-        val domestic = if (s.iranDirect) ""","domains":[$iranDomains]""" else ""
-        val dns = """"dns":{"hosts":{$googleHints},"servers":[{"tag":"dns-domestic","address":"${q(s.domesticDns)}"$domestic,"skipFallback":true},{"tag":"dns-unfiltered","address":"${q(s.unfilteredDns)}","timeoutMs":12000,"finalQuery":true}],"queryStrategy":"${if (s.ipv6) "UseIP" else "UseIPv4"}","serveStale":true},"""
-        val stats = if (nativeTun) {
-            """"stats":{},"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true,"statsOutboundUplink":true,"statsOutboundDownlink":true}},"""
-        } else """"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5}}},"""
-        return """
-            {
-              "log":{"loglevel":"warning","dnsLog":false},
-              $stats
-              $dns
-              "inbounds":[$inbounds],
-              "outbounds":[$outbounds],
-              "routing":{"domainStrategy":"IPIfNonMatch","rules":[$rules]}
-            }
-        """.trimIndent()
-    }
-
-    private fun buildPlain(
-        s: DirectEngineSettings,
-        socksAddress: String,
-        socksPort: Int,
-        tunMtu: Int,
-        nativeTun: Boolean,
-        noiseAllowed: Boolean,
-    ): String {
-        // Legacy serverless fragment path (kept for networks that do not drop fragmented hellos).
+        val paused = VpnPauseStore.isPaused()
+        val chained = wireGuardSocksPort != null && !paused
+        val adaptive = s.adaptiveClientHello && !paused && !chained
         val ipStrategy = if (s.ipv6) "ForceIP" else "ForceIPv4"
         val sockopt = """"sockopt":{"domainStrategy":"$ipStrategy","happyEyeballs":{"tryDelayMs":300,"prioritizeIPv6":${s.ipv6},"interleave":4,"maxConcurrentTry":20}}"""
-        val useFrag = s.fragmentEnabled
+        val useFrag = !s.adaptiveClientHello && s.fragmentEnabled && !paused
         val useNoise = s.udpNoise && noiseAllowed
         val helloStages = if (useFrag) buildList {
             add(fragment("tlshello", s.helloLengths, s.helloDelays, s.helloMaxSplit))
@@ -199,10 +62,22 @@ internal object DirectXrayConfig {
         }.joinToString(",") else ""
         val outbounds = buildList {
             add("""{"tag":"block","protocol":"blackhole","settings":{}}""")
-            add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp","rules":[{"action":"hijack"}]}}""")
+            add("""{"tag":"dns-out","protocol":"dns","settings":{"rewriteNetwork":"tcp","rules":[{"qType":"1,28","action":"hijack"},{"action":"return","rCode":0}]}}""")
             add("""{"tag":"$TAG_PLAIN","protocol":"freedom","settings":{},"streamSettings":{$sockopt}}""")
             add("""{"tag":"$TAG_UDP","protocol":"freedom","settings":{},"streamSettings":{"sockopt":{"domainStrategy":"$ipStrategy"}}}""")
+            if (chained) add("""{"tag":"$TAG_WIREGUARD","protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":$wireGuardSocksPort}]}}""")
             if (useFrag) add("""{"tag":"$TAG_TLS","protocol":"freedom","settings":{},"streamSettings":{"finalmask":{"tcp":[$helloStages]},$sockopt}}""")
+            if (adaptive) {
+                for ((name, mask) in adaptiveMasks) {
+                    add("""{"tag":"$ADAPTIVE_PREFIX$name","protocol":"freedom","settings":{},"streamSettings":{"finalmask":{"tcp":[$mask]},$sockopt}}""")
+                }
+                for ((name, port) in maskPorts) {
+                    val local = "direct-local-$name"
+                    add("""{"tag":"$local","protocol":"socks","settings":{"servers":[{"address":"127.0.0.1","port":$port}]}}""")
+                    // Observatory dials skip outbound targetStrategy. Resolve in the dialer before chaining.
+                    add("""{"tag":"$ADAPTIVE_PREFIX$name","protocol":"freedom","settings":{},"streamSettings":{"sockopt":{"domainStrategy":"$ipStrategy","dialerProxy":"$local"}}}""")
+                }
+            }
             if (s.tcpFragmentEnabled) add("""{"tag":"$TAG_TCP","protocol":"freedom","settings":{},"streamSettings":{"finalmask":{"tcp":[${fragment("1-1", s.tcpLengths, s.tcpDelays, s.tcpMaxSplit)}]},$sockopt}}""")
             if (useNoise) {
                 val noise = List(24) { """{"rand":"1200-1230","delay":"10"}""" }.joinToString(",")
@@ -214,17 +89,22 @@ internal object DirectXrayConfig {
         val privateIps = IranDirectRules.ipsJson()
         val irIps = IranDirectRules.irIpsJson()
         val tlsTag = if (useFrag) TAG_TLS else TAG_PLAIN
+        val dnsRecordTag = if (adaptive && RECORD_SNI in maskPorts) "$ADAPTIVE_PREFIX$RECORD_SNI" else tlsTag
+        val dnsOobTag = if (adaptive && "oob" in maskPorts) "${ADAPTIVE_PREFIX}oob" else dnsRecordTag
+        val tlsRoute = if (adaptive) """"balancerTag":"$BALANCER"""" else """"outboundTag":"$tlsTag""""
         val tcpOther = if (s.tcpFragmentEnabled) TAG_TCP else TAG_PLAIN
         val rules = buildList {
-
-            if (VpnPauseStore.isPaused()) {
-                add("""{"type":"field","inboundTag":["dns-unfiltered"],"outboundTag":"$TAG_PLAIN"}""")
+            add("""{"type":"field","inboundTag":$inboundTags,"port":"53","outboundTag":"dns-out"}""")
+            if (chained) {
+                add("""{"type":"field","inboundTag":["dns-unfiltered","dns-cloudflare","dns-google"],"outboundTag":"$TAG_WIREGUARD"}""")
             } else {
+                // Use static DoH routes so the TLS observer cannot depend on itself.
                 add("""{"type":"field","inboundTag":["dns-unfiltered"],"outboundTag":"$tlsTag"}""")
+                add("""{"type":"field","inboundTag":["dns-cloudflare"],"outboundTag":"$dnsRecordTag"}""")
+                add("""{"type":"field","inboundTag":["dns-google"],"outboundTag":"$dnsOobTag"}""")
             }
             add("""{"type":"field","inboundTag":["dns-domestic","dns-fallback"],"outboundTag":"$TAG_PLAIN"}""")
-            add("""{"type":"field","inboundTag":$inboundTags,"port":"53","outboundTag":"dns-out"}""")
-            if (VpnPauseStore.isPaused()) {
+            if (paused) {
                 add("""{"type":"field","network":"tcp,udp","outboundTag":"$TAG_PLAIN"}""")
             }
             val wlJson = DirectDomainWhitelist.xrayDomainsJson(DirectDomainWhitelist.snapshotOrEmpty())
@@ -232,6 +112,8 @@ internal object DirectXrayConfig {
                 add("""{"type":"field","network":"tcp,udp","domain":[$wlJson],"outboundTag":"$TAG_PLAIN"}""")
             }
             if (s.iranDirect) {
+                // YouTube CDN addresses can be classified as domestic even when the site is blocked.
+                if (chained) add("""{"type":"field","network":"tcp","domain":[$youtubeDomains],"outboundTag":"$TAG_WIREGUARD"}""")
                 add("""{"type":"field","network":"tcp","domain":[$iranDomains],"outboundTag":"$TAG_PLAIN"}""")
                 add("""{"type":"field","network":"udp","domain":[$iranDomains],"outboundTag":"$TAG_UDP"}""")
                 add("""{"type":"field","network":"tcp","ip":[$irIps],"outboundTag":"$TAG_PLAIN"}""")
@@ -245,30 +127,67 @@ internal object DirectXrayConfig {
                 add("""{"type":"field","network":"udp","protocol":["quic"],"outboundTag":"block"}""")
                 add("""{"type":"field","network":"udp","port":"443","outboundTag":"block"}""")
             }
+            if (chained) {
+                if (countryExit) add("""{"type":"field","network":"udp","outboundTag":"block"}""")
+                add("""{"type":"field","network":"tcp,udp","outboundTag":"$TAG_WIREGUARD"}""")
+            }
             add("""{"type":"field","network":"udp","outboundTag":"${if (useNoise) TAG_NOISE else TAG_UDP}"}""")
-            add("""{"type":"field","network":"tcp","protocol":["tls"],"outboundTag":"$tlsTag"}""")
-            add("""{"type":"field","network":"tcp","port":"443","outboundTag":"$tlsTag"}""")
+            add("""{"type":"field","network":"tcp","protocol":["tls"],$tlsRoute}""")
+            add("""{"type":"field","network":"tcp","port":"443",$tlsRoute}""")
             add("""{"type":"field","network":"tcp","outboundTag":"$tcpOther"}""")
         }.joinToString(",\n")
-        val sniffing = """"sniffing":{"enabled":true,"destOverride":["tls","http","quic"],"routeOnly":false}"""
+        // ECH exposes a public name in outer SNI. Keep the application's original destination.
+        val sniffing = """"sniffing":{"enabled":true,"destOverride":["tls","http","quic"],"routeOnly":true}"""
         val inbounds = buildList {
             add("""{"tag":"socks-in","listen":"${q(socksAddress)}","port":$socksPort,"protocol":"socks","settings":{"auth":"noauth","udp":true,"ip":"${q(socksAddress)}","userLevel":8},$sniffing}""")
             if (nativeTun) add("""{"tag":"tun-in","protocol":"tun","settings":{"name":"xray0","MTU":$tunMtu,"userLevel":8},$sniffing}""")
         }.joinToString(",\n")
-        // challenges.cloudflare.com is the DoH dial target: resolve it locally or DoH deadlocks on itself.
-        val domesticDomains = if (s.iranDirect) ""","domains":[$iranDomains,"full:challenges.cloudflare.com"]""" else ""","domains":["full:challenges.cloudflare.com"]"""
-        // patterniha: DoH by name (SNI cloudflare-dns.com) dialed at challenges.cloudflare.com; h2c-to-IP is MITM-only.
-        // If DoH fails, fall back to the system/operator resolver instead of resolving nothing.
-        val doh = if (s.unfilteredDns.startsWith("h2c://")) PLAIN_DOH else s.unfilteredDns
-        val domesticFinal = ""","skipFallback":true,"finalQuery":true"""
-        val dns = """"dns":{"hosts":{"cloudflare-dns.com":"challenges.cloudflare.com"},"servers":[{"tag":"dns-domestic","address":"${q(s.domesticDns)}"$domesticDomains,"timeoutMs":12000$domesticFinal},{"tag":"dns-unfiltered","address":"${q(doh)}","timeoutMs":12000},{"tag":"dns-fallback","address":"${q(s.domesticDns)}","timeoutMs":8000}],"queryStrategy":"${if (s.ipv6) "UseIP" else "UseIPv4"}","serveStale":true,"tag":"dns-query"},"""
+        val domestic = if (s.iranDirect) listOf(
+            """{"tag":"dns-domestic","address":"${q(s.domesticDns)}","domains":[$iranDomains],"timeoutMs":3000,"skipFallback":true,"finalQuery":true}""",
+        ) else emptyList()
+        val preferredDns = if (paused) null else sessionDns
+        val resolverAddress = preferredDns?.url ?: s.unfilteredDns
+        val defaultDns = preferredDns == null && s.unfilteredDns == DirectEngineSettings.DEFAULT_UNFILTERED_DNS
+        val foreignDns = if (!chained && preferredDns != null && preferredDns.bootstrapHosts.isEmpty()) {
+            resolverAddress.replaceFirst("https://", "https+local://")
+        } else if (chained && !resolverAddress.contains("://")) {
+            val host = if (resolverAddress.contains(':')) "[${resolverAddress.trim('[', ']')}]" else resolverAddress
+            "tcp://$host"
+        } else resolverAddress
+        val customDns = if (defaultDns) emptyList() else listOf(
+            """{"tag":"dns-unfiltered","address":"${q(foreignDns)}","timeoutMs":2000}""",
+        )
+        val youtubeDns = if (chained && s.iranDirect) listOf(
+            """{"tag":"dns-unfiltered","address":"${q(foreignDns)}","domains":[$youtubeDomains],"timeoutMs":2500,"skipFallback":true}""",
+        ) else emptyList()
+        val fallbackDns = if (chained) listOf(
+            """{"tag":"dns-unfiltered","address":"https://1.1.1.1/dns-query","timeoutMs":2500}""",
+        ) else listOf(
+            """{"tag":"dns-unfiltered","address":"https+local://1.1.1.1/dns-query","timeoutMs":1800}""",
+            """{"tag":"dns-fallback","address":"${q(s.domesticDns)}","timeoutMs":1200,"unexpectedIPs":["10.10.34.0/24"]}""",
+        )
+        val dnsServers = (youtubeDns + domestic + customDns + listOf(
+            """{"tag":"dns-cloudflare","address":"https://cloudflare-dns.com/dns-query","timeoutMs":1800}""",
+            """{"tag":"dns-google","address":"https://dns.google/dns-query","timeoutMs":1800}""",
+            """{"tag":"dns-cloudflare","address":"https://mozilla.cloudflare-dns.com/dns-query","timeoutMs":1800}""",
+        ) + fallbackDns).joinToString(",")
+        val dnsHosts = (mapOf(
+            "cloudflare-dns.com" to listOf("104.16.248.249", "104.16.249.249"),
+            "mozilla.cloudflare-dns.com" to listOf("172.64.41.4", "162.159.61.4"),
+            "dns.google" to listOf("8.8.8.8", "8.8.4.4"),
+        ) + preferredDns?.bootstrapHosts.orEmpty()).entries.joinToString(",") { (host, addresses) ->
+            val values = addresses.joinToString(",") { "\"${q(it)}\"" }
+            "\"${q(host)}\":[$values]"
+        }
+        val dns = """"dns":{"hosts":{$dnsHosts},"servers":[$dnsServers],"queryStrategy":"${if (s.ipv6) "UseIP" else "UseIPv4"}","serveStale":true,"tag":"dns-query"},"""
         val stats = if (nativeTun) {
             """"stats":{},"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5}},"system":{"statsInboundUplink":true,"statsInboundDownlink":true,"statsOutboundUplink":true,"statsOutboundDownlink":true}},"""
         } else """"policy":{"levels":{"8":{"handshake":8,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5}}},"""
-        return """{"log":{"loglevel":"warning","dnsLog":false},$stats$dns"inbounds":[$inbounds],"outbounds":[$outbounds],"routing":{"domainStrategy":"IPOnDemand","rules":[$rules]}}"""
+        val selector = """["$TAG_PLAIN","$ADAPTIVE_PREFIX"]"""
+        val balancer = if (adaptive) ""","balancers":[{"tag":"$BALANCER","selector":$selector,"fallbackTag":"$dnsRecordTag","strategy":{"type":"leastLoad","settings":{"expected":1,"tolerance":0.2}}}]""" else ""
+        val observer = if (adaptive) ""","burstObservatory":{"subjectSelector":$selector,"pingConfig":{"destination":"$PROBE_URL","interval":"10s","sampling":2,"timeout":"5s","httpMethod":"HEAD"}}""" else ""
+        return """{"log":{"loglevel":"warning","dnsLog":false},$stats$dns"inbounds":[$inbounds],"outbounds":[$outbounds],"routing":{"domainStrategy":"IPOnDemand","rules":[$rules]$balancer}$observer}"""
     }
-
-    const val PLAIN_DOH = "https://cloudflare-dns.com/dns-query"
 
     private fun fragment(packets: String, lengths: String, delays: String, maxSplit: Int): String {
         fun arr(v: String) = v.split(',').joinToString(",") { "\"${q(it.trim())}\"" }

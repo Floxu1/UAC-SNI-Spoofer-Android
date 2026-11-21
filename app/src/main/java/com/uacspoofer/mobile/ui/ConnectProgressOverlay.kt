@@ -22,6 +22,8 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.progressSemantics
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -29,19 +31,26 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Route
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -51,15 +60,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.uacspoofer.mobile.R
@@ -68,15 +82,32 @@ import com.uacspoofer.mobile.core.ConnectionState
 import com.uacspoofer.mobile.engine.pow.PowPhase
 import com.uacspoofer.mobile.engine.pow.PowStatusStore
 import com.uacspoofer.mobile.engine.direct.DirectPhase
+import com.uacspoofer.mobile.engine.direct.DirectIpScan
+import com.uacspoofer.mobile.engine.direct.DirectIpStage
 import com.uacspoofer.mobile.engine.direct.DirectStatusStore
+import com.uacspoofer.mobile.engine.direct.DirectStatus
 import com.uacspoofer.mobile.engine.tor.TorFlowState
 import com.uacspoofer.mobile.engine.tor.TorLiveFlow
+import com.uacspoofer.mobile.ui.theme.AppTheme
 import com.uacspoofer.mobile.ui.theme.UacColors
+import com.uacspoofer.mobile.ui.theme.UacThemeState
+import com.uacspoofer.mobile.ui.theme.styleTokens
 import kotlinx.coroutines.delay
 
 enum class ConnectOverlayEngine { TOR, POW, DIRECT, GENERIC }
 
 private enum class OverlayMode { HIDDEN, CONNECTING, SUCCESS, FAILED }
+
+@Composable
+private fun directPanelPaint(primary: Boolean): ConnectPanelPaint {
+    val tokens = styleTokens()
+    val accent = when {
+        tokens == null -> DirectAccent
+        primary -> tokens.gradientStart
+        else -> tokens.gradientEnd
+    }
+    return ConnectPanelPaint(accent, UacColors.Surface.copy(alpha = 0.93f))
+}
 
 private fun MiniStepState.color(): Color = when (this) {
     MiniStepState.DONE -> UacColors.ConnectedGreen
@@ -104,11 +135,13 @@ internal fun ConnectProgressOverlay(
     onOpenDetails: (() -> Unit)?,
     modifier: Modifier = Modifier,
     onRetry: (() -> Unit)? = null,
+    directDetailsModifier: Modifier = Modifier,
 ) {
     var mode by remember { mutableStateOf(OverlayMode.HIDDEN) }
     var startedAt by remember { mutableLongStateOf(0L) }
     var endedAt by remember { mutableLongStateOf(0L) }
     var lastState by remember { mutableStateOf(state) }
+    val isDirect = engine == ConnectOverlayEngine.DIRECT
 
     LaunchedEffect(state) {
         val prev = lastState
@@ -125,7 +158,7 @@ internal fun ConnectProgressOverlay(
             ConnectionState.CONNECTED -> if (wasConnecting) {
                 endedAt = System.currentTimeMillis()
                 mode = OverlayMode.SUCCESS
-                delay(1500)
+                delay(if (isDirect) 3_000L else 1_500L)
                 mode = OverlayMode.HIDDEN
             }
             ConnectionState.ERROR -> if (wasConnecting) {
@@ -140,7 +173,14 @@ internal fun ConnectProgressOverlay(
 
     val context = LocalContext.current
     val panelStore = remember(context) { ConnectPanelStore.get(context) }
-    val panelMode by panelStore.status.collectAsStateWithLifecycle()
+    val panelMode by (if (isDirect) panelStore.directStatus else panelStore.status)
+        .collectAsStateWithLifecycle()
+    val directStatus = if (isDirect) {
+        DirectStatusStore.status.collectAsStateWithLifecycle().value
+    } else null
+    fun setPanelMode(value: ConnectPanelMode) {
+        panelStore.setStatus(value, direct = isDirect)
+    }
     val collapsedLift by animateDpAsState(
         targetValue = if (panelMode == ConnectPanelMode.COLLAPSED) (-28).dp else 0.dp,
         animationSpec = tween(250, easing = FastOutSlowInEasing),
@@ -175,13 +215,24 @@ internal fun ConnectProgressOverlay(
                 var lastActive by remember { mutableStateOf(PowPhase.STARTING) }
                 if (status.phase != PowPhase.FAILED && status.phase != PowPhase.IDLE) lastActive = status.phase
                 val steps = ConnectProgressModel.powSteps(status.phase, lastActive)
-                OverlayData(steps, status.detail.ifBlank { status.steps.lastOrNull()?.text.orEmpty() }, 0L)
+                val detail = status.detail.ifBlank { status.steps.lastOrNull()?.text.orEmpty() }
+                OverlayData(
+                    steps,
+                    homeText(
+                        PowStatusCopy.h3ScanStage(false, detail) ?: detail,
+                        PowStatusCopy.h3ScanStage(true, detail) ?: detail,
+                    ),
+                    0L,
+                )
             }
             ConnectOverlayEngine.DIRECT -> {
-                val status by DirectStatusStore.status.collectAsStateWithLifecycle()
-                var lastActive by remember { mutableStateOf(DirectPhase.BUILDING) }
-                if (status.phase != DirectPhase.FAILED && status.phase != DirectPhase.IDLE) lastActive = status.phase
-                OverlayData(ConnectProgressModel.directSteps(status.phase, lastActive), status.detail, status.startedAt)
+                val status = checkNotNull(directStatus)
+                val scan = status.ipScan
+                OverlayData(
+                    ConnectProgressModel.directSteps(status.phase, status.lastActivePhase, scan != null),
+                    directProgressDetail(status),
+                    status.startedAt,
+                )
             }
             ConnectOverlayEngine.GENERIC -> {
                 val auto by AutoBootstrapStore.snapshot.collectAsStateWithLifecycle()
@@ -224,11 +275,12 @@ internal fun ConnectProgressOverlay(
         }
         val elapsed = (if (endedAt > 0L && mode != OverlayMode.CONNECTING) endedAt else now) - begin
 
+        val basePaint = if (isDirect) directPanelPaint(primary = false) else connectPanelPaint(primary = false)
         val accent by animateColorAsState(
             when (mode) {
                 OverlayMode.SUCCESS -> UacColors.ConnectedGreen
                 OverlayMode.FAILED -> UacColors.ErrorRed
-                else -> UacColors.ConnectingCyan
+                else -> if (isDirect) basePaint.border else UacColors.ConnectingCyan
             },
             tween(400), label = "cpAccent",
         )
@@ -250,12 +302,12 @@ internal fun ConnectProgressOverlay(
             else -> homeText("Preparing secure tunnel…", "در حال آماده‌سازی تونل امن…")
         }
         val font = homeLocalizedFont()
-        val paint = connectPanelPaint(primary = false)
+        val paint = if (isDirect) basePaint.copy(border = accent) else basePaint
         val shape = RoundedCornerShape(18.dp)
         val dismiss: () -> Unit = { mode = OverlayMode.HIDDEN }
         val onTap: () -> Unit = when {
             onOpenDetails != null -> onOpenDetails
-            mode == OverlayMode.FAILED -> dismiss
+            !isDirect && mode == OverlayMode.FAILED -> dismiss
             else -> ({})
         }
         val progress by animateFloatAsState(
@@ -291,7 +343,7 @@ internal fun ConnectProgressOverlay(
                     .background(paint.background)
                     .border(1.dp, paint.border.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
                     .clickable(role = androidx.compose.ui.semantics.Role.Button) {
-                        panelStore.setStatus(ConnectPanelMode.OPEN)
+                        setPanelMode(ConnectPanelMode.OPEN)
                     }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -299,13 +351,9 @@ internal fun ConnectProgressOverlay(
                 PulseDot(accent, pulsing = mode == OverlayMode.CONNECTING)
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    collapsedTitle,
-                    color = UacColors.TextPrimary,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Medium,
-                    fontFamily = font,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    collapsedTitle, color = UacColors.TextPrimary, fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium, fontFamily = font,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 220.dp),
                 )
                 Spacer(Modifier.width(8.dp))
@@ -330,7 +378,7 @@ internal fun ConnectProgressOverlay(
                 .clip(shape)
                 .background(paint.background, shape)
                 .border(1.dp, paint.border.copy(alpha = 0.75f), shape)
-                .clickable(onClick = onTap)
+                .then(if (isDirect) Modifier else Modifier.clickable(onClick = onTap))
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -354,7 +402,7 @@ internal fun ConnectProgressOverlay(
                     homeLtr(ConnectProgressModel.formatElapsed(elapsed)), color = UacColors.TextSecondary,
                     fontSize = 11.5.sp, fontWeight = FontWeight.Medium,
                 )
-                if (mode == OverlayMode.FAILED) {
+                if (!isDirect && mode == OverlayMode.FAILED) {
                     Spacer(Modifier.width(8.dp))
                     Icon(
                         Icons.Outlined.Close, homeText("Dismiss", "بستن"), tint = UacColors.TextSecondary,
@@ -363,13 +411,13 @@ internal fun ConnectProgressOverlay(
                 }
                 Spacer(Modifier.width(6.dp))
                 ConnectPanelActions(
-                    onCollapse = { panelStore.setStatus(ConnectPanelMode.COLLAPSED) },
-                    onClose = { panelStore.setStatus(ConnectPanelMode.CLOSED) },
+                    onCollapse = { setPanelMode(ConnectPanelMode.COLLAPSED) },
+                    onClose = { setPanelMode(ConnectPanelMode.CLOSED) },
                 )
             }
             Spacer(Modifier.height(9.dp))
             if (steps.isNotEmpty()) {
-                MiniStepper(steps, font)
+                MiniStepper(steps, font, runningColor = if (isDirect) accent else UacColors.ConnectingCyan)
                 Spacer(Modifier.height(7.dp))
                 Box(
                     Modifier.fillMaxWidth().height(2.dp).clip(RoundedCornerShape(2.dp))
@@ -406,6 +454,311 @@ internal fun ConnectProgressOverlay(
         }
         }
     }
+    if (directStatus != null) {
+        val detailsMode by panelStore.directSteps.collectAsStateWithLifecycle()
+        DirectConnectDetails(
+            status = directStatus,
+            visible = mode != OverlayMode.HIDDEN,
+            connecting = mode == OverlayMode.CONNECTING,
+            panelMode = detailsMode,
+            onPanelModeChange = { panelStore.setSteps(it, direct = true) },
+            modifier = directDetailsModifier,
+        )
+    }
+}
+
+@Composable
+private fun directProgressDetail(status: DirectStatus): String = when {
+    status.phase == DirectPhase.SCANNING -> status.ipScan?.let { directScanCount(it) }
+        ?: homeText("Checking routes…", "در حال بررسی مسیرها…")
+    status.phase == DirectPhase.FAILED -> homeText("Check the connection steps below.", "مراحل اتصال را پایین صفحه ببینید.")
+    status.detail == "Trying another route" -> homeText("Trying another route…", "در حال امتحان مسیر دیگری…")
+    status.detail == "Testing secure DNS" -> homeText("Testing DNS…", "در حال انتخاب DNS…")
+    status.phase == DirectPhase.STARTING -> homeText("Opening the route…", "در حال برقراری اتصال…")
+    status.phase == DirectPhase.CHECKING -> homeText("Checking internet access…", "در حال بررسی دسترسی به اینترنت…")
+    status.phase == DirectPhase.CONNECTED -> homeText("Internet access verified", "دسترسی به اینترنت تأیید شد")
+    else -> homeText("Preparing the connection…", "در حال آماده‌سازی اتصال…")
+}
+
+@Composable
+private fun DirectConnectDetails(
+    status: DirectStatus,
+    visible: Boolean,
+    connecting: Boolean,
+    panelMode: ConnectPanelMode,
+    onPanelModeChange: (ConnectPanelMode) -> Unit,
+    modifier: Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible && panelMode != ConnectPanelMode.CLOSED,
+        modifier = modifier,
+        enter = fadeIn(tween(220)) + slideInVertically(tween(320)) { it / 2 },
+        exit = fadeOut(tween(220)) + slideOutVertically(tween(260)) { it / 3 },
+    ) {
+        val expanded = panelMode == ConnectPanelMode.OPEN
+        BoxWithConstraints(
+            Modifier.then(if (expanded) Modifier.widthIn(max = 420.dp) else Modifier)
+                .fillMaxWidth().animateContentSize(tween(250)),
+        ) {
+            val listHeight = minOf(200.dp, maxHeight * 0.28f)
+            val steps = ConnectProgressModel.directSteps(status.phase, status.lastActivePhase, status.ipScan != null)
+            val font = homeLocalizedFont()
+            val paint = directPanelPaint(primary = true)
+            val accent = paint.border
+            val resultAccent = if (UacThemeState.theme == AppTheme.CLASSIC && status.phase != DirectPhase.FAILED) {
+                UacColors.ConnectedGreen
+            } else {
+                accent
+            }
+            val shape = RoundedCornerShape(20.dp)
+            val glass = Brush.verticalGradient(listOf(lerp(paint.background, accent, 0.035f), paint.background))
+            val heading = homeText("Connection details", "جزئیات اتصال")
+            val current = steps.getOrNull(ConnectProgressModel.focusIndex(steps))
+            val scan = status.ipScan?.takeIf { it.total > 0 }
+            val selected = scan?.checks?.firstOrNull { it.stage == DirectIpStage.SELECTED }
+            val scanning = connecting && selected == null
+            var showChecks by remember(status.startedAt) { mutableStateOf(false) }
+            CompositionLocalProvider(
+                LocalLayoutDirection provides if (LocalHomePersian.current) LayoutDirection.Rtl else LayoutDirection.Ltr,
+            ) {
+                if (!expanded) {
+                    val measurements = listOfNotNull(
+                        selected?.pingMs?.let { ping ->
+                            val value = homeLtr("$ping ms")
+                            homeText("Ping $value", "پینگ $value")
+                        },
+                        status.selectedDnsLabel?.let { homeLtr(it) },
+                    ).joinToString(" · ")
+                    val headline = when {
+                        status.phase == DirectPhase.FAILED -> homeText("Could not connect", "اتصال برقرار نشد")
+                        measurements.isNotBlank() -> measurements
+                        status.phase == DirectPhase.SCANNING && scan != null -> directScanCount(scan)
+                        else -> directProgressDetail(status)
+                    }
+                    CollapsedConnectSteps(
+                        title = headline,
+                        state = current?.state,
+                        done = steps.count { it.state == MiniStepState.DONE },
+                        total = steps.size,
+                        paint = paint,
+                        onExpand = { onPanelModeChange(ConnectPanelMode.OPEN) },
+                    )
+                } else {
+                    Column(
+                        Modifier.fillMaxWidth().clip(shape).background(glass)
+                            .border(1.dp, accent.copy(alpha = 0.50f), shape)
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            DirectDetailsIcon(Icons.Outlined.Route, accent)
+                            Text(
+                                heading, color = UacColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                                fontFamily = font, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            ConnectPanelActions(
+                                onCollapse = { onPanelModeChange(ConnectPanelMode.COLLAPSED) },
+                                onClose = { onPanelModeChange(ConnectPanelMode.CLOSED) },
+                            )
+                        }
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(UacColors.Divider))
+                        LazyColumn(Modifier.heightIn(max = listHeight).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (selected != null) {
+                                item("selected-route") {
+                                    DirectResultRow(
+                                        Icons.Outlined.Route,
+                                        homeText("Selected route", "مسیر منتخب"),
+                                        selected.address.substringBeforeLast(':'),
+                                        homeText("Ping", "پینگ"),
+                                        selected.pingMs,
+                                        font,
+                                        resultAccent,
+                                    )
+                                }
+                            }
+                            status.selectedDnsLabel?.let { label ->
+                                item("selected-dns") {
+                                    DirectResultRow(
+                                        Icons.Outlined.Public, homeText("Selected DNS", "DNS منتخب"), label,
+                                        homeText("Response time", "زمان پاسخ"), status.selectedDnsLatencyMs, font, resultAccent,
+                                    )
+                                }
+                            }
+                            if (scan != null) {
+                                item("ip-count") {
+                                    DirectScanSummary(scan, scanning, showChecks, font, accent) { showChecks = !showChecks }
+                                }
+                                if (scanning || showChecks) directIpChecks(scan, scanning, font, accent)
+                            }
+                            if (status.phase == DirectPhase.FAILED ||
+                                (selected == null && scan == null && status.selectedDnsLabel == null)
+                            ) {
+                                item("current-detail") {
+                                    Text(
+                                        if (status.phase == DirectPhase.CONNECTED) homeText("Internet access verified", "دسترسی به اینترنت تأیید شد")
+                                        else if (status.phase == DirectPhase.FAILED && current != null)
+                                            homeText("Connection failed during ${current.english.lowercase()}.", "اتصال در مرحلهٔ «${current.persian}» برقرار نشد.")
+                                        else directProgressDetail(status),
+                                        color = UacColors.TextSecondary, fontSize = 12.sp, fontFamily = font,
+                                        modifier = Modifier.padding(vertical = 4.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DirectScanSummary(
+    scan: DirectIpScan,
+    scanning: Boolean,
+    expanded: Boolean,
+    font: FontFamily?,
+    accent: Color,
+    onToggle: () -> Unit,
+) {
+    val checked = scan.sweepChecked ?: scan.checks.count { it.finished }
+    val progress by animateFloatAsState(
+        (checked.toFloat() / scan.total).coerceIn(0f, 1f),
+        tween(220, easing = FastOutSlowInEasing),
+        label = "direct-address-scan",
+    )
+    val expandable = !scanning && scan.checks.any { it.stage != DirectIpStage.SELECTED }
+    val shape = RoundedCornerShape(13.dp)
+    Column(
+        Modifier.fillMaxWidth().clip(shape).background(accent.copy(alpha = 0.07f))
+            .then(if (expandable) Modifier.clickable(onClick = onToggle) else Modifier)
+            .padding(horizontal = 11.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                if (scanning) homeText("Finding a route", "جست‌وجوی مسیر")
+                else homeText("Addresses checked", "آدرس‌های بررسی‌شده"),
+                Modifier.weight(1f),
+                color = UacColors.TextPrimary, fontSize = 12.sp, fontFamily = font,
+                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                homeLtr("$checked / ${scan.total}"),
+                color = accent, fontSize = 11.5.sp, fontFamily = font, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier
+                    .background(accent.copy(alpha = 0.10f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp),
+            )
+            if (expandable) {
+                Icon(
+                    Icons.Rounded.ExpandMore,
+                    if (expanded) homeText("Hide addresses", "جمع کردن آدرس‌ها") else homeText("Show addresses", "نمایش آدرس‌ها"),
+                    tint = UacColors.TextSecondary,
+                    modifier = Modifier.size(16.dp).rotate(if (expanded) 180f else 0f),
+                )
+            }
+        }
+        if (scanning) DirectDetailsProgress(progress, accent)
+    }
+}
+
+@Composable
+private fun DirectDetailsProgress(progress: Float, accent: Color) {
+    Box(
+        Modifier.fillMaxWidth().height(3.dp).progressSemantics(progress).clip(CircleShape)
+            .background(accent.copy(alpha = 0.15f)),
+    ) {
+        Box(Modifier.fillMaxWidth(progress).height(3.dp).background(accent, CircleShape))
+    }
+}
+
+@Composable
+private fun DirectDetailsIcon(icon: ImageVector, accent: Color) {
+    Box(
+        Modifier.size(28.dp).background(accent.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
+    }
+}
+
+@Composable
+private fun DirectResultRow(
+    icon: ImageVector,
+    label: String,
+    value: String,
+    latencyLabel: String,
+    latencyMs: Long?,
+    font: FontFamily?,
+    accent: Color,
+) {
+    Row(
+        Modifier.fillMaxWidth().background(UacColors.TextPrimary.copy(alpha = 0.045f), RoundedCornerShape(13.dp))
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        DirectDetailsIcon(icon, accent)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label, color = UacColors.TextSecondary, fontSize = 10.5.sp, fontFamily = font)
+            Text(
+                homeLtr(value), color = UacColors.TextPrimary, fontSize = 12.sp, fontFamily = font,
+                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (latencyMs != null) {
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(latencyLabel, color = UacColors.TextSecondary, fontSize = 10.sp, fontFamily = font, maxLines = 1)
+                Text(
+                    homeLtr("$latencyMs ms"), color = accent, fontSize = 12.sp, fontFamily = font,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun directScanCount(scan: DirectIpScan): String {
+    val checked = scan.sweepChecked ?: scan.checks.count { it.finished }
+    val count = homeLtr("$checked/${scan.total}")
+    return homeText("IPs checked $count", "IPهای بررسی‌شده $count")
+}
+
+private fun LazyListScope.directIpChecks(scan: DirectIpScan, scanning: Boolean, font: FontFamily?, accent: Color) {
+    val checks = scan.checks.asReversed().filter { it.stage != DirectIpStage.SELECTED }
+        .sortedBy { !scanning || it.finished }
+        items(checks, key = { it.address }) { check ->
+            val stopped = !check.finished && !scanning
+            val result = if (stopped) homeText("Stopped", "متوقف شد") else when (check.stage) {
+                DirectIpStage.HTTPS -> homeText("Checking", "در حال بررسی")
+                DirectIpStage.WIREGUARD -> homeText("Testing data", "بررسی انتقال داده")
+                DirectIpStage.HTTPS_FAILED -> homeText("No response", "بدون پاسخ")
+                DirectIpStage.WIREGUARD_FAILED -> homeText("Data check failed", "انتقال داده ناموفق")
+                DirectIpStage.SELECTED -> homeText("Selected", "انتخاب شد")
+            }
+            val color = if (stopped) UacColors.TextSecondary else when (check.stage) {
+                DirectIpStage.HTTPS, DirectIpStage.WIREGUARD -> accent
+                DirectIpStage.HTTPS_FAILED, DirectIpStage.WIREGUARD_FAILED -> UacColors.ErrorRed
+                DirectIpStage.SELECTED -> UacColors.ConnectedGreen
+            }
+            Row(
+                Modifier.fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    homeLtr(check.address.substringBeforeLast(':')),
+                    color = UacColors.TextSecondary, fontSize = 10.5.sp, fontFamily = font,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
+                Box(Modifier.size(4.dp).background(color, CircleShape))
+                Text(result, color = color, fontSize = 10.5.sp, fontFamily = font, maxLines = 1)
+            }
+        }
 }
 
 @Composable
@@ -424,7 +777,7 @@ private fun PulseDot(color: Color, pulsing: Boolean) {
 }
 
 @Composable
-private fun MiniStepper(steps: List<MiniStep>, font: FontFamily?) {
+private fun MiniStepper(steps: List<MiniStep>, font: FontFamily?, runningColor: Color) {
     val focus = ConnectProgressModel.focusIndex(steps)
     val anyRunning = steps.any { it.state == MiniStepState.RUNNING }
     val pulse = if (anyRunning) {
@@ -436,7 +789,8 @@ private fun MiniStepper(steps: List<MiniStep>, font: FontFamily?) {
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         steps.forEachIndexed { i, step ->
-            val c by animateColorAsState(step.state.color(), tween(350), label = "cpDot$i")
+            val dotColor = if (step.state == MiniStepState.RUNNING) runningColor else step.state.color()
+            val c by animateColorAsState(dotColor, tween(350), label = "cpDot$i")
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(Modifier.fillMaxWidth().height(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     val left = when {

@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -181,9 +182,10 @@ data class NeonTokens(
     val waveGlowBlur: Float = 8.102f,
     val waveGlowAlpha: Float = 0.926f,
     val waveAlpha: Float = 1f,
+    val pageColors: PageThemeColors = PageThemeColors(),
 ) {
     fun toKotlin(name: String = "NeonTokens"): String {
-        fun c(color: Color) = "Color(0x%08X)".format(color.toArgb())
+        fun c(color: Color) = if (color.isSpecified) "Color(0x%08X)".format(color.toArgb()) else "Color.Unspecified"
         fun n(value: Float): String {
             val text = String.format(Locale.US, "%.3f", value).trimEnd('0').trimEnd('.')
             return text + "f"
@@ -357,10 +359,52 @@ data class NeonTokens(
             appendLine("    waveGlowBlur = ${n(waveGlowBlur)},")
             appendLine("    waveGlowAlpha = ${n(waveGlowAlpha)},")
             appendLine("    waveAlpha = ${n(waveAlpha)},")
+            appendLine("    pageColors = PageThemeColors(")
+            appendLine("        pageTop = ${c(pageColors.pageTop)},")
+            appendLine("        pageMiddle = ${c(pageColors.pageMiddle)},")
+            appendLine("        pageBottom = ${c(pageColors.pageBottom)},")
+            appendLine("        pageSurface = ${c(pageColors.pageSurface)},")
+            appendLine("        settingsSurface = ${c(pageColors.settingsSurface)},")
+            appendLine("        drawerSurface = ${c(pageColors.drawerSurface)},")
+            appendLine("        pageText = ${c(pageColors.pageText)},")
+            appendLine("        pageMutedText = ${c(pageColors.pageMutedText)},")
+            appendLine("        pageBorder = ${c(pageColors.pageBorder)},")
+            appendLine("        pageDivider = ${c(pageColors.pageDivider)},")
+            appendLine("        idleAccent = ${c(pageColors.idleAccent)},")
+            appendLine("        connectingAccent = ${c(pageColors.connectingAccent)},")
+            appendLine("        connectedAccent = ${c(pageColors.connectedAccent)},")
+            appendLine("        disconnectingAccent = ${c(pageColors.disconnectingAccent)},")
+            appendLine("        errorAccent = ${c(pageColors.errorAccent)},")
+            appendLine("        pageAccent = ${c(pageColors.pageAccent)},")
+            appendLine("        secondaryAccent = ${c(pageColors.secondaryAccent)},")
+            appendLine("        tertiaryAccent = ${c(pageColors.tertiaryAccent)},")
+            appendLine("    ),")
             append(")")
         }
     }
 }
+
+@Immutable
+data class PageThemeColors(
+    val pageTop: Color = Color.Unspecified,
+    val pageMiddle: Color = Color.Unspecified,
+    val pageBottom: Color = Color.Unspecified,
+    val pageSurface: Color = Color.Unspecified,
+    val settingsSurface: Color = Color.Unspecified,
+    val drawerSurface: Color = Color.Unspecified,
+    val pageText: Color = Color.Unspecified,
+    val pageMutedText: Color = Color.Unspecified,
+    val pageBorder: Color = Color.Unspecified,
+    val pageDivider: Color = Color.Unspecified,
+    val idleAccent: Color = Color.Unspecified,
+    val connectingAccent: Color = Color.Unspecified,
+    val connectedAccent: Color = Color.Unspecified,
+    val disconnectingAccent: Color = Color.Unspecified,
+    val errorAccent: Color = Color.Unspecified,
+    val pageAccent: Color = Color.Unspecified,
+    val secondaryAccent: Color = Color.Unspecified,
+    val tertiaryAccent: Color = Color.Unspecified,
+)
 
 val SolarisTokens = NeonTokens(
     bgTop = Color(0xF7050217),
@@ -548,7 +592,7 @@ object SolarisLive {
     }
 }
 
-internal fun styleTokens(): NeonTokens? = when (UacThemeState.theme) {
+internal fun styleTokens(theme: AppTheme = UacThemeState.theme): NeonTokens? = when (theme) {
     AppTheme.SOLARIS -> SolarisLive.tokens
     AppTheme.NEON -> NeonLive.tokens
     AppTheme.CLASSIC -> null

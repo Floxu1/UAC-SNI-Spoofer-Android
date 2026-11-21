@@ -8,21 +8,19 @@ import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicLong
 
 object AetherNative {
-    @Volatile
-    private var loadError: String? = null
-
-    init {
-        loadError = runCatching {
+    // Teardown runs for inactive engines too. Only an explicit PoW operation loads its core.
+    private val libraryLoad = lazy {
+        runCatching {
             System.loadLibrary("aether")
             System.loadLibrary("aether_jni")
-            null
         }.exceptionOrNull()?.message
     }
 
-    val available: Boolean get() = loadError == null
+    private val loaded: Boolean get() = libraryLoad.isInitialized() && libraryLoad.value == null
+    val available: Boolean get() = libraryLoad.value == null
 
     val unavailableReason: String
-        get() = loadError ?: "UAC PoW native libraries are not packaged for this ABI"
+        get() = libraryLoad.value ?: "UAC PoW native libraries are not packaged for this ABI"
 
     data class TunnelAddresses(
         val ipv4: String,
@@ -63,6 +61,12 @@ object AetherNative {
         }
         check(nativePrepare(config) == 0) { nativeLastError().ifBlank { "prepare failed" } }
         val result = JSONObject(nativeLastResult())
+        when (JSONObject(config).optString("masque_transport")) {
+            PowCoreConfig.NATIVE_H3_EXPERIMENTAL ->
+                check(result.optBoolean("h3_experimental")) { "This native core does not support experimental HTTP/3" }
+            PowCoreConfig.NATIVE_H3_OVER_H2 ->
+                check(result.optBoolean("h3_over_h2")) { "This native core does not support HTTP/3 over HTTP/2" }
+        }
         return TunnelAddresses(
             result.getString("ipv4"),
             result.optString("ipv6"),
@@ -100,7 +104,7 @@ object AetherNative {
 
     /** Non-blocking: keeps asking the native core to drop an in-flight prepare until it returns. */
     fun abortPrepare() {
-        if (!available) return
+        if (!loaded) return
         val worker = prepareThread ?: return
         if (!worker.isAlive) return
         val generation = prepareGeneration.get()
@@ -137,13 +141,13 @@ object AetherNative {
     }
 
     fun stop(): Int {
-        if (!available) return 0
+        if (!loaded) return 0
         return nativeStop()
     }
 
-    fun isRunning(): Boolean = available && nativeIsRunning()
+    fun isRunning(): Boolean = loaded && nativeIsRunning()
 
-    fun isReady(): Boolean = available && nativeIsReady()
+    fun isReady(): Boolean = loaded && nativeIsReady()
 
     fun lastError(): String = if (available) nativeLastError() else unavailableReason
 
@@ -156,7 +160,7 @@ object AetherNative {
     }
 
     fun detach() {
-        if (!available) return
+        if (!loaded) return
         nativeDetach()
     }
 

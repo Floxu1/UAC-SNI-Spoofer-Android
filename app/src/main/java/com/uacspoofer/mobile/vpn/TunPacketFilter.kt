@@ -34,6 +34,9 @@ internal object TunPacketFilter {
     var isIpv6BlockerEnabled: Boolean = true
         private set
 
+    @Volatile
+    private var engineRejectsQuic = false
+
     private val lock = Any()
     private var realTun: ParcelFileDescriptor? = null
     private var filterPeer: ParcelFileDescriptor? = null
@@ -50,9 +53,14 @@ internal object TunPacketFilter {
         isIpv6BlockerEnabled = settings.ipv6Block
     }
 
-    fun attach(tun: ParcelFileDescriptor, mtu: Int): ParcelFileDescriptor {
+    fun setEngineQuicRejection(enabled: Boolean) {
+        engineRejectsQuic = enabled
+    }
+
+    fun attach(tun: ParcelFileDescriptor, mtu: Int, rejectQuic: Boolean = false): ParcelFileDescriptor {
         synchronized(lock) {
             stopLocked()
+            setEngineQuicRejection(rejectQuic)
             val pair = createPacketPair()
             val enginePfd = pair.first
             val filterPfd = pair.second
@@ -73,7 +81,7 @@ internal object TunPacketFilter {
             AppLogRepository.info(
                 LogSource.TUN,
                 "Packet filter attached sinkhole=$isSinkholeEnabled webrtc=$isWebRtcBlockerEnabled " +
-                    "quic=$isQuicBlockerEnabled ipv6=$isIpv6BlockerEnabled mtu=$mtu",
+                    "quic=${isQuicBlockerEnabled || engineRejectsQuic} ipv6=$isIpv6BlockerEnabled mtu=$mtu",
             )
             return enginePfd
         }
@@ -129,7 +137,7 @@ internal object TunPacketFilter {
             if (n <= 0) break
             val sinkhole = isSinkholeEnabled
             val webrtc = isWebRtcBlockerEnabled
-            val quic = isQuicBlockerEnabled
+            val quic = isQuicBlockerEnabled || engineRejectsQuic
             val ipv6 = isIpv6BlockerEnabled
             if (sinkhole || webrtc || quic || ipv6) {
                 when (
