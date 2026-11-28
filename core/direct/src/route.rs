@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use route_support::direct_support::{
     apply_runtime_options, certificate_retry_peers, connect_tcp, direct_range_peers, establish_wg,
-    join_outcome, load_clean_h2, load_or_provision_masque, load_or_provision_warp, mark_ready,
-    masque_config_path, masque_scan_peers, open_scan_carrier, record_log, remember_clean_h2, serve,
+    join_outcome, load_clean_h2, load_or_provision_masque, load_or_provision_warp,
+    load_verified_masque_read_only, mark_ready, masque_config_path, masque_scan_peers,
+    open_scan_carrier, record_log, remember_clean_h2, serve,
     unique_scan_peers, use_extended_connect, warp_config_path, Carrier, CarrierStartupStage,
     CarrierStartupTrace, ForwarderGuard, INNER_MTU, MASQUE_SEEDS, MAX_DATAGRAM_SIZE,
 };
@@ -36,8 +37,15 @@ impl CandidateDiagnostic {
 
 impl Drop for CandidateDiagnostic {
     fn drop(&mut self) {
+        let h2_failure = self.trace.h2_failure().map_or_else(
+            String::new,
+            |(kind, code)| {
+                let code = code.map_or_else(|| "none".into(), |value| value.to_string());
+                format!(" h2_error={kind} h2_code={code}")
+            },
+        );
         record_log(format!(
-            "Direct candidate {} {} stage={} result={} elapsed_ms={} http_status={} reason={}",
+            "Direct candidate {} {} stage={} result={} elapsed_ms={} http_status={} reason={}{}",
             self.peer,
             self.source,
             self.trace.stage(),
@@ -45,6 +53,7 @@ impl Drop for CandidateDiagnostic {
             self.started.elapsed().as_millis(),
             self.trace.http_status(),
             self.reason,
+            h2_failure,
         ));
     }
 }
@@ -65,6 +74,8 @@ fn safe_failure_reason(error: &CoreError) -> &'static str {
         CoreError::Masque(message) if message.starts_with("h2 connect-ip status ") => {
             "request_rejected"
         }
+        CoreError::Masque(message) if message.starts_with("send_request:") => "h2_request_failed",
+        CoreError::Masque(message) if message.starts_with("await response:") => "h2_response_failed",
         CoreError::Masque(_) => "masque_error",
         CoreError::Other(message) if message.contains("dataplane verify timed out") => {
             "wireguard_data_timeout"
@@ -154,7 +165,14 @@ pub async fn run(options: StartOptions) -> Result<()> {
     apply_runtime_options(&options);
     initialize();
     record_log("Direct startup stage=masque_identity");
-    let masque = load_or_provision_masque(&masque_config_path(&options), false).await?;
+    let masque = match (&options.forced_peer, &options.masque_config_path) {
+        (Some(_), Some(path)) => {
+            let identity = load_verified_masque_read_only(path)?;
+            record_log("Direct H2 identity source=verified_pow mode=read_only");
+            identity
+        }
+        _ => load_or_provision_masque(&masque_config_path(&options), false).await?,
+    };
     record_log("Direct startup stage=wireguard_identity");
     let wireguard = load_or_provision_warp(&warp_config_path(&options)).await?;
     use_extended_connect(false);
@@ -180,15 +198,25 @@ pub async fn run(options: StartOptions) -> Result<()> {
                 .filter_map(|ip| ip.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 443))),
         );
     let skip_ip = options.direct_retry_skip_ip;
-    let (known, sampled) = plan_carriers(
-        eligible_carriers(saved_peers, skip_ip),
-        eligible_carriers(
-            masque_scan_peers(ScanMode::Turbo, &[443], IpScan::V4),
-            skip_ip,
-        ),
-    );
-    let range_peers: Vec<_> =
-        eligible_carriers(range_candidates(options.scan_mode), skip_ip).collect();
+    let (known, sampled, range_peers) = if let Some(peer) = options.forced_peer {
+        let known: Vec<_> = eligible_carriers([peer], skip_ip)
+            .filter(|peer| peer.is_ipv4() && peer.port() == 443)
+            .collect();
+        if known.is_empty() {
+            return Err(CoreError::Other("Invalid remembered Direct HTTP/2 peer".into()));
+        }
+        (known, Vec::new(), Vec::new())
+    } else {
+        let (known, sampled) = plan_carriers(
+            eligible_carriers(saved_peers, skip_ip),
+            eligible_carriers(
+                masque_scan_peers(ScanMode::Turbo, &[443], IpScan::V4),
+                skip_ip,
+            ),
+        );
+        let range_peers = eligible_carriers(range_candidates(options.scan_mode), skip_ip).collect();
+        (known, sampled, range_peers)
+    };
     let rank_addresses = !range_peers.is_empty();
     record_log(format!(
         "Direct startup stage=carrier_search known={} sampled={} range={} shared_h2_hints={shared_hints}",
@@ -241,12 +269,19 @@ pub async fn run(options: StartOptions) -> Result<()> {
     };
     let mut last_error = None;
     let selected = if rank_addresses {
+        let scan_started = Instant::now();
+        let scanned = range_peers.len();
         let ranked = rank_ranges(range_peers).await;
         let validation_seconds = if options.scan_mode == ScanMode::Thorough {
             24
         } else {
             8
         };
+        record_log(format!(
+            "Direct range summary: tcp_checked={scanned} tcp_reachable={} elapsed_ms={} validation_budget_s={validation_seconds}",
+            ranked.len(),
+            scan_started.elapsed().as_millis(),
+        ));
         // Keep validation in ping order, while checking several routes concurrently.
         let checks = futures::stream::iter(
             ranked

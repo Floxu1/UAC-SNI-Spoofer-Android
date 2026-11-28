@@ -63,6 +63,11 @@ class DirectConnectionCoordinator(private val context: VpnService) {
         val settings = DirectEngineStore.get(context).snapshot()
         val s = advanced.validated()
         stop()
+        AppLogRepository.info(
+            LogSource.XRAY,
+            "Direct session: scan=${settings.scanMode.id} auto_dns=${settings.autoSelectDns} " +
+                "mode=${if (proxyMode) "proxy" else "vpn"} mtu=${s.tunMtu} cloud_transport=${settings.wireGuardOverDirect}",
+        )
         verifyDirectStartup(
             start = { skipIp -> startAndVerify(settings, s, proxyMode, establishTun, skipIp) },
             selectedCarrier = { if (settings.wireGuardOverDirect) wireGuard.selectedCarrierIp() else null },
@@ -83,13 +88,17 @@ class DirectConnectionCoordinator(private val context: VpnService) {
         proxyMode: Boolean,
         establishTun: () -> ParcelFileDescriptor?,
         excludedCarrierIp: String?,
-    ): ProbeResult {
+    ): ProbeResult = coroutineScope {
         DirectStatusStore.setDnsSelection(null)
+        val tunAlreadyUp = descriptor != null
         val chainedPort = if (settings.wireGuardOverDirect) {
             val detail = if (excludedCarrierIp == null) "Preparing WireGuard over Direct" else "Trying another route"
             DirectStatusStore.update(DirectPhase.BUILDING, 10, detail)
             wireGuard.start(settings, excludedCarrierIp)
         } else null
+        val nativeBefore = chainedPort?.takeIf { !proxyMode && !tunAlreadyUp }?.let { nativePort ->
+            async(Dispatchers.IO) { probeLayer("native_before_vpn", nativePort) }
+        }
         val region = if (chainedPort != null) PowRegions.egressRegion(settings.exitCountryCode) else null
         val selectedExitPort = if (region != null) countryExit.allocatePort() else chainedPort
         val dns = if (settings.autoSelectDns) {
@@ -109,7 +118,8 @@ class DirectConnectionCoordinator(private val context: VpnService) {
                 )
             }
         } else null
-        synchronized(this) {
+        val beforeVpn = nativeBefore?.await()
+        synchronized(this@DirectConnectionCoordinator) {
             selectedDns = dns
             exitSocksPort = selectedExitPort
             exitCountryCode = region.orEmpty()
@@ -165,11 +175,52 @@ class DirectConnectionCoordinator(private val context: VpnService) {
         if (result.ok) {
             if (chainedPort != null) wireGuard.rememberVerifiedCompatibilityRoute()
             AppLogRepository.success(LogSource.XRAY, "UAC Direct DNS and HTTPS verified: ${result.detail}")
+        } else if (chainedPort != null) {
+            diagnosePayloadFailure(chainedPort, selectedExitPort, s, beforeVpn)
         }
-        return result
+        result
     }
 
     data class ProbeResult(val ok: Boolean, val detail: String)
+
+    private fun probeLayer(label: String, port: Int, host: String = "127.0.0.1"): ProbeResult {
+        val result = probe(
+            PAYLOAD_DIAGNOSTIC_URL,
+            Proxy(Proxy.Type.SOCKS, InetSocketAddress(host, port)),
+            timeoutMs = DIAGNOSTIC_TIMEOUT_MS,
+        )
+        AppLogRepository.debug(LogSource.XRAY, "Direct payload layer=$label ok=${result.ok} ${result.detail}")
+        return result
+    }
+
+    private suspend fun diagnosePayloadFailure(
+        nativePort: Int,
+        exitPort: Int?,
+        settings: AdvancedSettingsData,
+        beforeVpn: ProbeResult?,
+    ) = coroutineScope {
+        val native = async(Dispatchers.IO) { probeLayer("native_after_xray", nativePort) }
+        val xray = async(Dispatchers.IO) { probeLayer("xray", settings.socksPort, settings.socksAddress) }
+        val exit = exitPort?.takeIf { it != nativePort }?.let {
+            async(Dispatchers.IO) { probeLayer("country_exit", it) }
+        }
+        val nativeOk = native.await().ok
+        val xrayOk = xray.await().ok
+        val exitOk = exit?.await()?.ok
+        val stage = when {
+            nativeOk && xrayOk -> "dns_or_domain_https"
+            nativeOk && exitOk == false -> "country_exit"
+            nativeOk -> "xray_routing"
+            beforeVpn?.ok == true -> "native_payload_lost_after_vpn"
+            else -> "native_payload_unconfirmed"
+        }
+        AppLogRepository.warning(
+            LogSource.XRAY,
+            "Direct payload failure: stage=$stage native_running=${wireGuard.isRunning()} " +
+                "before_vpn=${beforeVpn?.ok ?: "unmeasured"} native=$nativeOk xray=$xrayOk " +
+                "country_exit=${exitOk ?: "unused"}",
+        )
+    }
 
     suspend fun verify(settings: AdvancedSettingsData, tryLightCheck: Boolean = false): ProbeResult = coroutineScope {
         val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(settings.socksAddress, settings.socksPort))
@@ -182,13 +233,16 @@ class DirectConnectionCoordinator(private val context: VpnService) {
         val dnsResult = dns.await()
         ProbeResult(
             dnsResult.success && https.any { it.ok },
-            "DNS=${if (dnsResult.success) "OK" else dnsResult.detail}; ${https.joinToString(" ") { it.detail }}",
+            "DNS=${if (dnsResult.success) "OK" else dnsResult.detail} " +
+                "dns_elapsed_ms=${dnsResult.latencyMs ?: "unknown"} dns_rcode=${dnsResult.rcode} " +
+                "dns_answers=${dnsResult.answerCount}; ${https.joinToString(" ") { it.detail }}",
         )
     }
 
     private fun probe(url: String, proxy: Proxy, timeoutMs: Int = PROBE_TIMEOUT_MS): ProbeResult {
         val target = URL(url)
         val started = android.os.SystemClock.elapsedRealtime()
+        var stage = "connect_or_response"
         return runCatching {
             val conn = target.openConnection(proxy) as HttpsURLConnection
             try {
@@ -198,6 +252,7 @@ class DirectConnectionCoordinator(private val context: VpnService) {
                 conn.useCaches = false
                 conn.setRequestProperty("Connection", "close")
                 val status = conn.responseCode
+                stage = "payload_read"
                 val payload = if (status in 200..299) conn.inputStream.use { it.read(ByteArray(256)) } else 0
                 val ms = android.os.SystemClock.elapsedRealtime() - started
                 ProbeResult(payload > 0, "${target.host}=$status/${payload.coerceAtLeast(0)}B/${ms}ms")
@@ -206,7 +261,12 @@ class DirectConnectionCoordinator(private val context: VpnService) {
             }
         }.getOrElse {
             val failure = it.cause?.message ?: it.message
-            ProbeResult(false, "${target.host}=${it.javaClass.simpleName} ${failure.orEmpty().lineSequence().firstOrNull().orEmpty().take(120)}")
+            val elapsed = SystemClock.elapsedRealtime() - started
+            ProbeResult(
+                false,
+                "${target.host}=${it.javaClass.simpleName} stage=$stage elapsed_ms=$elapsed " +
+                    failure.orEmpty().lineSequence().firstOrNull().orEmpty().take(120),
+            )
         }
     }
 
@@ -462,6 +522,8 @@ class DirectConnectionCoordinator(private val context: VpnService) {
 
     companion object {
         private const val PROBE_TIMEOUT_MS = 4_000
+        private const val DIAGNOSTIC_TIMEOUT_MS = 1_500
+        private const val PAYLOAD_DIAGNOSTIC_URL = "https://1.1.1.1/cdn-cgi/trace"
         private val PROBE_URLS = listOf(
             "https://m.youtube.com/robots.txt",
             "https://x.com/robots.txt",

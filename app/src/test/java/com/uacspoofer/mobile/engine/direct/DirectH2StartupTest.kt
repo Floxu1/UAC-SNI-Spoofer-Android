@@ -2,10 +2,31 @@ package com.uacspoofer.mobile.engine.direct
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Test
 
 class DirectH2StartupTest {
+    @Test
+    fun connectIpRejectTriesVerifiedProfileEvenWithoutFragmentation() = runBlocking {
+        val port = startDirectH2WithFallback(
+            allowRetry = false,
+            startPrimary = { error("masque: h2 connect-ip status 400") },
+            startWithoutFragments = { error("Unverified profile must not run") },
+            startRemembered = { 4321 },
+        )
+        assertEquals(4321, port)
+    }
+
+    @Test
+    fun savedGatewayIsLimitedToSupportedIpv4H2Peers() {
+        assertEquals("192.0.2.1:443", ipv4H2Peer("192.0.2.1:1701"))
+        assertEquals("192.0.2.1:443", ipv4H2Peer("192.0.2.1:443"))
+        assertNull(ipv4H2Peer("192.0.2.256:443"))
+        assertNull(ipv4H2Peer("192.0.2.1:2408"))
+        assertNull(ipv4H2Peer("[2001:db8::1]:443"))
+    }
+
     @Test
     fun aSuccessfulPrimaryKeepsItsOriginalRoute() = runBlocking {
         val port = startDirectH2WithFallback(

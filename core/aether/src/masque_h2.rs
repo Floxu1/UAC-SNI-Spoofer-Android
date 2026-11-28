@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use boring::pkey::PKey;
@@ -45,9 +45,29 @@ pub enum CarrierStartupStage {
 pub struct CarrierStartupTrace {
     stage: AtomicU8,
     http_status: AtomicU16,
+    h2_failure: Mutex<Option<(&'static str, Option<u32>)>>,
 }
 
 impl CarrierStartupTrace {
+    pub fn h2_failure(&self) -> Option<(&'static str, Option<u32>)> {
+        *self.h2_failure.lock().ok()?
+    }
+
+    fn record_h2_failure(&self, error: &h2::Error) {
+        let kind = if error.is_reset() {
+            "stream_reset"
+        } else if error.is_go_away() {
+            "goaway"
+        } else if error.is_io() {
+            "io"
+        } else {
+            "protocol"
+        };
+        if let Ok(mut failure) = self.h2_failure.lock() {
+            *failure = Some((kind, error.reason().map(u32::from)));
+        }
+    }
+
     pub fn advance(&self, stage: CarrierStartupStage) {
         // Both TLS variants can run at once. A later poll must never move the trace backwards.
         self.stage.fetch_max(stage as u8, Ordering::Relaxed);
@@ -901,17 +921,23 @@ pub(crate) async fn run_with_readiness(
     advance_startup(trace, CarrierStartupStage::MasqueConnectIp);
     let req = build_connect_request(&cfg)?;
 
-    let (resp_fut, mut send_stream) = h2
-        .send_request(req, false)
-        .map_err(|e| AetherError::Masque(format!("send_request: {e}")))?;
+    let (resp_fut, mut send_stream) = h2.send_request(req, false).map_err(|error| {
+        if let Some(trace) = trace {
+            trace.record_h2_failure(&error);
+        }
+        AetherError::Masque(format!("send_request: {error}"))
+    })?;
     log_or_debug(
         quiet,
         format!("[h2] connect-ip request sent to {}", cfg.authority),
     );
 
-    let response = resp_fut
-        .await
-        .map_err(|e| AetherError::Masque(format!("await response: {e}")))?;
+    let response = resp_fut.await.map_err(|error| {
+        if let Some(trace) = trace {
+            trace.record_h2_failure(&error);
+        }
+        AetherError::Masque(format!("await response: {error}"))
+    })?;
     let status = response.status();
     if let Some(trace) = trace {
         trace.http_status.store(status.as_u16(), Ordering::Relaxed);
