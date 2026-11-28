@@ -63,6 +63,7 @@ pub mod direct_support {
         load_or_provision_masque, load_or_provision_warp, masque_config_path, open_scan_carrier,
         remember_clean_h2, unique_scan_peers, warp_config_path, ForwarderGuard, INNER_MTU,
     };
+    pub use crate::config::load_verified_masque_read_only;
     pub use crate::ffi::{
         aether_is_ready as is_ready, aether_is_running as is_running, aether_last_error as last_error,
         aether_last_log as last_log, aether_stop as stop, mark_ready, record_log, run_session,

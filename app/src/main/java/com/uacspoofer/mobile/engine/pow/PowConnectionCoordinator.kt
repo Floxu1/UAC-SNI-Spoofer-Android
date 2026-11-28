@@ -24,6 +24,8 @@ import com.uacspoofer.mobile.settings.CONNECTION_MODE_PROXY
 import com.uacspoofer.mobile.settings.TunBackend
 import com.uacspoofer.mobile.vpn.TunStats
 import com.uacspoofer.mobile.vpn.VpnPauseStore
+import com.uacspoofer.mobile.vpn.NetworkFingerprintResolver
+import com.uacspoofer.mobile.engine.direct.DirectH2Profiles
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.CountDownLatch
@@ -55,6 +57,7 @@ class PowConnectionCoordinator(
     private val service: VpnService,
 ) {
     private val appContext = service.applicationContext
+    private val h2NetworkResolver by lazy { NetworkFingerprintResolver(appContext) }
     private var tunBackend = TunBackend.HEV
     private val store = PowEngineStore.get(appContext)
     private val lifecycle = Mutex()
@@ -934,6 +937,9 @@ class PowConnectionCoordinator(
             }
             val config = if (forcedPeer == null) baseConfig else JSONObject(baseConfig)
                 .put("forced_peer", forcedPeer).toString()
+            val h2Network = if (protocol == "masque" && plan.masqueTransport == "h2") {
+                runCatching { h2NetworkResolver.capture() }.getOrNull()?.takeIf { it.networkHandle >= 0 }
+            } else null
             val prepared = try {
                 Result.success(AetherNative.prepareCancellable(config))
             } catch (cancelled: CancellationException) {
@@ -972,6 +978,9 @@ class PowConnectionCoordinator(
             outerThread = thread
             thread.start()
             if (awaitOuterProxy(budget, chainPort)) {
+                if (h2Network != null) {
+                    DirectH2Profiles.rememberPow(appContext, h2Network, config, AetherNative.lastLog())
+                }
                 store.saveOuterProtocol(protocol)
                 lastOuterProtocol = protocol
                 wonTransport = if (protocol == "masque") plan.masqueTransport else ""

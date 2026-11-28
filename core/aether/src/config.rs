@@ -200,6 +200,18 @@ pub fn load(path: &str) -> Result<Option<Identity>> {
     }
 }
 
+#[cfg(feature = "direct-support")]
+pub fn load_verified_masque_read_only(path: &str) -> Result<Identity> {
+    let unusable = || AetherError::Other("Verified HTTP/2 identity is missing or invalid".into());
+    let text = std::fs::read_to_string(path).map_err(|_| unusable())?;
+    let persisted: PersistedIdentity = toml::from_str(&text).map_err(|_| unusable())?;
+    let identity = Identity::try_from(persisted).map_err(|_| unusable())?;
+    if !identity.has_masque_credentials() {
+        return Err(unusable());
+    }
+    Ok(identity)
+}
+
 fn write_private(path: &str, contents: &str) -> Result<()> {
     let target = Path::new(path);
     let directory = target.parent().filter(|p| !p.as_os_str().is_empty());
